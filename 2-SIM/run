@@ -1,0 +1,11 @@
+export tarmac on="anything"
+vcs -full64 -debug_acc+all -debug_region+cell+encrypt \
+-f asic.f            \
+-top mac16_tb \
++v2k                 \
++define+${BOOT_MODE} \
++nospecify           \
++notimingcheck           \
+-override_timescale=1ns/1ps \
+-sverilog -R +cli+3 | tee sim.log
+
