@@ -133,10 +133,10 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     val float = Option.when(p.enableFloat)(Valid(new FloatInstruction()))
 
     def isAluImm(): Bool = {
-        addi || slti || sltiu || xori || ori || andi || slli || srli || srai || rori || matadd
+        addi || slti || sltiu || xori || ori || andi || slli || srli || srai || rori 
     }
     def isAluReg(): Bool = {
-        add || sub || slt || sltu || xor || or || and || xnor || orn || andn || sll || srl || sra
+        add || sub || slt || sltu || xor || or || and || xnor || orn || andn || sll || srl || sra || matadd
     }
     def isAlu1Bit(): Bool = { clz || ctz || cpop || sextb || sexth || zexth || orcb || rev8 }
     def isAlu2Bit(): Bool = { min || minu || max || maxu || rol || ror }

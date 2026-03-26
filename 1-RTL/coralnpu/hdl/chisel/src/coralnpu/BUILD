@@ -21,8 +21,8 @@ load(
     "chisel_test",
 )
 load("@coralnpu_hw//rules:lint.bzl", "vcstatic_lint")
-load("@coralnpu_hw//rules:verilog.bzl", "verilog_zip_bundle")
 load("@coralnpu_hw//rules:utils.bzl", "template_rule")
+load("@coralnpu_hw//rules:verilog.bzl", "verilog_zip_bundle")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -201,6 +201,7 @@ chisel_test(
     size = "large",
     srcs = [
         "scalar/AluTest.scala",
+        "scalar/DispatchTest.scala",
         "scalar/MluTest.scala",
     ],
     args = [
@@ -526,7 +527,6 @@ chisel_cc_library(
     module_name = "CoreMini_ITCM512KB_DTCM512KBAxi",
     vopts = CORE_MINI_AXI_VOPTS,
 )
-
 
 CORE_MINI_AXI_BLACKBOX_DESIGNS = [
     "CKLNQD10BWP6T20P96CPDLVT",

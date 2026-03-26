@@ -175,23 +175,23 @@ class AluSpec extends AnyFreeSpec with ChiselSim {
   }
 
   private def testBinaryOp(
-      dut: Alu,
-      addr: UInt,
-      op: AluOp.Type,
-      // Long because Scala has no unsigned int.
-      cases: Seq[(Long, Long, Long)]) = {
-    dut.io.req.valid.poke(true)
-    dut.io.req.bits.addr.poke(addr)
-    dut.io.req.bits.op.poke(op)
-    val good = cases.map { case (rs1, rs2, exp_rd) =>
-      dut.io.rs1.valid.poke(true)
-      dut.io.rs1.data.poke(rs1)
-      dut.io.rs2.valid.poke(true)
-      dut.io.rs2.data.poke(rs2)
-      dut.clock.step()
-      (dut.io.rd.valid.peek().litValue == 1) && (dut.io.rd.bits.data.peek().litValue == exp_rd) && (dut.io.rd.bits.addr.peek().litValue == addr.litValue)
-    }
-    if (!ProcessTestResults(good, printfn = info(_))) fail()
+        dut: Alu,
+        addr: UInt,
+        op: AluOp.Type,
+        // Long because Scala has no unsigned int.
+        cases: Seq[(Long, Long, Long)]) = {
+        dut.io.req.valid.poke(true)
+        dut.io.req.bits.addr.poke(addr)
+        dut.io.req.bits.op.poke(op)
+        val good = cases.map { case (rs1, rs2, exp_rd) =>
+            dut.io.rs1.valid.poke(true)
+            dut.io.rs1.data.poke(rs1)
+            dut.io.rs2.valid.poke(true)
+            dut.io.rs2.data.poke(rs2)
+            dut.clock.step()
+            (dut.io.rd.valid.peek().litValue == 1) && (dut.io.rd.bits.data.peek().litValue == exp_rd) && (dut.io.rd.bits.addr.peek().litValue == addr.litValue)
+        }
+        if (!ProcessTestResults(good, printfn = info(_))) fail()
   }
 
   "XNOR(Not XOR)" in {
@@ -209,6 +209,16 @@ class AluSpec extends AnyFreeSpec with ChiselSim {
     simulate(new Alu(p))(testBinaryOp(_, 13.U, AluOp.XNOR, test_cases))
   }
 
+  "MATADD" in {
+    val test_cases = Seq(
+      (3L, 5L, 8L),
+      (0L, 0L, 0L),
+      (10L, 20L, 30L),
+      (0xffffffffL, 1L, 0L)
+    )
+    simulate(new Alu(p))(testBinaryOp(_, 13.U, AluOp.MATADD, test_cases))
+  }
+  
   "ORN(Not OR)" in {
     val test_cases = Seq(
       (0x00000000L, 0x00000000L, 0xFFFFFFFFL),
