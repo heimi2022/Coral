@@ -22,14 +22,20 @@ import chisel3.stage.ChiselGeneratorAnnotation
 import scala.annotation.nowarn
 
 object Alu {
+  // 这是一个便捷构造器。
+  // 别的模块可以直接写 Alu(p)，不用每次都写 Module(new Alu(p)).
   def apply(p: Parameters): Alu = {
     return Module(new Alu(p))
   }
 }
 
 object AluOp extends ChiselEnum {
+  // ALU 支持的操作类型。
+  // 可以把它理解成 Verilog 里的一个枚举 op 编码。
+  // Decode/Dispatch 阶段会把指令翻译成这里的某一个操作。
   // RV32IM
   val ADD  = Value
+  val MATADD = Value    // ADD MATADD
   val SUB  = Value
   val SLT  = Value
   val SLTU = Value
@@ -69,7 +75,7 @@ class Alu(p: Parameters) extends Module {
   val io = IO(new Bundle {
     // Decode cycle.
     val req = Flipped(Valid(new AluCmd))
-
+    // Execute 阶段从寄存器堆读出的两个源操作数
     // Execute cycle.
     val rs1 = Flipped(new RegfileReadDataIO)
     val rs2 = Flipped(new RegfileReadDataIO)
@@ -103,6 +109,7 @@ class Alu(p: Parameters) extends Module {
   val rsWidth  = 32
   val rsWidthH = 32/2
 
+  // 符号位拓展 ， 输出位宽为 length.W
   def SignExtend(x: UInt, length: Int): UInt = {
     val ext = Wire(SInt(length.W))
     ext := x.asSInt
@@ -119,6 +126,7 @@ class Alu(p: Parameters) extends Module {
 
   io.rd.bits.data  := MuxLookup(op, 0.U)(Seq(
     AluOp.ADD  -> (rs1 + rs2),
+    AluOp.MATADD -> (rs1 + rs2),    // add MATADD
     AluOp.SUB  -> (rs1 - rs2),
     AluOp.SLT  -> (r2IsGreater),
     AluOp.SLTU -> (r2IsGreaterU),
