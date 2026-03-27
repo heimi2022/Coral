@@ -14,15 +14,22 @@
 
 #include <stdint.h>
 
-uint32_t input1_buffer[8] __attribute__((section(".data")));
-uint32_t input2_buffer[8] __attribute__((section(".data")));
-uint32_t output_buffer[8] __attribute__((section(".data")));
+uint32_t input1_buffer[1] __attribute__((section(".data")));
+uint32_t input2_buffer[1] __attribute__((section(".data")));
+uint32_t output_buffer[1] __attribute__((section(".data")));
+
+static inline uint32_t matadd(uint32_t a, uint32_t b)
+{
+    uint32_t out;
+    asm volatile(
+        ".insn r 0x0b, 0x0, 0x2a, %0, %1, %2\n"
+        : "=r"(out)
+        : "r"(a), "r"(b));
+    return out;
+}
 
 int main(int argc, char **argv)
 {
-    for (int i = 0; i < 8; i++)
-    {
-        output_buffer[i] = input1_buffer[i] + input2_buffer[i];
-    }
+    output_buffer[0] = matadd(input1_buffer[0], input2_buffer[0]);
     return 0;
 }

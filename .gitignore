@@ -1,8 +1,5 @@
-/doc/
+/doc/*
+!/doc/coral.md
 /img/
 /example/
-/prj/
-/rtl_wallace/
-/ic_workbench/
 /verdiLog/
-
