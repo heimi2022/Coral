@@ -1,7 +1,0 @@
-#! /bin/sh
-log_date=$(date +%m%d)_$(date +%H%M)
-mkdir outputs/$log_date
-mkdir rpt/$log_date
-#/usr/eda/synopsys/syn_M-2016.12-SP2/bin/dc_shell-t -f ./scripts/core.tcl -x "set data ${log_date}" | tee ./log/run.log
-
-/usr/eda/synopsys/syn_Q-2019.12-SP4/bin/dc_shell-t -f ./scripts/core.tcl -x "set data ${log_date}" | tee ./log/run.log

@@ -149,6 +149,84 @@ bazel test --config=vcs //tests/cocotb/tutorial:vcs_tutorial_core_mini_axi_tutor
 bazel test --config=vcs //tests/cocotb/tutorial:vcs_tutorial_core_mini_axi_tutorial --test_output=all --sandbox_debug --cache_test_results=no
 ```
 
+## Chisel 生成 Verilog 的位置与拆分方式
+
+当前这个仓库里，Chisel 生成出来的 Verilog 默认不回写源码目录，而是放在 Bazel 输出目录：
+
+- `1-RTL/coralnpu/bazel-bin/...`
+
+需要注意，直接执行：
+
+```bash
+find bazel-bin/hdl/chisel/src -name '*.sv'
+```
+
+通常会看到很多结果，但其中大部分并不是“顶层 emit 出来的单独 RTL 文件”，而是：
+
+- `_scalac/...`
+  Scala/Chisel 构建过程中带出的资源文件、外部 Verilog 依赖
+- `runfiles/...`
+  测试或 Verilator 运行时依赖
+
+真正和自己当前顶层最相关的，通常是 Bazel 包目录顶层的输出文件。
+
+### 单文件输出
+
+以 `CoreMiniAxi` 为例：
+
+```bash
+bazel build //hdl/chisel/src/coralnpu:core_mini_axi_cc_library_emit_verilog
+```
+
+生成的合并版顶层文件在：
+
+- `bazel-bin/hdl/chisel/src/coralnpu/CoreMiniAxi.sv`
+
+这个文件会把当前顶层相关 module 合并在一个 `.sv` 里，适合直接喂给现有 Verilator / 下游流程。
+
+### 拆分版目录输出
+
+如果希望看到“一个 module 一个文件”的拆分版，可以执行：
+
+```bash
+bazel build //hdl/chisel/src/coralnpu:core_mini_axi_cc_library_split_verilog_dir
+```
+
+这条命令的作用不是跑测试，而是：
+
+1. 先生成 `CoreMiniAxi` 的 Verilog
+2. 再把 split-verilog 结果展开成一个目录产物
+
+输出目录在：
+
+- `bazel-bin/hdl/chisel/src/coralnpu/core_mini_axi_cc_library_split_verilog_dir/`
+
+里面会看到类似：
+
+- `Alu.sv`
+- `DispatchV2.sv`
+- `SCore.sv`
+- `CoreMini.sv`
+- `DBus2AxiV2.sv`
+
+也就是说，这个目录更适合阅读、定位模块、对比修改前后的 RTL。
+
+### 推荐查找方式
+
+如果只想看“真正的 emit 结果”，建议先排除 `_scalac` 和 `runfiles`：
+
+```bash
+find bazel-bin/hdl/chisel/src -name '*.sv' \
+  ! -path '*/_scalac/*' \
+  ! -path '*/runfiles/*'
+```
+
+如果只关心 `CoreMiniAxi` 的拆分版：
+
+```bash
+find bazel-bin/hdl/chisel/src/coralnpu/core_mini_axi_cc_library_split_verilog_dir -maxdepth 1 -name '*.sv'
+```
+
 ## 学习路线与最小任务
 
 如果是第一次系统接触这个仓库，最稳的路线不是直接做完整矩阵单元，而是先学会“给 CPU 加一条很小的新指令”，再考虑真正的矩阵扩展。因为一个完整矩阵扩展通常会同时涉及：
@@ -331,24 +409,6 @@ x[rd] = (x[rs1] + x[rs2]) mod 2^32
    - 新增 `DispatchV2` 测试
    - 直接验证 `matadd` 机器码是否被送到 `ALU`
 
-### 这次实验踩到的关键坑
-
-最关键的一次真实 bug 不是 ALU 逻辑，而是 decode 分类写错了。
-
-一开始误把 `matadd` 放进了 `isAluImm()`，没有放进 `isAluReg()`。这样会导致：
-
-- 指令虽然能被 decode 到
-- dispatch 也能把它送到 ALU
-- 但 decode 会把它当成“立即数 ALU 指令”
-- 结果 `rs2` 不会按寄存器源操作数读取
-
-最后修正方式是：
-
-- 从 `isAluImm()` 中去掉 `matadd`
-- 放进 `isAluReg()`
-
-这也是为什么后来 `DispatchTest` 一开始会看到 `rs2Read_valid == 0`。
-
 ### RTL 单元级验证
 
 先跑标量单元测试：
@@ -391,6 +451,92 @@ static inline uint32_t matadd(uint32_t a, uint32_t b) {
 - `0x0` 对应 `funct3`
 - `0x2a` 对应 `funct7`
 
+#### 补充理解：`.insn` 到底是什么
+
+`.insn` 是 GNU 汇编器提供的一个伪指令，用来“手工描述并生成一条机器指令”。
+
+它适合当前这种场景：
+
+- 硬件里已经实现了自定义指令
+- 但 GCC / binutils 还没有正式支持 `matadd` 这个助记符
+- 这时可以先不改编译器，直接告诉汇编器按指定格式把机器码拼出来
+
+这一句：
+
+```cpp
+.insn r 0x0b, 0x0, 0x2a, %0, %1, %2
+```
+
+含义是：
+
+- `r`
+  按 R-type 指令格式编码
+- `0x0b`
+  `opcode = custom-0`
+- `0x0`
+  `funct3`
+- `0x2a`
+  `funct7`
+- `%0`
+  放到 `rd`
+- `%1`
+  放到 `rs1`
+- `%2`
+  放到 `rs2`
+
+也就是按下面这个 R-type 位布局去组一条指令：
+
+```text
+ 31          25 24    20 19    15 14   12 11     7 6       0
++--------------+--------+--------+-------+---------+---------+
+|   funct7     |  rs2   |  rs1   |funct3 |   rd    | opcode  |
+|   0101010    |   %2   |   %1   | 000   |   %0    | 0001011 |
++--------------+--------+--------+-------+---------+---------+
+```
+
+#### 补充理解：`%0 / %1 / %2` 为什么正好对应 `rd / rs1 / rs2`
+
+GCC inline asm 的写法是：
+
+```cpp
+asm volatile("..."
+    : 输出操作数
+    : 输入操作数
+    : clobber);
+```
+
+在这段代码里：
+
+```cpp
+asm volatile(
+    ".insn r 0x0b, 0x0, 0x2a, %0, %1, %2\n"
+    : "=r"(out)
+    : "r"(a), "r"(b));
+```
+
+操作数编号规则是“先输出，再输入”，所以：
+
+- `%0` = 第 1 个输出操作数 = `out`
+- `%1` = 第 1 个输入操作数 = `a`
+- `%2` = 第 2 个输入操作数 = `b`
+
+而约束字符串：
+
+- `"=r"(out)`
+  表示给 `out` 分配一个通用寄存器，并作为写输出
+- `"r"(a)`
+  表示给 `a` 分配一个通用寄存器
+- `"r"(b)`
+  表示给 `b` 分配一个通用寄存器
+
+所以编译器实际做的事情就是：
+
+- 给 `out` 分一个寄存器，作为 `rd`
+- 给 `a` 分一个寄存器，作为 `rs1`
+- 给 `b` 分一个寄存器，作为 `rs2`
+
+换句话说，这段代码不是固定写死 `x3/x1/x2`，而是让编译器自由分配寄存器，再由 `.insn` 按 `rd/rs1/rs2` 的位置把它们编码进 `matadd` 指令。
+
 先编译程序：
 
 ```bash
@@ -399,14 +545,91 @@ bazel build //tests/cocotb/tutorial:coralnpu_v2_program
 
 编译成功后会生成：
 
-- `bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.elf`
-- `bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.bin`
-- `bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.vmem`
+- `coralnpu_v2_program.elf`
+- `coralnpu_v2_program.bin`
+- `coralnpu_v2_program.vmem`
+
+需要注意：`coralnpu_v2_binary` 这条规则内部用了 Bazel 的平台切换，所以这三个产物 **不一定直接显示在** `bazel-bin/tests/cocotb/tutorial/` 下面。
+
+在当前仓库里，实际更常见的两个位置是：
+
+- `bazel-out/k8-fastbuild-ST-*/bin/tests/cocotb/tutorial/`
+- 某个测试 runner 的 runfiles 目录，例如：
+  - `bazel-bin/tests/cocotb/tutorial/tutorial_cocotb_runner.sh.runfiles/coralnpu_hw/tests/cocotb/tutorial/`
+  - `bazel-bin/tests/cocotb/tutorial/vcs_tutorial_core_mini_axi_tutorial_cocotb_runner.sh.runfiles/coralnpu_hw/tests/cocotb/tutorial/`
+
+如果想稳妥定位，推荐直接查：
+
+```bash
+find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.elf'
+find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.bin'
+find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.vmem'
+```
 
 这一步说明：
 
 - `program.cc` 能被 CoralNPU 专用 toolchain 编译
 - `.insn` 写法被当前工具链接受
+
+#### 常用查看命令：反汇编与符号表
+
+如果想看 ELF 里的汇编，可用：
+
+```bash
+/opt/riscv/bin/riscv64-unknown-elf-objdump -dS bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.elf | less
+```
+
+这里：
+
+- `-d`
+  反汇编
+- `-S`
+  把源码行和汇编穿插显示
+
+如果只想看 `main` 附近：
+
+```bash
+/opt/riscv/bin/riscv64-unknown-elf-objdump -dS bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.elf | sed -n '/<main>:/,+12p'
+```
+
+这时通常能看到：
+
+- `lw` 从 `input1_buffer/input2_buffer` 读数据
+- 一条显示为 `.insn ...` 的未知指令
+- 这条未知指令实际上就是自定义的 `matadd`
+
+例如这次看到的是：
+
+```text
+154:   54d7070b                .insn   4, 0x54d7070b
+```
+
+如果想看符号表，可用：
+
+```bash
+/opt/riscv/bin/riscv64-unknown-elf-nm -n bazel-bin/tests/cocotb/tutorial/coralnpu_v2_program.elf
+```
+
+符号表最重要的作用是确认：
+
+- `main` 在什么地址
+- `input1_buffer`
+- `input2_buffer`
+- `output_buffer`
+
+例如这次的结果里：
+
+```text
+00000144 T main
+00010000 D input1_buffer
+00010004 D input2_buffer
+00010008 D output_buffer
+```
+
+这能直接帮助理解：
+
+- `main` 的入口位置
+- 三个全局 buffer 在 `.data` 段里的实际地址布局
 
 ### cocotb 验证
 
@@ -532,3 +755,594 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
    - 输入放哪
    - 是否需要多周期执行
    - 是否需要独立状态/寄存器/accumulator
+
+## 在 Coral 中实现矩阵扩展的计划表
+
+当前最适合的思路不是一开始就改 RVV 大核，也不是先并编译器，而是先在 Coral 标量前端里增加一套独立的 `matrix extension` 通路，再逐步向玄铁矩阵扩展靠拢。
+
+### 实施原则
+
+- 先做 `subset`，不要第一版就追完整 Xuantie matrix spec
+- 先做 RTL + CSR + 最小指令闭环，再考虑 toolchain / intrinsic
+- 不修改 generated RVV 大文件，优先改 Chisel 源码
+- 不把矩阵操作长期塞在普通 `ALU` 里，要单独建 `MatrixUnit`
+
+### 第一版目标
+
+第一版建议只做一个可运行、可验证、可扩展的最小子集：
+
+- 数据类型先固定为 `int32`
+- 固定参数：
+  - `ELEN = 32`
+  - `TLEN = 512`
+  - `TRLEN = 128`
+- 先实现 matrix CSR：
+  - `xmcsr`
+  - `mtilem`
+  - `mtilen`
+  - `mtilek`
+  - `xmisa`
+  - `xtlenb`
+  - `xtrlenb`
+  - `xalenb`
+- 先实现 matrix 指令子集：
+  - `msettilem`
+  - `msettilen`
+  - `msettilek`
+  - `mld`
+  - `mst`
+  - `mmacc`
+- `matadd` 先从“普通 ALU 占位操作”逐步迁到独立 matrix 通路
+
+### 现有可复用入口
+
+当前 Coral 已经有几个很好的挂点：
+
+- 参数开关入口：
+  - `hdl/chisel/src/coralnpu/Parameters.scala`
+- CSR 解码与状态保存：
+  - `hdl/chisel/src/coralnpu/scalar/Csr.scala`
+- 自定义指令 decode：
+  - `hdl/chisel/src/coralnpu/scalar/Decode.scala`
+- 当前 `matadd` 占位实现：
+  - `hdl/chisel/src/coralnpu/scalar/Alu.scala`
+- 标量核心拼装：
+  - `hdl/chisel/src/coralnpu/scalar/SCore.scala`
+- 顶层拼装：
+  - `hdl/chisel/src/coralnpu/Core.scala`
+
+所以路线应该是：
+
+- 先加 `enableMatrix`
+- 再加 matrix CSR
+- 再加 `MatrixUnit`
+- 再把 `matadd` 和后续 matrix 指令接进去
+
+### 分阶段计划
+
+#### P0：冻结第一版规范
+
+目标：
+
+- 定义 Coral matrix v1 的最小兼容范围
+- 明确第一版只做 Xuantie matrix `subset`
+
+需要输出：
+
+- 一份设计文档，建议新增 `doc/matrix_plan.md`
+
+文档至少写清：
+
+- CSR 列表
+- 指令列表
+- tile / acc 寄存器模型
+- 异常策略
+- 第一版不支持的内容
+
+#### P1：增加 matrix 参数开关
+
+目标：
+
+- 在参数系统里正式引入 matrix extension
+
+建议修改：
+
+- `hdl/chisel/src/coralnpu/Parameters.scala`
+
+建议增加：
+
+- `enableMatrix`
+- `matrixElen`
+- `matrixTlen`
+- `matrixTrlen`
+- `matrixTileRegCount`
+- `matrixAccRegCount`
+
+建议默认值：
+
+- `enableMatrix = false`
+- `matrixElen = 32`
+- `matrixTlen = 512`
+- `matrixTrlen = 128`
+- `matrixTileRegCount = 4`
+- `matrixAccRegCount = 4`
+
+验收标准：
+
+- 代码可 elaboration
+- 顶层可以通过参数打开或关闭 matrix
+
+#### P2：增加 matrix CSR 配置面
+
+目标：
+
+- 让软件可以读写 matrix 配置状态
+
+建议修改：
+
+- `hdl/chisel/src/coralnpu/scalar/Csr.scala`
+
+建议做法：
+
+- 新增 Xuantie 风格 matrix CSR 地址和状态寄存器
+- 第一版允许 CSR 直接读写 `mtilem / mtilen / mtilek`
+- `KISA` 中加入 matrix capability bit
+
+建议第一版 CSR：
+
+- `xmcsr`
+- `mtilem`
+- `mtilen`
+- `mtilek`
+- `xmisa`
+- `xtlenb`
+- `xtrlenb`
+- `xalenb`
+
+验收标准：
+
+- 软件可通过 `csrr/csrw` 正常访问 matrix CSR
+- 仿真中可以观察到 CSR 状态变化
+
+#### P3：建立独立 matrix 接口
+
+目标：
+
+- 不再把 matrix 扩展长期混在 `ALU` 语义里
+
+建议新增目录：
+
+- `hdl/chisel/src/coralnpu/matrix/`
+
+建议新增文件：
+
+- `MatrixInterface.scala`
+
+第一版建议定义：
+
+- `MatrixConfigState`
+- `MatrixCmd`
+- `TileRegWriteDataIO`
+- `AccRegWriteDataIO`
+- `MatrixFaultInfo`
+
+验收标准：
+
+- matrix 通路的接口独立成型
+- 不依赖 RVV 内部实现细节
+
+#### P4：扩展 Decode
+
+目标：
+
+- 在 decode 中正式识别 matrix 指令
+
+建议修改：
+
+- `hdl/chisel/src/coralnpu/scalar/Decode.scala`
+
+建议增加：
+
+- `isMatrix()`
+- `writesMatrixReg()`
+- `readsMatrixReg()`
+- `isMatrixLoadStore()`
+
+并新增第一版指令识别：
+
+- `msettilem`
+- `msettilen`
+- `msettilek`
+- `mld`
+- `mst`
+- `mmacc`
+
+当前已有：
+
+- `matadd`
+
+建议：
+
+- 把 `matadd` 作为 matrix 通路的过渡入口
+
+验收标准：
+
+- matrix 指令不落到 `undef`
+- dispatch 能把 matrix 指令分到独立端口
+
+#### P5：建立 MatrixUnit 空壳
+
+目标：
+
+- 先把 matrix 执行通路搭起来
+
+建议新增：
+
+- `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
+
+第一版空壳功能：
+
+- 接收 `MatrixCmd`
+- 接收 `MatrixConfigState`
+- 输出 `ready / valid / busy / trap`
+- 先不做复杂计算
+
+验收标准：
+
+- `SCore` 能实例化 `MatrixUnit`
+- matrix 指令可进入该单元
+
+#### P6：在 SCore / Core 中接线
+
+目标：
+
+- 把 matrix unit 真的接入 Coral
+
+建议修改：
+
+- `hdl/chisel/src/coralnpu/scalar/SCore.scala`
+- `hdl/chisel/src/coralnpu/Core.scala`
+
+需要完成：
+
+- dispatch 到 matrix unit 的连接
+- 标量寄存器读操作数连接
+- matrix fault 接入 fault manager
+- 结果回写路径接入 retirement / regfile
+
+验收标准：
+
+- 顶层可综合 elaboration
+- 波形中能看到 matrix 指令通过独立通路传播
+
+#### P7：实现 tile / accumulator 寄存器文件
+
+目标：
+
+- 建立真正的矩阵状态存储
+
+建议新增：
+
+- `MatrixRegfile.scala`
+
+第一版建议：
+
+- `4` 个 tile 寄存器
+- `4` 个 accumulator 寄存器
+
+验收标准：
+
+- CSR 与指令可以正确影响 tile shape
+- tile / acc 数据可被读写
+
+#### P8：实现 matrix load/store
+
+目标：
+
+- 支持矩阵数据在 DTCM 和 tile reg 之间搬运
+
+建议新增：
+
+- `MatrixLoadStore.scala`
+
+建议策略：
+
+- 第一版尽量复用现有 LSU / DTCM 通路
+- 不一开始新做一套复杂总线协议
+
+第一版支持：
+
+- `mld`
+- `mst`
+
+验收标准：
+
+- 可把 DTCM 数据装载进 tile reg
+- 可把 tile reg 数据写回 DTCM
+
+#### P9：实现最小计算 datapath
+
+目标：
+
+- 完成第一版真正有意义的矩阵算子
+
+建议新增：
+
+- `MatrixMac.scala`
+
+第一版功能建议只做：
+
+- `int32 mmacc`
+
+验收标准：
+
+- 能完成最小矩阵乘加
+- 和软件 golden model 对比一致
+
+#### P10：异常与状态管理
+
+目标：
+
+- 定义 matrix extension 的 fault 行为
+
+建议处理：
+
+- 非法 tile shape
+- CSR 配置非法
+- busy 冲突
+- 未初始化 tile 访问
+- 非法 matrix opcode
+
+建议修改：
+
+- `matrix/*`
+- `scalar/FaultManager.scala`
+
+验收标准：
+
+- 非法使用时 fault 行为稳定且可重复
+
+#### P11：软件 bring-up
+
+目标：
+
+- 先不依赖完整编译器，先把软件闭环跑起来
+
+第一版建议：
+
+- 继续使用 `.insn`
+- 手写 matrix 汇编
+- 先生成 `elf/bin/vmem`
+
+建议测试内容：
+
+- CSR 读写程序
+- `msettile*` 程序
+- `mld/mst` 程序
+- `mmacc` 程序
+
+验收标准：
+
+- 能从 bare-metal 程序驱动 matrix CSR 和 matrix 指令
+
+#### P12：工具链接入
+
+目标：
+
+- 在 RTL 跑通后，再考虑玄铁工具链能力
+
+建议顺序：
+
+1. 先接 `binutils/opcodes/objdump`
+2. 再考虑 intrinsic
+3. 最后考虑 GCC backend
+
+注意：
+
+- 建议“并入流程”，不要直接把整套 GCC 源码塞进 Coral 仓库
+- 更适合把玄铁工具链作为外部工具链使用
+
+验收标准：
+
+- 汇编器能识别 matrix 指令
+- `objdump` 能正确反汇编
+
+#### P13：RTL 导出与综合
+
+目标：
+
+- 把 matrix 版本纳入现有 RTL 导出与综合流
+
+需要完成：
+
+- 增加带 matrix 开关的 emit 目标
+- 增加 matrix 版本 Verilog 导出
+- 更新综合脚本
+
+验收标准：
+
+- 能导出带 matrix 的 RTL
+- 能进入综合流程
+
+### 建议实施顺序
+
+最适合现在马上开始的顺序是：
+
+1. 写 `matrix_plan.md`，冻结第一版范围
+2. 修改 `Parameters.scala`
+3. 修改 `Csr.scala`
+4. 新建 `matrix/MatrixInterface.scala`
+5. 修改 `Decode.scala`
+6. 新建 `matrix/MatrixUnit.scala`
+7. 修改 `SCore.scala`
+8. 修改 `Core.scala`
+9. 写最小 CSR / decode / dispatch 测试
+
+### 第一周目标
+
+第一周建议只追求这几个结果：
+
+- `enableMatrix` 参数加入系统
+- matrix CSR 能读写
+- matrix 指令能 decode
+- `MatrixUnit` 空壳能接入顶层
+- 仿真中能看到 matrix 指令进入独立通路
+
+不要第一周就追：
+
+- 完整 tile load/store
+- 完整 `mmacc`
+- GCC backend
+
+### 第二周目标
+
+- tile / acc regfile
+- `msettilem/n/k`
+- `mld / mst`
+- 最小 `mmacc`
+
+### 不建议的路线
+
+- 不建议第一步直接改 generated RVV `.sv`
+- 不建议第一步就并入完整玄铁 GCC
+- 不建议长期把 matrix 逻辑继续塞在 `Alu.scala`
+- 不建议第一版就追 full Xuantie ISA
+
+### 里程碑
+
+- `M1`：CSR 与 decode 打通
+- `M2`：MatrixUnit 空壳接入完成
+- `M3`：tile load/store 跑通
+- `M4`：`mmacc` 计算正确
+- `M5`：bare-metal 程序可驱动
+- `M6`：RTL 可导出并可综合
+
+### 玄铁工具什么时候用
+
+玄铁矩阵扩展仓库里，当前最常见会接触到的三类工具/组件是：
+
+- `spec/`
+  规范文档
+- `qemu/`
+  模拟器 / 参考行为模型
+- `xuantie-gnu-toolchain/riscv-binutils-gdb`
+  汇编器、链接器、反汇编器、调试器
+- `xuantie-gnu-toolchain/riscv-gcc`
+  C/C++ 编译器
+
+建议不要一开始就把这些都拉进 Coral 主开发路径，而是按阶段使用。
+
+#### 当前阶段：只需要规范，不急着用工具链
+
+如果当前目标是：
+
+- 设计 Coral matrix extension 架构
+- 增加 CSR
+- 增加 decode
+- 增加 `MatrixUnit`
+- 先跑通最小 RTL 闭环
+
+那么只需要重点看：
+
+- `spec/csr.adoc`
+- `spec/program_model.adoc`
+- `spec/tilereg.adoc`
+
+这个阶段可以暂时不用：
+
+- `riscv-gcc`
+- `riscv-binutils-gdb`
+- `qemu`
+
+也就是说，当前阶段主目标是“先把硬件接口和行为定下来”。
+
+#### RTL 初步跑通后：开始用 qemu
+
+当以下内容已经基本确定后：
+
+- matrix CSR 已定义
+- matrix 指令编码已冻结第一版
+- tile / acc 模型已确定
+
+这时开始看 `qemu/` 最有价值。
+
+用途：
+
+- 跑 matrix 程序
+- 作为参考模型
+- 对比 Coral 仿真结果
+- 帮助检查指令和 CSR 行为是否合理
+
+注意：
+
+- `qemu` 不是用来替代 RTL 仿真的
+- 它更像软件侧参考模型
+
+#### 需要写助记符汇编时：开始用 binutils
+
+当你不想一直用 `.insn`，而希望：
+
+- 写 matrix 指令助记符
+- 正确反汇编 ELF
+- 检查编码和反汇编结果
+
+这时开始看：
+
+- `xuantie-gnu-toolchain/riscv-binutils-gdb`
+
+这个阶段最有用的是：
+
+- `as`
+- `objdump`
+- `ld`
+
+也就是说，`binutils` 是在“软件可用性提升阶段”开始变得重要，而不是第一周必须接入。
+
+#### 需要 intrinsic / C 编译支持时：再看 gcc
+
+只有当下面这些都基本稳定后：
+
+- matrix ISA 子集已经确定
+- CSR 命名和行为不再频繁变化
+- load/store / mmacc 已经跑通
+- 你准备让 C 代码直接调用 matrix 能力
+
+这时才应该开始看：
+
+- `xuantie-gnu-toolchain/riscv-gcc`
+
+主要目标：
+
+- intrinsic
+- builtin
+- 编译器生成 matrix 指令
+
+这个阶段成本最高，不建议提前做。
+
+#### 当前结论
+
+对当前 Coral matrix extension 项目，建议优先级是：
+
+1. 先看 `spec/`
+2. 先做 Coral RTL 和 CSR
+3. 再看 `qemu`
+4. 再看 `binutils`
+5. 最后才看 `gcc`
+
+一句话说：
+
+- 规范现在就用
+- `qemu` 在 RTL 第一版成型后用
+- `binutils` 在想摆脱 `.insn` 时用
+- `gcc` 在想支持 intrinsic / 自动编译时再用
+
+### 外部参考
+
+- Xuantie matrix CSR:
+  - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/csr.adoc`
+- Xuantie programmer model:
+  - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/program_model.adoc`
+- Xuantie tile / accumulator model:
+  - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/tilereg.adoc`
+
+
