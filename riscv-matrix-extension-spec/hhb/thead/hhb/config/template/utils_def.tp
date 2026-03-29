@@ -1,0 +1,13 @@
+static void print_tensor_info(struct csinn_tensor *t) {
+    printf("\n=== tensor info ===\n");
+    printf("shape: ");
+    for (int j = 0; j < t->dim_count; j++) {
+        printf("%d ", t->dim[j]);
+    }
+    printf("\n");
+    if (t->dtype == CSINN_DTYPE_UINT8) {
+        printf("scale: %f\n", t->qinfo->scale);
+        printf("zero point: %d\n", t->qinfo->zero_point);
+    }
+    printf("data pointer: %p\n", t->data);
+}

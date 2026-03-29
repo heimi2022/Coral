@@ -1,0 +1,27 @@
+#_preprocess_define_#
+/*
+ * Preprocess function
+ */
+void preprocess(struct image_data *img, int is_rgb, int to_bgr)
+{
+    uint32_t new_height, new_width;
+    uint32_t min_side;
+    if (is_rgb) {
+        im2rgb(img);
+    }
+    if (RESIZE_WIDTH == 0) {
+        min_side = MIN(img->shape[0], img->shape[1]);
+        new_height = (uint32_t) (img->shape[0] * (((float)RESIZE_HEIGHT) / (float)min_side));
+        new_width = (uint32_t) (img->shape[1] * (((float)RESIZE_HEIGHT) / (float)min_side));
+        imresize(img, new_height, new_width);
+    } else {
+        imresize(img, RESIZE_HEIGHT, RESIZE_WIDTH);
+    }
+    data_crop(img, CROP_HEGHT, CROP_WIDTH);
+    sub_mean(img, R_MEAN, G_MEAN, B_MEAN);
+    data_scale(img, SCALE);
+    if(to_bgr) {
+        imrgb2bgr(img);
+    }
+    imhwc2chw(img);
+}

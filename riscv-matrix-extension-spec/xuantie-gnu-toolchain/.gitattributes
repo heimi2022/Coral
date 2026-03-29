@@ -1,0 +1,11 @@
+.gitmodules merge=ours
+linux-headers merge=ours
+
+riscv-binutils merge=ours
+riscv-dejagnu merge=ours
+riscv-gcc merge=ours
+riscv-gdb merge=ours
+riscv-glibc merge=ours
+riscv-newlib merge=ours
+riscv-qemu merge=ours
+

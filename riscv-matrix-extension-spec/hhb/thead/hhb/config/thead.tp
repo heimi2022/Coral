@@ -1,0 +1,115 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+
+/* auto generate by HHB_VERSION "2.1.x" */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdint.h>
+#include "io.h"
+
+void *csinn_(#_thead_csinn_args# char *params);
+
+#_hhb_global_var_decl_#
+
+void show_top5(float *buf, uint32_t size) {
+    uint32_t i, j, k;
+    uint32_t cls[5];
+    float prob[5];
+    memset(prob, 0xfe, sizeof(float) * 5);
+    memset(cls, 0xff, sizeof(float) * 5);
+
+    for (j = 0; j < 5; j++) {
+        for (i = 0; i < size; i++) {
+            for (k = 0; k < 5; k ++) {
+                if (i == cls[k]) {
+                    break;
+                }
+            }
+
+            if (k != 5) {
+                continue;
+            }
+
+            if (buf[i] > prob[j]) {
+                prob[j] = buf[i];
+                cls[j] = i;
+            }
+        }
+    }
+    printf(" --- Top5 ---\n");
+    for (int i = 0; i < 5; i++) {
+        printf("%3d: %8.6f\n", cls[i], prob[i]);
+    }
+}
+
+int main(int argc, char **argv) {
+    char **data_path = NULL;
+    char *params_path = NULL;
+    int input_num = #_input_num#;
+    int output_num = #_output_num#;
+    int input_group_num = 1;
+    int i;
+
+    if (argc < (2 + input_num)) {
+        printf("Please set valide args: ./model.elf model.params "
+                "[tensor1/image1 ...] [tensor2/image2 ...]\n");
+        return -1;
+    } else {
+        if (argc == 3 && get_file_type(argv[2]) == FILE_TXT) {
+            data_path = read_string_from_file(argv[2], &input_group_num);
+            input_group_num /= input_num;
+        } else {
+            data_path = argv + 2;
+            input_group_num = (argc - 2) / input_num;
+        }
+    }
+
+    params_path = argv[1];
+    char *params = get_binary_from_file(params_path, NULL);
+    if (params == NULL) {
+        return -1;
+    }
+
+    float *input[input_num];
+    float *output[output_num];
+    for (i = 0; i < input_group_num; i++) {
+        for (int j = 0; j < input_num; j++) {
+            input[j] = (float*)get_binary_from_file(data_path[i * input_num + j], NULL);
+        }
+
+        for (int j = 0; j < output_num; j++) {
+            output[j] = malloc(output_size[j] * 4);
+        }
+
+        csinn_(#_thead_value_pass# params);
+
+        for (int j = 0; j < output_num; j++) {
+            show_top5(output[j], output_size[j]);
+            free(output[j]);
+        }
+        for (int j = 0; j < input_num; j++) {
+            free(input[j]);
+        }
+    }
+
+    return 0;
+}
+

@@ -1,0 +1,11 @@
+#
+# XXX: Need review
+#
+FAIL: gcc.dg/tree-ssa/pr84512.c
+XPASS: gcc.dg/tree-ssa/ssa-fre-3.c
+
+#
+# T-HEAD: Need review
+#
+FAIL: g++.dg/tls/thread_local4.C
+FAIL: g++.dg/tls/thread_local4g.C

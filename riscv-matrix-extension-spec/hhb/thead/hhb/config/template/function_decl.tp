@@ -1,0 +1,2 @@
+void *csinn_(char *params);
+void csinn_run(#_csinn_args# void *td);

@@ -1,0 +1,39 @@
+#
+# fp16
+#
+# Do not support TI
+FAIL: gcc.dg/torture/floatn-convert.c
+FAIL: gcc.dg/torture/fp-int-convert-float16-timode.c
+#
+# vector
+#
+# XXX: Need review, old version exist.
+FAIL: gcc.dg/tree-ssa/gen-vect-11.c
+FAIL: gcc.dg/tree-ssa/gen-vect-32.c
+# Backend do not support.
+FAIL: gcc.c-torture/compile/pr94488.c
+# Add much more tree nodes.
+FAIL: gcc.dg/torture/pr39074-2.c
+FAIL: gcc.dg/torture/pr39074.c
+FAIL: gcc.dg/torture/pta-structcopy-1.c
+# Support vector
+XPASS: gcc.dg/tree-ssa/ssa-dom-cse-2.c
+# Improve: make more inline by default same as T-Head toolchain v1
+FAIL: c-c++-common/torture/asm-inline.c
+# Improve: inhibit to generate builtins as memset/memcpy
+FAIL: gcc.dg/ipa/iinline-attr.c
+FAIL: gcc.dg/pr53265.c
+
+# XXX: Need review.
+FAIL: g++.dg/opt/call3.C
+FAIL: gcc.dg/tree-ssa/copy-headers-5.c
+FAIL: gcc.dg/tree-ssa/copy-headers-6.c
+FAIL: gcc.dg/tree-ssa/copy-headers-7.c
+FAIL: gcc.dg/tree-ssa/20030711-1.c
+FAIL: gcc.dg/vshift-2.c
+FAIL: gcc.dg/strlenopt-73.c
+FAIL: gcc.dg/lto/20091013-1
+FAIL: gcc.dg/autopar/reduc-1char.c
+FAIL: gcc.dg/autopar/reduc-7.c
+FAIL: gfortran.dg/mvbits_1.f90
+

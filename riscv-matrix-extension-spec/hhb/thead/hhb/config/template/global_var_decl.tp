@@ -1,0 +1,2 @@
+int input_size[] = {#_input_size_define#};
+const char model_name[] = "#_model_name_define#";

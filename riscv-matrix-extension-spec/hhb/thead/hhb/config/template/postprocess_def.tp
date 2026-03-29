@@ -1,0 +1,28 @@
+/*
+ * Postprocess function
+ */
+static void postprocess(void *sess, const char *filename_prefix) {
+    int output_num, input_num;
+    struct csinn_tensor *input = csinn_alloc_tensor(NULL);
+    struct csinn_tensor *output = csinn_alloc_tensor(NULL);
+
+    input_num = csinn_get_input_number(sess);
+    for (int i = 0; i < input_num; i++) {
+        input->data = NULL;
+        csinn_get_input(i, input, sess);
+        print_tensor_info(input);
+        #_free_anole_input_data_#
+    }
+
+    output_num = csinn_get_output_number(sess);
+    for (int i = 0; i < output_num; i++) {
+        output->data = NULL;
+        csinn_get_output(i, output, sess);
+        print_tensor_info(output);
+
+        #_convert_fouput_#
+        #_show_top5_stats_#
+        #_save_output_stats_#
+        #_free_output_data_#
+    }
+}

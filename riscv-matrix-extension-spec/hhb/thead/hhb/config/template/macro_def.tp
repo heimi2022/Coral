@@ -1,0 +1,3 @@
+#define MIN(x, y)           ((x) < (y) ? (x) : (y))
+#define FILE_LENGTH         1028
+#define SHAPE_LENGHT        128
