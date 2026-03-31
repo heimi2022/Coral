@@ -4,7 +4,11 @@
 /example/
 /verdiLog/
 .metals/
-
+/riscv-matrix-extension-spec/*
+!/riscv-matrix-extension-spec/spec/
+!/riscv-matrix-extension-spec/spec/**
+!/riscv-matrix-extension-spec/doc/
+!/riscv-matrix-extension-spec/doc/**
 
 
 
