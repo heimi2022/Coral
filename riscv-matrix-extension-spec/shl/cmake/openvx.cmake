@@ -1,1 +1,0 @@
-set(CONFIG_USE_SHL_DEBUG ON)
