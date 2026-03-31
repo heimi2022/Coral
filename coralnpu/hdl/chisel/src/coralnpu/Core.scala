@@ -85,138 +85,138 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
 }
 
 object EmitCore extends App {
-  val p = new Parameters
-  var moduleName = "Core"
-  var chiselArgs = List[String]()
-  var targetDir: Option[String] = None
-  var useAxi = false
-  var useTlul = false
-  for (arg <- args) {
-    if (arg.startsWith("--enableFetchL0")) {
-      p.enableFetchL0 = arg.split("=")(1).toBoolean
-    } else if (arg.startsWith("--moduleName")) {
-      moduleName = arg.split("=")(1)
-    } else if (arg.startsWith("--fetchDataBits")) {
-      p.fetchDataBits = arg.split("=")(1).toInt
-    } else if (arg.startsWith("--enableRvv")) {
-      p.enableRvv = arg.split("=")(1).toBoolean
-    } else if (arg.startsWith("--enableFloat")) {
-      p.enableFloat = arg.split("=")(1).toBoolean
-    } else if (arg.startsWith("--enableVerification")) {
-      p.enableVerification = arg.split("=")(1).toBoolean
-    } else if (arg.startsWith("--lsuDataBits")) {
-      p.lsuDataBits = arg.split("=")(1).toInt
-    // itcmSizeKBytes, and dtcmSizeKBytes replace highmem flag
-    // if highmem is needed, set both tcm sizes to 1024
-    } else if (arg.startsWith("--itcmSizeKBytes")) {
-      p.itcmSizeKBytes = arg.split("=")(1).toInt
-    } else if (arg.startsWith("--dtcmSizeKBytes")) {
-      p.dtcmSizeKBytes = arg.split("=")(1).toInt
-    } else if (arg.startsWith("--useAxi")) {
-      useAxi = true
-    } else if (arg.startsWith("--useTlul")) {
-      useTlul = true
-    } else if (arg.startsWith("--target-dir")) {
-      targetDir = Some(arg.split("=")(1))
-    } else {
-      chiselArgs = chiselArgs :+ arg
-    }
-  }
-  assert(!(useAxi && useTlul))
-
-  val finalModuleName = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
-    moduleName
-  } else if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesHighmem && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesHighmem) {
-    s"${moduleName}Highmem"
-  } else {
-    s"${moduleName}_ITCM${p.itcmSizeKBytes}KB_DTCM${p.dtcmSizeKBytes}KB"
-  }
-
-  val memoryRegions = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
-    MemoryRegions.default
-  } else {
-    MemoryRegions.highmem(p.itcmSizeKBytes, p.dtcmSizeKBytes)
-  }
-
-  // The core module must be created in the ChiselStage context. Use lazy here
-  // so it's created in ChiselStage, but referencable afterwards.
-  lazy val core = if (useAxi) {
-    p.m = memoryRegions
-    new CoreAxi(p, finalModuleName)
-  } else if (useTlul) {
-    p.m = memoryRegions
-    new CoreTlul(p, finalModuleName)
-  } else {
-    // "Matcha" memory layout
-    p.m = Seq(
-      new MemoryRegion(0x0, 0x400000, MemoryRegionType.DMEM),
-    )
-    new Core(p, finalModuleName)
-  }
-
-  val firtoolOpts = Array(
-      // Disable `automatic logic =`, Suppress location comments
-      "--lowering-options=disallowLocalVariables,locationInfoStyle=none",
-      "-enable-layers=Verification",
-  )
-  val systemVerilogSource = ChiselStage.emitSystemVerilog(
-    core, chiselArgs.toArray, firtoolOpts)
-  // CIRCT adds a little extra data to the sv file at the end. Remove it as we
-  // don't want it (it prevents the sv from being verilated).
-  val resourcesSeparator =
-      "// ----- 8< ----- FILE \"firrtl_black_box_resource_files.f\" ----- 8< -----"
-  val strippedVerilogSource = systemVerilogSource.split(resourcesSeparator)(0)
-  val coreName = core.name
-
-  val header_str = EmitParametersHeader(p)
-
-  targetDir match {
-    case Some(targetDir) => {
-      {
-        lazy val core2 = if (useAxi) {
-          new CoreAxi(p, moduleName)
+    val p = new Parameters
+    var moduleName = "Core"
+    var chiselArgs = List[String]()
+    var targetDir: Option[String] = None
+    var useAxi = false
+    var useTlul = false
+    for (arg <- args) {
+        if (arg.startsWith("--enableFetchL0")) {
+        p.enableFetchL0 = arg.split("=")(1).toBoolean
+        } else if (arg.startsWith("--moduleName")) {
+        moduleName = arg.split("=")(1)
+        } else if (arg.startsWith("--fetchDataBits")) {
+        p.fetchDataBits = arg.split("=")(1).toInt
+        } else if (arg.startsWith("--enableRvv")) {
+        p.enableRvv = arg.split("=")(1).toBoolean
+        } else if (arg.startsWith("--enableFloat")) {
+        p.enableFloat = arg.split("=")(1).toBoolean
+        } else if (arg.startsWith("--enableVerification")) {
+        p.enableVerification = arg.split("=")(1).toBoolean
+        } else if (arg.startsWith("--lsuDataBits")) {
+        p.lsuDataBits = arg.split("=")(1).toInt
+        // itcmSizeKBytes, and dtcmSizeKBytes replace highmem flag
+        // if highmem is needed, set both tcm sizes to 1024
+        } else if (arg.startsWith("--itcmSizeKBytes")) {
+        p.itcmSizeKBytes = arg.split("=")(1).toInt
+        } else if (arg.startsWith("--dtcmSizeKBytes")) {
+        p.dtcmSizeKBytes = arg.split("=")(1).toInt
+        } else if (arg.startsWith("--useAxi")) {
+        useAxi = true
+        } else if (arg.startsWith("--useTlul")) {
+        useTlul = true
+        } else if (arg.startsWith("--target-dir")) {
+        targetDir = Some(arg.split("=")(1))
         } else {
-          new Core(p, moduleName)
+        chiselArgs = chiselArgs :+ arg
         }
-
-        ChiselStage.emitSystemVerilogFile(
-            core2, chiselArgs.toArray ++ Array(
-                "--split-verilog", "--target-dir", targetDir), firtoolOpts)
-        val zip = new ZipOutputStream(new FileOutputStream(
-            targetDir + "/" + coreName + ".zip"))
-        val dirStack = new Stack[File](1)
-        dirStack.push(new File(targetDir))
-        println(s"target: ${targetDir}")
-        while (!dirStack.isEmpty) {
-          val dir = dirStack.pop()
-          val files = dir.listFiles
-          files.foreach { name =>
-            if (name.isDirectory()) {
-              dirStack.push(name)
-            } else {
-              val zipName = name.getPath().replace(targetDir + "/", "")
-              if (zipName != s"${coreName}.zip") {
-                zip.putNextEntry(new ZipEntry(zipName))
-                zip.write(Files.readAllBytes(Paths.get(name.getPath())))
-                zip.closeEntry()
-              }
-            }
-          }
-        }
-        zip.close()
-      }
-
-      Files.write(
-          Paths.get(targetDir + "/V" + core.name + "_parameters.h"),
-          header_str.getBytes(StandardCharsets.UTF_8),
-          StandardOpenOption.CREATE)
-      Files.write(
-          Paths.get(targetDir + "/" + core.name + ".sv"),
-          strippedVerilogSource.replace("exclude_file", "exclude_module").getBytes(StandardCharsets.UTF_8),
-          StandardOpenOption.CREATE)
-
-      ()
     }
-    case None => ()
-  }
+    assert(!(useAxi && useTlul))
+
+    val finalModuleName = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
+        moduleName
+    } else if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesHighmem && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesHighmem) {
+        s"${moduleName}Highmem"
+    } else {
+        s"${moduleName}_ITCM${p.itcmSizeKBytes}KB_DTCM${p.dtcmSizeKBytes}KB"
+    }
+
+    val memoryRegions = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
+        MemoryRegions.default
+    } else {
+        MemoryRegions.highmem(p.itcmSizeKBytes, p.dtcmSizeKBytes)
+    }
+
+    // The core module must be created in the ChiselStage context. Use lazy here
+    // so it's created in ChiselStage, but referencable afterwards.
+    lazy val core = if (useAxi) {
+        p.m = memoryRegions
+        new CoreAxi(p, finalModuleName)
+    } else if (useTlul) {
+        p.m = memoryRegions
+        new CoreTlul(p, finalModuleName)
+    } else {
+        // "Matcha" memory layout
+        p.m = Seq(
+        new MemoryRegion(0x0, 0x400000, MemoryRegionType.DMEM),
+        )
+        new Core(p, finalModuleName)
+    }
+
+    val firtoolOpts = Array(
+        // Disable `automatic logic =`, Suppress location comments
+        "--lowering-options=disallowLocalVariables,locationInfoStyle=none",
+        "-enable-layers=Verification",
+    )
+    val systemVerilogSource = ChiselStage.emitSystemVerilog(
+        core, chiselArgs.toArray, firtoolOpts)
+    // CIRCT adds a little extra data to the sv file at the end. Remove it as we
+    // don't want it (it prevents the sv from being verilated).
+    val resourcesSeparator =
+        "// ----- 8< ----- FILE \"firrtl_black_box_resource_files.f\" ----- 8< -----"
+    val strippedVerilogSource = systemVerilogSource.split(resourcesSeparator)(0)
+    val coreName = core.name
+
+    val header_str = EmitParametersHeader(p)
+
+    targetDir match {
+        case Some(targetDir) => {
+        {
+            lazy val core2 = if (useAxi) {
+            new CoreAxi(p, moduleName)
+            } else {
+            new Core(p, moduleName)
+            }
+
+            ChiselStage.emitSystemVerilogFile(
+                core2, chiselArgs.toArray ++ Array(
+                    "--split-verilog", "--target-dir", targetDir), firtoolOpts)
+            val zip = new ZipOutputStream(new FileOutputStream(
+                targetDir + "/" + coreName + ".zip"))
+            val dirStack = new Stack[File](1)
+            dirStack.push(new File(targetDir))
+            println(s"target: ${targetDir}")
+            while (!dirStack.isEmpty) {
+            val dir = dirStack.pop()
+            val files = dir.listFiles
+            files.foreach { name =>
+                if (name.isDirectory()) {
+                dirStack.push(name)
+                } else {
+                val zipName = name.getPath().replace(targetDir + "/", "")
+                if (zipName != s"${coreName}.zip") {
+                    zip.putNextEntry(new ZipEntry(zipName))
+                    zip.write(Files.readAllBytes(Paths.get(name.getPath())))
+                    zip.closeEntry()
+                }
+                }
+            }
+            }
+            zip.close()
+        }
+
+        Files.write(
+            Paths.get(targetDir + "/V" + core.name + "_parameters.h"),
+            header_str.getBytes(StandardCharsets.UTF_8),
+            StandardOpenOption.CREATE)
+        Files.write(
+            Paths.get(targetDir + "/" + core.name + ".sv"),
+            strippedVerilogSource.replace("exclude_file", "exclude_module").getBytes(StandardCharsets.UTF_8),
+            StandardOpenOption.CREATE)
+
+        ()
+        }
+        case None => ()
+    }
 }

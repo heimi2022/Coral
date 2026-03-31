@@ -4,6 +4,8 @@
 
 - 已完成仓库整体结构梳理
 - 已完成 `matadd` 自定义指令第一版实现
+- 已完成 matrix 参数初版配置
+  - 已在 `hdl/chisel/src/coralnpu/Parameters.scala` 中加入 `enableMatrix / matrixElen / matrixTlen / matrixTrlen` 等参数
 - 已完成 RTL 单元级验证
 - 已完成 `program.cc + .insn` 程序级验证
 - 已完成 Verilator 与 VCS cocotb 验证
@@ -15,9 +17,9 @@
    - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
    - 暂时不直接改 `RVV` generated Verilog
    - 暂时不先改 GCC / binutils
-2. 先改参数与 CSR
-   - 在 `hdl/chisel/src/coralnpu/Parameters.scala` 中加入 `enableMatrix` 与矩阵规模参数
+2. 继续改 CSR
    - 在 `hdl/chisel/src/coralnpu/scalar/Csr.scala` 中加入 matrix 配置寄存器
+   - 先把 `xmcsr / mtilem / mtilen / mtilek / xmisa / xtlenb / xtrlenb / xalenb` 这批 CSR 立起来
 3. 再建立独立 matrix 执行通路
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
@@ -88,6 +90,52 @@ SoC 主目录是 `hdl/chisel/src/soc`。
 都可以从配置里直接看出来。
 
 FPGA 顶层还会在 `fpga/rtl/coralnpu_soc.sv` 中，把 Chisel 子系统与 ROM、SRAM、UART、I2C、TLUL 外设、DDR AXI 口拼起来。
+
+### CoreAxi / 总线速览
+
+下面这张图可以把 `Fetch / LSU / ITCM / DTCM / AXI` 的主连接关系先记住。它对应的是当前仓库里最常见的 `CoreAxi` 路径。
+
+```mermaid
+flowchart LR
+    subgraph Core["Core / SCore"]
+        Fetch["Fetch / UncachedFetch"]
+        LSU["LSU"]
+        CSR["CSR / Debug CSR"]
+    end
+
+    Fetch -->|IBus| IPath{"地址是否命中 ITCM"}
+    IPath -->|是| ITCM["ITCM"]
+    IPath -->|否| IBus2Axi["IBus2Axi"]
+    IBus2Axi -->|axi_master 读通道| AXIM["外部 AXI Master"]
+
+    LSU -->|DBus| DTCM["DTCM fast path"]
+    LSU -->|EBus.internal = 1| Fabric["FabricMux / AxiSlave"]
+    LSU -->|EBus.internal = 0| DBus2Axi["DBus2Axi"]
+    DBus2Axi -->|axi_master 读写通道| AXIM
+
+    Fabric -->|MemoryRegionType.IMEM| ITCM
+    Fabric -->|MemoryRegionType.DMEM| DTCM
+    Fabric -->|MemoryRegionType.Peripheral| CSR
+    AXIS["外部 AXI Slave"] <-->|访问片上地址空间| Fabric
+
+    DM["Debug Module"] --> ITCM
+    DM --> DTCM
+```
+
+读这张图时，可以顺手把参数分成 3 类：
+
+- `axi0*`
+  主要对应 `L1ICache.scala` 这一类 instruction-side cache 接口参数。
+- `axi1*`
+  主要对应 `L1DCache.scala` 这一类 data-side cache 接口参数。
+- `axi2*`
+  是当前 `CoreAxi` 主路径里最活跃的一组参数，贯穿 `ITCM / DTCM / SRAM wrapper / Fabric / AxiSlave / IBus2Axi / DBus2Axi / axi_{slave,master}`。
+
+也就是说，当前默认 `CoreAxi` 路径更适合先记成：
+
+- `Fetch -> IBus -> ITCM 命中直读，未命中走 IBus2Axi -> axi_master`
+- `LSU -> DBus -> DTCM`
+- `LSU -> EBus -> (Peripheral 走 Fabric/AxiSlave, External 走 DBus2Axi -> axi_master)`
 
 ### 构建与软件
 
@@ -782,11 +830,12 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
 
 第一版建议只做一个可运行、可验证、可扩展的最小子集：
 
-- 数据类型先固定为 `int32`
+- 输入数据最大先支持到 `16bit`
+- 累加输出先按 `32bit` 设计
 - 固定参数：
   - `ELEN = 32`
-  - `TLEN = 512`
-  - `TRLEN = 128`
+  - `TLEN = 256`
+  - `TRLEN = 64`
 - 先实现 matrix CSR：
   - `xmcsr`
   - `mtilem`
@@ -804,6 +853,82 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
   - `mst`
   - `mmacc`
 - `matadd` 先从“普通 ALU 占位操作”逐步迁到独立 matrix 通路
+
+### 当前参数配置为什么这样选
+
+当前 Coral matrix v1 准备采用下面这组实现参数：
+
+```scala
+var enableMatrix = false
+val matrixElen = 32
+val matrixTlen = 256
+val matrixTrlen = 64
+
+def matrixRowNum: Int = { matrixTlen / matrixTrlen }
+def matrixArlen: Int = { matrixRowNum * matrixElen }
+def matrixAlen: Int = { matrixArlen * matrixRowNum }
+
+val matrixTileRegCount = 4
+val matrixAccRegCount = 4
+
+def matrixTlenBytes: Int = { matrixTlen / 8 }
+def matrixTrlenBytes: Int = { matrixTrlen / 8 }
+def matrixAlenBytes: Int = { matrixAlen / 8 }
+```
+
+根据 spec，矩阵扩展的三个基础实现参数是：
+
+- `ELEN` 表示矩阵操作可生产或消费的最大元素位宽
+- `TLEN` 表示单个 tile register 的总位宽
+- `TRLEN` 表示 tile register 单行位宽
+
+spec 还定义了三个由它们推导出来的量：
+
+- `ROWNUM = TLEN / TRLEN = 256 / 64 = 4`
+- `ARLEN = (TLEN / TRLEN) * ELEN = 4 * 32 = 128`
+- `ALEN = ARLEN * ROWNUM = 128 * 4 = 512`
+
+因此当前硬件含义就是：
+
+- tile register 总宽度 `256bit`
+- tile register 每行 `64bit`
+- tile register 一共 `4` 行
+- accumulation register 每行 `128bit`
+- accumulation register 总宽度 `512bit`
+
+这组参数和计划中的 `4x4` 脉动阵列正好能自然对齐。
+
+如果输入元素最大是 `16bit`：
+
+- tile 每一行可放 `64 / 16 = 4` 个元素
+- 一共有 `4` 行
+- 所以一个 source tile 正好就是 `4 x 4`
+
+如果输出累加元素按 `32bit`：
+
+- accumulation 每一行可放 `128 / 32 = 4` 个元素
+- 一共有 `4` 行
+- 所以一个 accumulation tile 也正好就是 `4 x 4`
+
+也就是说，这套参数可以直接支撑下面这个映射：
+
+- `4 x 4` tile 输入块进入脉动阵列
+- `4 x 4` accumulation tile 保存输出块
+- `mtilem / mtilen / mtilek` 的第一版最大目标值都可以先收敛到 `4`
+
+为什么 `matrixTileRegCount` 和 `matrixAccRegCount` 都先定成 `4`：
+
+- spec 的程序模型就是 `4` 个 tile registers `tr0-tr3`
+- 以及 `4` 个 accumulation registers `acc0-acc3`
+- load/store 语义里也默认 tile index 是 `0-3`，acc index 是 `4-7`
+
+这组参数还能直接映射到只读 CSR：
+
+- `xtlenb = 256 / 8 = 32`
+- `xtrlenb = 64 / 8 = 8`
+- `xalenb = 512 / 8 = 64`
+
+所以，当前这套配置的本质不是“完全照搬 Xuantie 某个现成实现”，而是在遵守其参数模型的前提下，为 Coral 第一版 `4x4`、`16bit` 输入、`32bit` 累加的脉动阵列原型做的最小收敛选择。
 
 ### 现有可复用入口
 
@@ -897,8 +1022,8 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
 
 - `enableMatrix = false`
 - `matrixElen = 32`
-- `matrixTlen = 512`
-- `matrixTrlen = 128`
+- `matrixTlen = 256`
+- `matrixTrlen = 64`
 - `matrixTileRegCount = 4`
 - `matrixAccRegCount = 4`
 
@@ -1379,4 +1504,3 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
   - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/program_model.adoc`
 - Xuantie tile / accumulator model:
   - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/tilereg.adoc`
-

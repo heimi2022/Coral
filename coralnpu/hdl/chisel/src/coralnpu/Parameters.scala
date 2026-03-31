@@ -73,6 +73,23 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     // Enable extra logic for verification purposes.
     var enableVerification = false
 
+    // Enable RVM . This conforms to riscv_matrix_extension_proposal
+    var enableMatrix = false
+    val matrixElen = 32
+    val matrixTlen = 256
+    val matrixTrlen = 64
+
+    def matrixRowNum: Int = { matrixTlen / matrixTrlen }
+    def matrixArlen: Int = { matrixRowNum * matrixElen }
+    def matrixAlen: Int = { matrixArlen * matrixRowNum }
+
+    val matrixTileRegCount = 4
+    val matrixAccRegCount = 4
+
+    def matrixTlenBytes: Int = { matrixTlen / 8 }
+    def matrixTrlenBytes: Int = { matrixTrlen / 8 }
+    def matrixAlenBytes: Int = { matrixAlen / 8 }
+    
     // Enable RVV. This conforms to the RVV1.0 specification.
     var enableRvv = false
     val rvvVlen = 128
@@ -96,7 +113,7 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
         val floatRegCount = (if (enableFloat) { 32 } else { 0 })
         // +2 is for the "no write" and "store" dummy registers.
         log2Ceil(scalarRegCount + floatRegCount + rvvRegCount + 2)
-  }
+    }
 
     // L0ICache Fetch unit.
     var enableFetchL0 = true
