@@ -1,4 +1,0 @@
-#
-# XXX: Do not support '.POPCOUNT' in -fdump-tree-optimized
-#
-FAIL: gcc.dg/tree-ssa/popcount4ll.c
