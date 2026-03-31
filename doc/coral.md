@@ -11,9 +11,21 @@
 
 ## 下一步计划
 
-1. 扩充 `matadd` 的程序级测试 case
-2. 继续增加一条最小 custom 指令，如 `matsub`
-3. 开始规划第二版“真正矩阵扩展”的接口与执行模型
+1. 先冻结 Coral matrix v1 的最小范围
+   - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
+   - 暂时不直接改 `RVV` generated Verilog
+   - 暂时不先改 GCC / binutils
+2. 先改参数与 CSR
+   - 在 `hdl/chisel/src/coralnpu/Parameters.scala` 中加入 `enableMatrix` 与矩阵规模参数
+   - 在 `hdl/chisel/src/coralnpu/scalar/Csr.scala` 中加入 matrix 配置寄存器
+3. 再建立独立 matrix 执行通路
+   - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
+   - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
+   - 把当前 `matadd` 从 `ALU` 过渡到 `MatrixUnit`
+4. 最后补最小验证闭环
+   - CSR 读写测试
+   - Decode / Dispatch 测试
+   - 一条 matrix 指令的执行测试
 
 ## 工程定位
 
@@ -741,20 +753,19 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
 
 ### 下一步建议
 
-这次最小闭环做完后，后续可以沿三条路继续：
+`matadd` 第一版已经完成教学闭环，接下来不建议继续在普通 `ALU` 里堆更多“伪矩阵指令”，而是正式开始 matrix extension 主线。
 
-1. 扩充 `matadd` 的程序级 case
-   - 例如 `0xffffffff + 1 -> 0`
-   - 多组输入循环测试
+推荐顺序：
 
-2. 继续增加自定义指令
-   - 如 `matsub`
-   - 或者规划一个 `matmul` 原型编码
-
-3. 开始考虑“真正矩阵扩展”的第二版设计
-   - 输入放哪
-   - 是否需要多周期执行
-   - 是否需要独立状态/寄存器/accumulator
+1. 先把 `matrix v1` 范围冻结下来
+   - 只做最小 `subset`
+   - 先把 CSR、decode、dispatch、执行通路打通
+2. 先建立独立 `MatrixUnit`
+   - 不再把 matrix 语义长期留在 `ALU`
+3. 先让 `matadd` 成为 matrix 通路入口
+   - 后面再逐步扩展到 `msettile* / mld / mst / mmacc`
+4. 最后再考虑软件工具链
+   - GCC / binutils / intrinsic / 编译器适配放到 RTL 闭环之后
 
 ## 在 Coral 中实现矩阵扩展的计划表
 
@@ -819,6 +830,30 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
 - 再把 `matadd` 和后续 matrix 指令接进去
 
 ### 分阶段计划
+
+#### 当前优先开工顺序
+
+如果现在就要开始动手，建议严格按下面顺序推进：
+
+1. `Parameters.scala`
+   - 增加 `enableMatrix`
+   - 增加 `matrixElen / matrixTlen / matrixTrlen`
+2. `Csr.scala`
+   - 增加 matrix CSR 状态
+   - 先让软件能配置 tile 形状和能力位
+3. `matrix/MatrixInterface.scala`
+   - 定义 `MatrixCmd / MatrixConfigState / FaultInfo`
+4. `matrix/MatrixUnit.scala`
+   - 先做空壳
+   - 只要求能收命令、返回完成、保留扩展接口
+5. `Decode.scala`
+   - 把 `matadd` 从“ALU 占位操作”改成“matrix 通路入口”
+6. `SCore.scala`
+   - 实例化并接入 `MatrixUnit`
+7. 测试
+   - 先补 CSR 测试
+   - 再补 decode / dispatch 测试
+   - 最后补一条最小 matrix 指令执行测试
 
 #### P0：冻结第一版规范
 
@@ -1344,5 +1379,4 @@ verdi -dbdir simv.daidir -ssf novas.fsdb &
   - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/program_model.adoc`
 - Xuantie tile / accumulator model:
   - `https://github.com/XUANTIE-RV/riscv-matrix-extension-spec/blob/master/spec/tilereg.adoc`
-
 
