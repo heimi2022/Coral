@@ -27,7 +27,7 @@ class CsrOutIO(p: Parameters) extends Bundle {
 }
 
 class CsrInOutIO(p: Parameters) extends Bundle {
-  val in  = new CsrInIO(p)
+  val in = new CsrInIO(p)
   val out = new CsrOutIO(p)
 }
 
@@ -85,20 +85,20 @@ abstract class FetchUnit(p: Parameters) extends Module {
 
 abstract class SRAM128(addrWidth: Int) extends BlackBox {
   val io = IO(new Bundle {
-    val clock    = Input(Clock())
-    val enable   = Input(Bool())
-    val write    = Input(Bool())
-    val addr     = Input(UInt(addrWidth.W))
-    val wdata    = Input(UInt(128.W))
-    val wmask    = Input(UInt(16.W))
-    val rdata    = Output(UInt(128.W))
+    val clock = Input(Clock())
+    val enable = Input(Bool())
+    val write = Input(Bool())
+    val addr = Input(UInt(addrWidth.W))
+    val wdata = Input(UInt(128.W))
+    val wmask = Input(UInt(16.W))
+    val rdata = Output(UInt(128.W))
   })
 }
 
 class FaultInfo(p: Parameters) extends Bundle {
   val write = Bool()
   val addr = UInt(p.programCounterBits.W)
-  val epc  = UInt(p.programCounterBits.W)
+  val epc = UInt(p.programCounterBits.W)
 }
 
 class DBusIO(p: Parameters, bank: Boolean = false) extends Bundle {
@@ -106,7 +106,7 @@ class DBusIO(p: Parameters, bank: Boolean = false) extends Bundle {
   val valid = Output(Bool())
   val ready = Input(Bool())
   val write = Output(Bool())
-  val pc   = Output(UInt(32.W))
+  val pc = Output(UInt(32.W))
   val addr = Output(UInt((p.lsuAddrBits - (if (bank) 1 else 0)).W))
   val adrx = Output(UInt((p.lsuAddrBits - (if (bank) 1 else 0)).W))
   val size = Output(UInt(p.dbusSize.W))
@@ -131,22 +131,30 @@ class IFlushIO(p: Parameters) extends Bundle {
 class DFlushIO(p: Parameters) extends Bundle {
   val valid = Output(Bool())
   val ready = Input(Bool())
-  val all   = Output(Bool())  // all=0, see io.dbus.addr for line address.
-  val clean = Output(Bool())  // clean and flush
+  val all = Output(Bool()) // all=0, see io.dbus.addr for line address.
+  val clean = Output(Bool()) // clean and flush
 }
 
 class RetirementBufferDebugIO(p: Parameters) extends Bundle {
-  val inst = Vec(p.retirementBufferSize, Valid(new Bundle {
-    val pc = UInt(32.W)
-    val inst = UInt(32.W)
-    val idx = UInt(p.retirementBufferIdxWidth.W)
-    val data = if (p.enableRvv) UInt(p.rvvVlen.W) else UInt(32.W)
-    val vecWrites = Option.when(p.enableRvv)(Vec(8, Valid(new Bundle {
-      val data = UInt(p.rvvVlen.W)
-      val idx = UInt(5.W)
-    })))
-    val trap = Bool()
-  }))
+  val inst = Vec(
+    p.retirementBufferSize,
+    Valid(new Bundle {
+      val pc = UInt(32.W)
+      val inst = UInt(32.W)
+      val idx = UInt(p.retirementBufferIdxWidth.W)
+      val data = if (p.enableRvv) UInt(p.rvvVlen.W) else UInt(32.W)
+      val vecWrites = Option.when(p.enableRvv)(
+        Vec(
+          8,
+          Valid(new Bundle {
+            val data = UInt(p.rvvVlen.W)
+            val idx = UInt(5.W)
+          })
+        )
+      )
+      val trap = Bool()
+    })
+  )
 }
 
 // Debug signals for HDL development.
@@ -162,30 +170,39 @@ class DebugIO(p: Parameters) extends Bundle {
     val write = Bool()
   })
 
-  val dispatch = Vec(p.instructionLanes, new Bundle {
-    val instFire = Bool()
-    val instAddr = UInt(32.W)
-    val instInst = UInt(32.W)
-  })
+  val dispatch = Vec(
+    p.instructionLanes,
+    new Bundle {
+      val instFire = Bool()
+      val instAddr = UInt(32.W)
+      val instInst = UInt(32.W)
+    }
+  )
 
   val regfile = new Bundle {
     // At decode time, what registers the instructions will write to.
     val writeAddr = Vec(p.instructionLanes, Valid(UInt(5.W)))
     // Writeback to the register file.
-    val writeData = Vec(p.instructionLanes + 2, Valid(new Bundle {
-      val addr = UInt(5.W)
-      val data = UInt(32.W)
-    }))
+    val writeData = Vec(
+      p.instructionLanes + 2,
+      Valid(new Bundle {
+        val addr = UInt(5.W)
+        val data = UInt(32.W)
+      })
+    )
   }
 
   val float = Option.when(p.enableFloat)(new Bundle {
     // Decode
     val writeAddr = Valid(UInt(5.W))
     // Execute
-    val writeData = Vec(2, Valid(new Bundle {
-      val addr = UInt(32.W)
-      val data = UInt(32.W)
-    }))
+    val writeData = Vec(
+      2,
+      Valid(new Bundle {
+        val addr = UInt(32.W)
+        val data = UInt(32.W)
+      })
+    )
   })
 
   val rb = Output(new RetirementBufferDebugIO(p))
@@ -193,33 +210,33 @@ class DebugIO(p: Parameters) extends Bundle {
 
 class RegfileReadDataIO extends Bundle {
   val valid = Output(Bool())
-  val data  = Output(UInt(32.W))
+  val data = Output(UInt(32.W))
 }
 
 class RegfileWriteAddrIO extends Bundle {
   val valid = Input(Bool())
-  val addr  = Input(UInt(5.W))
+  val addr = Input(UInt(5.W))
 }
 
 class RegfileWriteDataIO extends Bundle {
-  val addr  = Input(UInt(5.W))
-  val data  = Input(UInt(32.W))
+  val addr = Input(UInt(5.W))
+  val data = Input(UInt(32.W))
 }
 
 class VectorWriteDataIO(p: Parameters) extends Bundle {
-  val addr  = Input(UInt(5.W))
-  val data  = Input(UInt(p.lsuDataBits.W))
+  val addr = Input(UInt(5.W))
+  val data = Input(UInt(p.lsuDataBits.W))
   val uop_pc = Input(UInt(32.W))
   val last_uop_valid = Input(Bool())
 }
 
 class FabricIO(p: Parameters) extends Bundle {
-    val readDataAddr = Output(Valid(UInt(p.axi2AddrBits.W)))
-    val readData = Input(Valid(UInt(p.axi2DataBits.W)))
-    val writeDataAddr = Output(Valid(UInt(p.axi2AddrBits.W)))
-    val writeDataBits = Output(UInt(p.axi2DataBits.W))
-    val writeDataStrb = Output(UInt((p.axi2DataBits / 8).W))
-    val writeResp = Input(Bool())
+  val readDataAddr = Output(Valid(UInt(p.axi2AddrBits.W)))
+  val readData = Input(Valid(UInt(p.axi2DataBits.W)))
+  val writeDataAddr = Output(Valid(UInt(p.axi2AddrBits.W)))
+  val writeDataBits = Output(UInt(p.axi2DataBits.W))
+  val writeDataStrb = Output(UInt((p.axi2DataBits / 8).W))
+  val writeResp = Input(Bool())
 }
 
 object CsrOp extends ChiselEnum {
@@ -237,14 +254,14 @@ class CsrCmd extends Bundle {
 
 class FRegfileRead extends Bundle {
   val valid = Input(Bool())
-  val addr  = Input(UInt(5.W))
-  val data  = Output(new Fp32)
+  val addr = Input(UInt(5.W))
+  val data = Output(new Fp32)
 }
 
 class FRegfileWrite extends Bundle {
   val valid = Input(Bool())
-  val addr  = Input(UInt(5.W))
-  val data  = Input(new Fp32)
+  val addr = Input(UInt(5.W))
+  val data = Input(new Fp32)
 }
 
 class CoreDMIO(p: Parameters) extends Bundle {
