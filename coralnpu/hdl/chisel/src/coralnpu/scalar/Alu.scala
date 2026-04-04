@@ -126,7 +126,6 @@ class Alu(p: Parameters) extends Module {
 
   io.rd.bits.data  := MuxLookup(op, 0.U)(Seq(
     AluOp.ADD  -> (rs1 + rs2),
-    AluOp.MATADD -> (rs1 + rs2),    // add MATADD
     AluOp.SUB  -> (rs1 - rs2),
     AluOp.SLT  -> (r2IsGreater),
     AluOp.SLTU -> (r2IsGreaterU),

@@ -292,3 +292,14 @@ class FaultManagerOutput extends Bundle {
   val mcause = UInt(32.W)
   val decode = Bool()
 }
+
+
+object MatrixCfgOp extends ChiselEnum {
+    val SET_M = Value
+    val SET_K = Value
+    val SET_N = Value
+}
+
+class MatrixCfgCmd extends Bundle {
+    val op = MatrixCfgOp()
+}

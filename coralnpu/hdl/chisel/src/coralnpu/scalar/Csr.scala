@@ -33,6 +33,20 @@ class CsrRvvIO(p: Parameters) extends Bundle {
   val frm = Output(UInt(3.W))
 }
 
+class CsrMatrixIO(p: Parameters) extends Bundle {
+  // To Csr from MatrixCore
+  val xmsat_set = Input(Valid(Bool()))
+  val xmfflags_set = Input(Valid(UInt(5.W)))
+
+  // From Csr to MatrixCore
+  val mtilem = Output(UInt(32.W))
+  val mtilen = Output(UInt(32.W))
+  val mtilek = Output(UInt(32.W))
+  val xmxrm = Output(UInt(2.W))
+  val xmfrm = Output(UInt(3.W))
+  val xmsaten = Output(Bool())
+}
+
 object Csr {
   def apply(p: Parameters): Csr = {
     return Module(new Csr(p))
@@ -92,6 +106,21 @@ object CsrAddress extends ChiselEnum {
   val KSCM2 = Value(0xfcc.U(12.W))
   val KSCM3 = Value(0xfd0.U(12.W))
   val KSCM4 = Value(0xfd4.U(12.W))
+
+  // matrix extension CSRs addr
+  val XMCSR = Value(0x802.U(12.W))
+  val XTILEM = Value(0x803.U(12.W))
+  val XTILEN = Value(0x804.U(12.W))
+  val XTILEK = Value(0x805.U(12.W))
+  val XMXRM = Value(0x806.U(12.W))
+  val XMSAT = Value(0x807.U(12.W))
+  val XMFFLAGS = Value(0x808.U(12.W))
+  val XMFRM = Value(0x809.U(12.W))
+  val XMSATEN = Value(0x80a.U(12.W))
+  val XMISA = Value(0xcc0.U(12.W))
+  val XTLENB = Value(0xcc1.U(12.W))
+  val XTRLENB = Value(0xcc2.U(12.W))
+  val XALENB = Value(0xcc3.U(12.W))
 }
 
 object CsrMode extends ChiselEnum {
@@ -329,6 +358,26 @@ class Csr(p: Parameters) extends Module {
   val fs = if (p.enableFloat) 1.U(2.W) else 0.U(2.W)
   val vs = if (p.enableRvv) 1.U(2.W) else 0.U(2.W)
 
+  // matrix extension reg init
+
+  // ROW
+  val xmxrm = RegInit(0.U(2.W))
+  val xmsat = RegInit(0.U(1.W))
+  val xmfflags = RegInit(0.U(5.W))
+  val xmfrm = RegInit(0.U(3.W))
+  val xmsaten = RegInit(0.U(1.W))
+  val xmcsr = Cat(0.U(20.W), xmsaten, xmfrm, xmfflags, xmsat, xmxrm)
+
+  val xtilem = RegInit(0.U(32.W))
+  val xtilen = RegInit(0.U(32.W))
+  val xtilek = RegInit(0.U(32.W))
+
+  // ROO
+  val xmisa = (1 << 1).U(32.W)
+  val xtlenb = p.matrixTlenBytes.U(32.W)
+  val xtrlenb = p.matrixTrlenBytes.U(32.W)
+  val xalenb = p.matrixAlenBytes.U(32.W)
+
   // Decode the Index.
   val (csr_address, csr_address_valid) = CsrAddress.safe(req.bits.index)
   assert(!(req.valid && !csr_address_valid))
@@ -388,6 +437,47 @@ class Csr(p: Parameters) extends Module {
   val kscm2En = csr_address === CsrAddress.KSCM2
   val kscm3En = csr_address === CsrAddress.KSCM3
   val kscm4En = csr_address === CsrAddress.KSCM4
+
+  // Matrix CSRs
+  val xmcsrEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMCSR
+  }
+  val xtilemEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XTILEM
+  }
+  val xtilenEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XTILEN
+  }
+  val xtilekEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XTILEK
+  }
+  val xmisaEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMISA
+  }
+  val xtlenbEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XTLENB
+  }
+  val xtrlenbEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XTRLENB
+  }
+  val xalenbEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XALENB
+  }
+  val xmxrmEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMXRM
+  }
+  val xmsatEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMSAT
+  }
+  val xmfflagsEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMFFLAGS
+  }
+  val xmfrmEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMFRM
+  }
+  val xmsatenEn = Option.when(p.enableMatrix) {
+    csr_address === CsrAddress.XMSATEN
+  }
 
   // Pipeline Control.
   when(io.bru.in.halt) {
@@ -470,7 +560,26 @@ class Csr(p: Parameters) extends Module {
         dpcEn -> dpc,
         dscratch0En -> dscratch0,
         dscratch1En -> dscratch1
-      )
+      ) ++
+      Option
+        .when(p.enableMatrix) {
+          Seq(
+            xmcsrEn.get -> xmcsr,
+            xtilemEn.get -> xtilem,
+            xtilenEn.get -> xtilen,
+            xtilekEn.get -> xtilek,
+            xmisaEn.get -> xmisa,
+            xtlenbEn.get -> xtlenb,
+            xtrlenbEn.get -> xtrlenb,
+            xalenbEn.get -> xalenb,
+            xmxrmEn.get -> Cat(0.U(30.W), xmxrm),
+            xmsatEn.get -> Cat(0.U(31.W), xmsat),
+            xmfflagsEn.get -> Cat(0.U(27.W), xmfflags),
+            xmfrmEn.get -> Cat(0.U(29.W), xmfrm),
+            xmsatenEn.get -> Cat(0.U(31.W), xmsaten)
+          )
+        }
+        .getOrElse(Seq())
   )
 
   val wdata = MuxLookup(req.bits.op, 0.U)(
@@ -518,6 +627,32 @@ class Csr(p: Parameters) extends Module {
     io.rvv.get.vxsat_write.valid := req.valid && vxsatEn.get
     io.rvv.get.vxsat_write.bits := wdata(0)
     io.rvv.get.frm := frm
+  }
+
+  if (p.enableMatrix) {
+    when(req.valid && xmcsrEn.get) {
+      xmxrm := wdata(1, 0)
+      xmsat := wdata(2).asBool
+      xmfflags := wdata(7, 3)
+      xmfrm := wdata(10, 8)
+      xmsaten := wdata(11).asBool
+    }
+
+    when(req.valid && xmxrmEn.get) {
+      xmxrm := wdata(1, 0)
+    }
+    when(req.valid && xmsatEn.get) {
+      xmsat := wdata(0).asBool
+    }
+    when(req.valid && xmfflagsEn.get) {
+      xmfflags := wdata(4, 0)
+    }
+    when(req.valid && xmfrmEn.get) {
+      xmfrm := wdata(2, 0)
+    }
+    when(req.valid && xmsatenEn.get) {
+      xmsaten := wdata(0).asBool
+    }
   }
 
   val is_csr_write = req.valid && !(req.bits.op

@@ -6,6 +6,14 @@
 - 已完成 `matadd` 自定义指令第一版实现
 - 已完成 matrix 参数初版配置
   - 已在 `hdl/chisel/src/coralnpu/Parameters.scala` 中加入 `enableMatrix / matrixElen / matrixTlen / matrixTrlen` 等参数
+- 已完成 matrix 配置指令第一版 Decode 改造
+  - 已在 `hdl/chisel/src/coralnpu/scalar/Decode.scala` 中加入 `msettilemi/msettilem/msettileki/msettilek/msettileni/msettilen`
+  - 已加入 `isMatrixCfg / isMatrixCfgImm / isMatrixCfgReg`
+  - 已将 matrix config 指令并入 `forceSlot0Only()`
+  - 已新增 `matrixCfg` dispatch 通路，当前先通过 `MatrixCfgCmd(op)` 区分 `SET_M / SET_K / SET_N`
+  - 已让 `msettile*i` immediate 形式通过 `rs1Set` 注入 `uimm10`，统一为后端可直接读取的 `rs1.data`
+  - 已为 `msettile{k|m|n}` 寄存器形式补上 `rs2 == 00000` 编码约束
+  - 已让 `matrixCfg` 与 CSR 一样要求 `retirement_buffer_empty` 后再发射，避免全局 matrix 配置状态乱序可见
 - 已完成 RTL 单元级验证
 - 已完成 `program.cc + .insn` 程序级验证
 - 已完成 Verilator 与 VCS cocotb 验证
@@ -20,14 +28,93 @@
 2. 继续改 CSR
    - 在 `hdl/chisel/src/coralnpu/scalar/Csr.scala` 中加入 matrix 配置寄存器
    - 先把 `xmcsr / mtilem / mtilen / mtilek / xmisa / xtlenb / xtrlenb / xalenb` 这批 CSR 立起来
+   - 新增 `CsrMatrixIO` 或 `matrixCfg` 输入端口，把 `Decode.scala` 中的 `matrixCfg` 通路真正接入 CSR
+   - 先让 `msettile*` 能更新 `mtilem / mtilek / mtilen`
 3. 再建立独立 matrix 执行通路
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
    - 把当前 `matadd` 从 `ALU` 过渡到 `MatrixUnit`
 4. 最后补最小验证闭环
    - CSR 读写测试
-   - Decode / Dispatch 测试
+   - `msettile*` 的 Decode / Dispatch 测试
    - 一条 matrix 指令的执行测试
+
+## Matrix Decode 阶段记录（已完成）
+
+这一阶段的目标不是先把矩阵 CSR 或 MatrixUnit 完整做完，而是先把 matrix 配置指令在前端识别清楚，并为后续 `Csr.scala` 接线准备好统一的 dispatch 语义。
+
+当前已在 `hdl/chisel/src/coralnpu/scalar/Decode.scala` 中完成这些工作：
+
+- 新增矩阵配置指令识别：
+  - `msettilemi / msettilem`
+  - `msettileki / msettilek`
+  - `msettileni / msettilen`
+- 新增辅助判断函数：
+  - `isMatrixCfg()`
+  - `isMatrixCfgImm()`
+  - `isMatrixCfgReg()`
+- 将矩阵配置指令纳入 `forceSlot0Only()`，保证它们只从 `slot0` 发射
+- 在 `Dispatch` 接口中新增：
+  - `matrixCfg : Valid[MatrixCfgCmd]`
+- 目前通过 `MatrixCfgCmd.op` 区分三种配置目标：
+  - `SET_M`
+  - `SET_K`
+  - `SET_N`
+
+### Decode 设计原则
+
+这一版 Decode 的关键策略是：
+
+- `msettilem/msettilek/msettilen`
+  - 把参数看作来自真实寄存器 `rs1`
+- `msettilemi/msettileki/msettileni`
+  - 不额外新建一套 immediate 数据通路
+  - 而是复用现有 `rs1Set` 机制，把 `uimm10` 直接注入为 `rs1.data`
+
+这样做的目的，是让后端看到统一的数据接口：
+
+```text
+matrixCfg.op  决定修改 M / K / N
+rs1.data      决定写入的新值
+```
+
+也就是说，后续 `Csr.scala` 不需要区分：
+
+- 这是寄存器形式
+- 还是立即数形式
+
+只需要读统一的 `rs1.data` 即可。
+
+### 时序与顺序约束
+
+由于 `msettile*` 修改的是全局 matrix 配置状态：
+
+- `mtilem`
+- `mtilen`
+- `mtilek`
+
+所以这一版已经让它和普通 CSR 一样，要求在 `retirement_buffer_empty` 时才能发射。这样可以避免后续矩阵 load/store/compute 接进来后，出现旧指令看到新 tile 配置的乱序问题。
+
+当前使用的约束思路是：
+
+```text
+普通指令：不要求 ROB 为空
+CSR / MatrixCfg：要求 ROB 为空
+```
+
+### 当前阶段的边界
+
+这一步只完成了“前端识别 + 发射分类”，还没有完成：
+
+- `SCore.scala` 中 `matrixCfg` 到 `CSR` 的接线
+- `Csr.scala` 中 `mtilem / mtilek / mtilen` 的真实更新
+- `xmcsr / xmisa / xtlenb / xtrlenb / xalenb` 的 CSR 建立
+- `MatrixUnit` 的数据执行路径
+
+因此现在可以把这一阶段理解为：
+
+- matrix 配置指令已经“有名字、有分类、有发射出口”
+- 但还没有真正“落到 CSR 状态里生效”
 
 ## 工程定位
 
@@ -71,6 +158,73 @@
 
 - `Chisel 标量/SoC 骨架`
 - `复用成熟 Verilog RVV 后端`
+
+### CSR 连接关系速览
+
+下面这张 ASCII 图适合在开始改 `hdl/chisel/src/coralnpu/scalar/Csr.scala` 前先记住。它表达的是当前 Coral 里 `Csr` 模块的主要输入、输出和上下游关系。
+
+```text
+                           +----------------------------------+
+                           |           CoreAxiCSR             |
+                           |  csr.in[0]  <- pcStart           |
+                           |  csr.out[0..8] -> 外部可读寄存器 |
+                           +----------------+-----------------+
+                                            |
+                                            | CsrInOutIO
+                                            v
+ +----------------+   csr.valid/bits   +----+-----------------------------------+   trace   +-----------+
+ |   DispatchV2   | -----------------> |                CSR                      | --------> | RvviTrace |
+ +----------------+                    |                                            |           +-----------+
+                                       |  req   : CSR 访问请求                     |
+ +----------------+   csr cmd / rs1    |  rs1   : 写 CSR 的源操作数               |  rd.data
+ |  Debug Module  | -----------------> |  rd    : CSR 读结果                      | --------> +--------------+
+ |    (DM)        | <----------------- |  dm    : debug_req / resume_req / step   | <-------- | Debug Module |
+ +----------------+      csr_rd        |                                            |           +--------------+
+                                       |  bru   : 异常、陷入、mepc/mtvec/mode      |
+ +----------------+        rs1         |  float : frm / fflags   (可选)            |
+ |    Regfile     | -----------------> |  rvv   : vstart/vl/vtype/... (可选)       |
+ |                | <----------------- |  irq   : 外部中断输入                     |
+ +----------------+      rd回写        |  counters : nRetired                      |
+                                       +----+------------------+-------------------+
+                                            ^                  ^ 
+                                            |                  |
+                                            | bru              | counters.nRetired
+                                            |                  |
+                                      +-----+-----+      +-----+---------------+
+                                      |   BRU(0)  |      |  RetirementBuffer   |
+                                      +-----------+      +---------------------+
+
+      +------------------+                                     +----------------------+
+      | Fetch/Uncached   | -- fetch.pc -----------------------> | csr.in[12]           |
+      | FetchControl     |                                      | 当前取指 PC sideband |
+      +------------------+                                     +----------------------+
+
+      +------------------+                                     +----------------------+
+      |    FloatCore     | <---------- float ----------------> | CSR.float            |
+      |   (enableFloat)  |                                     +----------------------+
+      +------------------+
+
+      +------------------+                                     +----------------------+
+      |     RvvCore      | <----------- rvv -----------------> | CSR.rvv              |
+      |    (enableRvv)   |                                     +----------------------+
+      +------------------+
+
+      +------------------+
+      |   Top / SCore    |
+      | halted/fault/wfi |
+      | irq              |
+      +--------+---------+
+               ^
+               |
+               +---------------------- CSR 输出流水线状态
+```
+
+读这张图时可以先抓住 4 条主线：
+
+- `DispatchV2 / Debug Module` 负责发起 CSR 访问请求，最终都汇入 `CSR.req`
+- `Regfile` 给 `CSR.rs1` 提供写操作数，`CSR.rd` 再把读结果回写回去
+- `BRU(0)` 负责和 `CSR` 交换异常、陷入和跳转控制相关状态
+- `FloatCore / RvvCore / RetirementBuffer / Fetch / CoreAxiCSR` 都是给 `CSR` 提供“状态”或消费“配置”的外围模块
 
 ### SoC 集成
 
@@ -608,23 +762,6 @@ bazel build //tests/cocotb/tutorial:coralnpu_v2_program
 - `coralnpu_v2_program.elf`
 - `coralnpu_v2_program.bin`
 - `coralnpu_v2_program.vmem`
-
-需要注意：`coralnpu_v2_binary` 这条规则内部用了 Bazel 的平台切换，所以这三个产物 **不一定直接显示在** `bazel-bin/tests/cocotb/tutorial/` 下面。
-
-在当前仓库里，实际更常见的两个位置是：
-
-- `bazel-out/k8-fastbuild-ST-*/bin/tests/cocotb/tutorial/`
-- 某个测试 runner 的 runfiles 目录，例如：
-  - `bazel-bin/tests/cocotb/tutorial/tutorial_cocotb_runner.sh.runfiles/coralnpu_hw/tests/cocotb/tutorial/`
-  - `bazel-bin/tests/cocotb/tutorial/vcs_tutorial_core_mini_axi_tutorial_cocotb_runner.sh.runfiles/coralnpu_hw/tests/cocotb/tutorial/`
-
-如果想稳妥定位，推荐直接查：
-
-```bash
-find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.elf'
-find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.bin'
-find bazel-out -path '*tests/cocotb/tutorial/coralnpu_v2_program.vmem'
-```
 
 这一步说明：
 

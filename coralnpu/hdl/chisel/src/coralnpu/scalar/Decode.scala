@@ -124,19 +124,31 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     val flushat = Bool()
     val flushall = Bool()
 
-    // my
-    val matadd = Bool()    // add MATADD
+    // matrix
+    val msettilemi = Bool()
+    val msettilem = Bool()
+    val msettileki = Bool()
+    val msettilek = Bool()
+    val msettileni = Bool()
+    val msettilen = Bool()
 
     // rvv
     val rvv = Option.when(p.enableRvv)(Valid(new RvvCompressedInstruction()))
 
     val float = Option.when(p.enableFloat)(Valid(new FloatInstruction()))
 
+    // matrix
+    def isMatrixCfg(): Bool = {
+        msettileki || msettilek || msettilemi || msettilem || msettileni || msettilen
+    }
+    def isMatrixCfgImm(): Bool = { isMatrixCfg() && !inst(25) }
+    def isMatrixCfgReg(): Bool = { isMatrixCfg() &&  inst(25) }
+
     def isAluImm(): Bool = {
         addi || slti || sltiu || xori || ori || andi || slli || srli || srai || rori 
     }
     def isAluReg(): Bool = {
-        add || sub || slt || sltu || xor || or || and || xnor || orn || andn || sll || srl || sra || matadd
+        add || sub || slt || sltu || xor || or || and || xnor || orn || andn || sll || srl || sra 
     }
     def isAlu1Bit(): Bool = { clz || ctz || cpop || sextb || sexth || zexth || orcb || rev8 }
     def isAlu2Bit(): Bool = { min || minu || max || maxu || rol || ror }
@@ -169,7 +181,7 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     // Instructions that should dispatch out of slot 0, with no other instructions
     // dispatched on the same cycle.
     def forceSlot0Only(): Bool = {
-        isFency() || isCsr()
+        isFency() || isCsr() || isMatrixCfg()
     }
 
     // Checks if an instruction is a jump or changes context switch. Instructions
@@ -196,7 +208,8 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     def readsRs1(): Bool = {
         isCondBr() || isAluReg() || isAluImm() || isAlu1Bit() || isAlu2Bit() ||
         isCsr() || isMul() || isDvu() || jalr || floatReadsScalarRs1() ||
-        (if (p.enableRvv) { rvv.get.valid && rvv.get.bits.readsRs1() } else { false.B })
+        (if (p.enableRvv) { rvv.get.valid && rvv.get.bits.readsRs1() } else { false.B }) ||
+        isMatrixCfgReg()
     }
     def readsRs2(): Bool = {
         isCondBr() || isAluReg() || isAlu2Bit() || isScalarStore() || isCsrReg() ||
@@ -205,7 +218,7 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     }
 
     // Check if argument should be set by immediate value
-    def rs1Set(): Bool = { auipc || isCsrImm() }
+    def rs1Set(): Bool = { auipc || isCsrImm() || isMatrixCfgImm()}
     def rs2Set(): Bool = { rs1Set() || isAluImm() || isAlu1Bit() || lui }
 
 
@@ -261,6 +274,7 @@ class Dispatch(p: Parameters) extends Module {
 
         // CSR interface.
         val csr = Valid(new CsrCmd)
+        val matrixCfg = Valid(new MatrixCfgCmd)
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -505,7 +519,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         !undefInterlock(i) &&     // Ensure undef is only dispatched from first slot
         (i.U < io.retirement_buffer_nSpace) && // Retirement buffer needs space for our slot
         !io.retirement_buffer_trap_pending && // Stall dispatch when a trap is pending
-        (!decodedInsts(i).isCsr() || io.retirement_buffer_empty) && // CSRs must wait for ROB to be empty
+        (!decodedInsts(i).isCsr() && !decodedInsts(i).isMatrixCfg() || io.retirement_buffer_empty) && // CSRs must wait for ROB to be empty
         singleStepInterlock(i) &&
         mpauseInterlock(i)
     )
@@ -522,7 +536,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // -------------------------------------------------------------------------
         // Alu
         val alu = MuxUpTo1H(MakeValid(false.B, AluOp.ADD), Seq(
-            d.matadd                     -> MakeValid(true.B, AluOp.MATADD),
             // RV32IM
             (d.auipc || d.addi || d.add) -> MakeValid(true.B, AluOp.ADD),
             d.sub                        -> MakeValid(true.B, AluOp.SUB),
@@ -600,10 +613,10 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // -------------------------------------------------------------------------
         // Mlu
         val mlu = MuxUpTo1H(MakeValid(false.B, MluOp.MUL), Seq(
-        d.mul     -> MakeValid(true.B, MluOp.MUL),
-        d.mulh    -> MakeValid(true.B, MluOp.MULH),
-        d.mulhsu  -> MakeValid(true.B, MluOp.MULHSU),
-        d.mulhu   -> MakeValid(true.B, MluOp.MULHU),
+            d.mul     -> MakeValid(true.B, MluOp.MUL),
+            d.mulh    -> MakeValid(true.B, MluOp.MULH),
+            d.mulhsu  -> MakeValid(true.B, MluOp.MULHSU),
+            d.mulhu   -> MakeValid(true.B, MluOp.MULHU),
         ))
         io.mlu(i).valid := tryDispatch && mlu.valid
         io.mlu(i).bits.addr := rdAddr(i)
@@ -612,10 +625,10 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // -------------------------------------------------------------------------
         // Dvu
         val dvu = MuxUpTo1H(MakeValid(false.B, DvuOp.DIV), Seq(
-        d.div  -> MakeValid(true.B, DvuOp.DIV),
-        d.divu -> MakeValid(true.B, DvuOp.DIVU),
-        d.rem  -> MakeValid(true.B, DvuOp.REM),
-        d.remu -> MakeValid(true.B, DvuOp.REMU)
+            d.div  -> MakeValid(true.B, DvuOp.DIV),
+            d.divu -> MakeValid(true.B, DvuOp.DIVU),
+            d.rem  -> MakeValid(true.B, DvuOp.REM),
+            d.remu -> MakeValid(true.B, DvuOp.REMU)
         ))
         io.dvu(i).valid := tryDispatch && dvu.valid
         io.dvu(i).bits.addr := rdAddr(i)
@@ -624,19 +637,19 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // -------------------------------------------------------------------------
         // Lsu
         val lsu = MuxUpTo1H(MakeValid(false.B, LsuOp.LB), Seq(
-        d.lb             -> MakeValid(true.B, LsuOp.LB),
-        d.lh             -> MakeValid(true.B, LsuOp.LH),
-        d.lw             -> MakeValid(true.B, LsuOp.LW),
-        d.lbu            -> MakeValid(true.B, LsuOp.LBU),
-        d.lhu            -> MakeValid(true.B, LsuOp.LHU),
-        d.sb             -> MakeValid(true.B, LsuOp.SB),
-        d.sh             -> MakeValid(true.B, LsuOp.SH),
-        d.sw             -> MakeValid(true.B, LsuOp.SW),
-        d.wfi            -> MakeValid(true.B, LsuOp.FENCEI),
-        d.fencei         -> MakeValid(true.B, LsuOp.FENCEI),
-        d.flushat        -> MakeValid(true.B, LsuOp.FLUSHAT),
-        d.flushall       -> MakeValid(true.B, LsuOp.FLUSHALL),
-        (d.isFloatLoad() || d.isFloatStore()) -> MakeValid(true.B, LsuOp.FLOAT)
+            d.lb             -> MakeValid(true.B, LsuOp.LB),
+            d.lh             -> MakeValid(true.B, LsuOp.LH),
+            d.lw             -> MakeValid(true.B, LsuOp.LW),
+            d.lbu            -> MakeValid(true.B, LsuOp.LBU),
+            d.lhu            -> MakeValid(true.B, LsuOp.LHU),
+            d.sb             -> MakeValid(true.B, LsuOp.SB),
+            d.sh             -> MakeValid(true.B, LsuOp.SH),
+            d.sw             -> MakeValid(true.B, LsuOp.SW),
+            d.wfi            -> MakeValid(true.B, LsuOp.FENCEI),
+            d.fencei         -> MakeValid(true.B, LsuOp.FENCEI),
+            d.flushat        -> MakeValid(true.B, LsuOp.FLUSHAT),
+            d.flushall       -> MakeValid(true.B, LsuOp.FLUSHALL),
+            (d.isFloatLoad() || d.isFloatStore()) -> MakeValid(true.B, LsuOp.FLOAT)
         ) ++ Option.when(p.enableRvv) {
         val isRvvLoad = d.rvv.get.valid &&
             (d.rvv.get.bits.opcode === RvvCompressedOpcode.RVVLOAD)
@@ -660,35 +673,49 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         io.lsu(i).bits.op := lsu.bits
         io.lsu(i).bits.pc := io.inst(i).bits.addr
         if (p.enableRvv) {
-        io.lsu(i).bits.elemWidth.get := io.inst(i).bits.inst(14,12)
-        io.lsu(i).bits.nfields.get := io.inst(i).bits.inst(31,29)
-        io.lsu(i).bits.umop.get := io.inst(i).bits.inst(24,20)
+            io.lsu(i).bits.elemWidth.get := io.inst(i).bits.inst(14,12)
+            io.lsu(i).bits.nfields.get := io.inst(i).bits.inst(31,29)
+            io.lsu(i).bits.umop.get := io.inst(i).bits.inst(24,20)
         }
 
         // -------------------------------------------------------------------------
         // Csr
         if (i == 0) {
-        val csr = MuxUpTo1H(MakeValid(false.B, CsrOp.CSRRW), Seq(
-            d.csrrw -> MakeValid(true.B, CsrOp.CSRRW),
-            d.csrrs -> MakeValid(true.B, CsrOp.CSRRS),
-            d.csrrc -> MakeValid(true.B, CsrOp.CSRRC)
-        ))
-        val csr_bits_index = io.inst(0).bits.inst(31,20)
-        val (csr_address, csr_address_valid) = CsrAddress.safe(csr_bits_index)
-        // Stall reads of vxsat (0x009) and vcsr (0x00F) until the vector unit is
-        // idle. Only these CSRs can be modified by in-flight vector instructions
-        // (saturating arithmetic sets vxsat; vcsr contains vxsat as a bitfield).
-        val isVxsatOrVcsr = csr_bits_index === 0x009.U || csr_bits_index === 0x00F.U
-        val rvvIdleOrNotVxsat = io.rvvIdle.getOrElse(true.B) || !isVxsatOrVcsr
-        io.csr.valid := tryDispatch && csr.valid && csr_address_valid && (if (p.enableFloat) { io.float.get.ready } else { true.B }) && rvvIdleOrNotVxsat
-        io.csr.bits.addr := rdAddr(i)
-        io.csr.bits.index := csr_bits_index
-        io.csr.bits.rs1 := rs1Addr(i)
-        io.csr.bits.op := csr.bits
-        io.csrFault(0) := csr.valid && !csr_address_valid && tryDispatch
-        } else {
-        io.csrFault(i) := false.B
+            val csr = MuxUpTo1H(MakeValid(false.B, CsrOp.CSRRW), Seq(
+                d.csrrw -> MakeValid(true.B, CsrOp.CSRRW),
+                d.csrrs -> MakeValid(true.B, CsrOp.CSRRS),
+                d.csrrc -> MakeValid(true.B, CsrOp.CSRRC)
+            ))
+            val csr_bits_index = io.inst(0).bits.inst(31,20)
+            val (csr_address, csr_address_valid) = CsrAddress.safe(csr_bits_index)
+            // Stall reads of vxsat (0x009) and vcsr (0x00F) until the vector unit is
+            // idle. Only these CSRs can be modified by in-flight vector instructions
+            // (saturating arithmetic sets vxsat; vcsr contains vxsat as a bitfield).
+            val isVxsatOrVcsr = csr_bits_index === 0x009.U || csr_bits_index === 0x00F.U
+            val rvvIdleOrNotVxsat = io.rvvIdle.getOrElse(true.B) || !isVxsatOrVcsr
+            io.csr.valid := tryDispatch && csr.valid && csr_address_valid && (if (p.enableFloat) { io.float.get.ready } else { true.B }) && rvvIdleOrNotVxsat
+            io.csr.bits.addr := rdAddr(i)
+            io.csr.bits.index := csr_bits_index
+            io.csr.bits.rs1 := rs1Addr(i)
+            io.csr.bits.op := csr.bits
+            io.csrFault(0) := csr.valid && !csr_address_valid && tryDispatch
+            } else {
+            io.csrFault(i) := false.B
         }
+
+        // -------------------------------------------------------------------------
+        // Matrix
+        if (i == 0) {  
+            val matrixCfgValid = d.isMatrixCfg()   
+            io.matrixCfg.valid := tryDispatch && matrixCfgValid  
+            io.matrixCfg.bits.op := MuxCase(MatrixCfgOp.SET_M, Seq(
+                (d.msettileki || d.msettilek) -> MatrixCfgOp.SET_K,    
+                (d.msettilemi || d.msettilem) -> MatrixCfgOp.SET_M,    
+                (d.msettileni || d.msettilen) -> MatrixCfgOp.SET_N  )
+                ) 
+        } 
+
+
 
         // -------------------------------------------------------------------------
         // Rvv
@@ -713,10 +740,16 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         val fenceValid = if (i == 0) { tryDispatch && d.fence } else { false.B }
 
         // Set next lastReady if dispatched.
-        val dispatched = Seq(io.alu(i).fire, io.bru(i).fire, io.mlu(i).fire, io.dvu(i).fire, io.lsu(i).fire) ++
-            Option.when(i == 0)(Seq(io.csr.valid, fenceValid)).getOrElse(Seq()) ++
-            Option.when(p.enableRvv)(Seq(io.rvv.get(i).fire)).getOrElse(Seq()) ++
-            Option.when(p.enableFloat && i == 0)(Seq(io.float.get.fire)).getOrElse(Seq())
+        val dispatched = Seq(
+            io.alu(i).fire, io.bru(i).fire, io.mlu(i).fire, io.dvu(i).fire, io.lsu(i).fire
+            ) ++
+            Option.when(i == 0)(Seq(
+                io.csr.valid, fenceValid, io.matrixCfg.valid
+                )).getOrElse(Seq()) ++
+            Option.when(p.enableRvv)(Seq(
+                io.rvv.get(i).fire)).getOrElse(Seq()) ++
+            Option.when(p.enableFloat && i == 0)(Seq(
+                io.float.get.fire)).getOrElse(Seq())
             lastReady(i + 1) := dispatched.reduce(_||_)
         }
 
@@ -750,7 +783,11 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
             // Set immediates
             io.rs1Set(i).valid := io.inst(i).fire && d.rs1Set()
-            io.rs1Set(i).value := Mux(d.isCsr(), d.immcsr, io.inst(i).bits.addr)  // Program Counter (PC)
+            // io.rs1Set(i).value := Mux(d.isCsr(), d.immcsr, io.inst(i).bits.addr)  // Program Counter (PC)
+            io.rs1Set(i).value := MuxCase(io.inst(i).bits.addr ,Seq(
+                d.isCsr()-> d.immcsr,
+                d.isMatrixCfgImm() -> Cat(0.U(22.W),io.inst(i).bits.inst(24,15)) 
+            ))
             io.rs2Set(i).valid := io.inst(i).fire && d.rs2Set()
             io.rs2Set(i).value := MuxCase(d.imm12, IndexedSeq((d.auipc || d.lui) -> d.imm20))
 
@@ -811,8 +848,15 @@ object DecodeInstruction {
         d.immcsr := op(19,15)
         d.immst  := Cat(Fill(20, op(31)), op(31,25), op(11,7))
 
-        // my
-        d.matadd := op === BitPat("b0101010_?????_?????_000_?????_0001011")
+        // Martix
+        // TODO 补 enableMatrix 
+        d.msettileki := op === BitPat("b0001_00_0_?????_?????_000_00000_0101011")
+        d.msettilek  := op === BitPat("b0001_00_1_00000_?????_000_00000_0101011")
+        d.msettilemi := op === BitPat("b0010_00_0_?????_?????_000_00000_0101011")
+        d.msettilem  := op === BitPat("b0010_00_1_00000_?????_000_00000_0101011")
+        d.msettileni := op === BitPat("b0011_00_0_?????_?????_000_00000_0101011")
+        d.msettilen  := op === BitPat("b0011_00_1_00000_?????_000_00000_0101011")
+
 
         // RV32I
         d.lui   := op === BitPat("b????????????????????_?????_0110111")
@@ -899,7 +943,6 @@ object DecodeInstruction {
         d.flushat  := op === BitPat("b0010?_??_00000_?????_000_00000_11101_11") && op(19,15) =/= 0.U
         d.flushall := op === BitPat("b0010?_??_00000_00000_000_00000_11101_11")
 
-
         if (p.enableFloat) {
             val float = FloatInstruction.decode(op, addr)
             val floatValid = float.valid && float.bits.validate_csrfrm(csrFrm)
@@ -927,6 +970,13 @@ object DecodeInstruction {
             d.fencei   := false.B
             d.flushat  := false.B
             d.flushall := false.B
+
+            d.msettileki := false.B
+            d.msettilek  := false.B
+            d.msettilemi := false.B
+            d.msettilem  := false.B
+            d.msettileni := false.B
+            d.msettilen  := false.B
 
             if (p.enableFloat) {
                 d.float.get := MakeInvalid(new FloatInstruction)
@@ -956,7 +1006,7 @@ object DecodeInstruction {
                         d.mpause, d.mret, d.fencei, d.flushat, d.flushall,
                         d.rvv.map(_.valid).getOrElse(false.B),
                         d.float.map(_.valid).getOrElse(false.B),
-                        d.matadd
+                        d.msettileki,d.msettilek ,d.msettilemi,d.msettilem ,d.msettileni,d.msettilen 
                         )
 
         d.undef := decoded === 0.U
