@@ -34,6 +34,12 @@ HELLO_WORLD_TESTCASES = [
 ]
 # END_TESTCASES_FOR_hello_world_float_core_mini_axi
 
+# BEGIN_TESTCASES_FOR_matrix_cfg
+MATRIX_CFG_TESTCASES = [
+    "core_mini_axi_matrix_cfg",
+]
+# END_TESTCASES_FOR_matrix_cfg
+
 cocotb_test_suite(
     name = "tutorial",
     simulators = [
@@ -96,9 +102,45 @@ cocotb_test_suite(
     verilator_model = "//tests/cocotb:core_mini_axi_model",
 )
 
+cocotb_test_suite(
+    name = "matrix_cfg",
+    simulators = [
+        "verilator",
+        "vcs",
+    ],
+    testcases = MATRIX_CFG_TESTCASES,
+    testcases_vname = "MATRIX_CFG_TESTCASES",
+    tests_kwargs = {
+        "waves": False,
+        "hdl_toplevel": "CoreMiniAxi",
+        "seed": "42",
+        "test_module": ["matrix_cfg.py"],
+        "deps": [
+            "//coralnpu_test_utils:core_mini_axi_sim_interface",
+            "@rules_python//python/runfiles",
+        ],
+        "data": [":matrix_cfg_program"],
+        "size": "small",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_cfg_program",
+        "//tests/cocotb:coverage_exclude.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = ["//hdl/chisel/src/coralnpu:core_mini_axi_cc_library_verilog"],
+    verilator_model = "//tests/cocotb:core_mini_axi_model",
+)
+
 coralnpu_v2_binary(
     name = "coralnpu_v2_program",
     srcs = ["program.cc"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_cfg_program",
+    srcs = ["matrix_cfg_program.cc"],
 )
 
 coralnpu_v2_binary(

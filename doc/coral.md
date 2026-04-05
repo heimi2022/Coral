@@ -4,13 +4,19 @@
 
 - 已完成 matrix 参数初版配置
   - 已在 `hdl/chisel/src/coralnpu/Parameters.scala` 中加入 `enableMatrix / matrixElen / matrixTlen / matrixTrlen` 等参数
-- 已完成 matrix 配置指令第一版 Decode 改造
-  - 已在 `hdl/chisel/src/coralnpu/scalar/Decode.scala` 中加入 `msettilemi/msettilem/msettileki/msettilek/msettileni/msettilen`
-  - 已加入 `isMatrixCfg / isMatrixCfgImm / isMatrixCfgReg`
-  - 已将 matrix config 指令并入 `forceSlot0Only()`
-  - 已新增 `matrixCfg` dispatch 通路，当前先通过 `MatrixCfgCmd(op)` 区分 `SET_M / SET_K / SET_N`
-  - 已让 `msettile*i` immediate 形式通过 `rs1Set` 注入 `uimm10`，统一为后端可直接读取的 `rs1.data`
-  - 已让 `matrixCfg` 与 CSR 一样要求 `retirement_buffer_empty` 后再发射，避免全局 matrix 配置状态乱序可见
+- 已完成 `msettile*` 的 Decode 改造
+  - 已加入 `msettilemi/msettilem/msettileki/msettilek/msettileni/msettilen`
+  - 已用 `matrixCfg` 通路区分 `SET_M / SET_K / SET_N`
+  - 已让 immediate 形式通过 `rs1Set` 注入 `uimm10`
+  - 已让 `matrixCfg` 与 CSR 一样要求 `retirement_buffer_empty` 后再发射
+- 已完成 `msettile*` 从 `Decode -> SCore -> CSR` 的闭环接通
+  - 已把 `dispatch.io.matrixCfg` 接入 `csr.io.matrixCfgReq`
+  - 已根据 `matrixCfgReq.op + rs1.data` 更新 `xtilem / xtilek / xtilen`
+  - 已去掉普通 CSR 写路径对 `xtilem / xtilek / xtilen` 的直接赋值
+- 已完成 `msettile*` 的程序级验证
+  - 已新增 `tests/cocotb/tutorial/matrix_cfg_program.cc`
+  - 已新增 `tests/cocotb/tutorial/matrix_cfg.py`
+  - 已覆盖立即数形式、寄存器形式，以及 `M / K / N` 三个维度的改写验证
 
 ## 下一步计划
 
@@ -18,96 +24,244 @@
    - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
    - 暂时不直接改 `RVV` generated Verilog
    - 暂时不先改 GCC / binutils
-2. 继续改 CSR
-   - 在 `hdl/chisel/src/coralnpu/scalar/Csr.scala` 中加入 matrix 配置寄存器
-   - 先把 `xmcsr / mtilem / mtilen / mtilek / xmisa / xtlenb / xtrlenb / xalenb` 这批 CSR 立起来
-   - 新增 `CsrMatrixIO` 或 `matrixCfg` 输入端口，把 `Decode.scala` 中的 `matrixCfg` 通路真正接入 CSR
-   - 先让 `msettile*` 能更新 `mtilem / mtilek / mtilen`
+2. 继续完善 matrix CSR 与只读能力寄存器
+   - 继续整理 `xmcsr / xmisa / xtlenb / xtrlenb / xalenb`
+   - 明确 `xtilem / xtilek / xtilen` 的边界值、约束和异常策略
 3. 再建立独立 matrix 执行通路
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
    - 把当前 `matadd` 从 `ALU` 过渡到 `MatrixUnit`
 4. 最后补最小验证闭环
-   - CSR 读写测试
-   - `msettile*` 的 Decode / Dispatch 测试
-   - 一条 matrix 指令的执行测试
+   - 补边界值 / 覆写顺序 / 异常场景测试
+   - 保留 `msettile*` 的 Decode / Dispatch / Program / Waveform 四层验证
+   - 再补一条真正的 matrix 指令执行测试
 
-## Matrix Decode 阶段记录（已完成）
+## `msettile*` 从 Decode 到 CSR 的闭环记录（已完成）
 
-这一阶段的目标不是先把矩阵 CSR 或 MatrixUnit 完整做完，而是先把 matrix 配置指令在前端识别清楚，并为后续 `Csr.scala` 接线准备好统一的 dispatch 语义。
+这次工作的重点，是把下面 6 组 matrix config 指令真正接到 CSR 状态里，并完成程序级验证：
 
-当前已在 `hdl/chisel/src/coralnpu/scalar/Decode.scala` 中完成这些工作：
+- `msettilemi / msettilem`
+- `msettileki / msettilek`
+- `msettileni / msettilen`
 
-- 新增矩阵配置指令识别：
+实现依据是：
+
+- `/home/wjj/2-NPU/riscv-matrix-extension-spec/spec`
+
+### Matrix Configuration Instructions 编码表
+
+下表对应 matrix configuration instructions 的编码格式。这里把当前已经实现的 `msettile*` 和暂不实现的 `mrelease` 一起列出来，便于后续对照 `Decode.scala` 检查。
+
+| 指令 | func[31:28] | uop[27:26] | ctrl[25] | 参数域[24:15] | func3[14:12] | nop[11:7] | opcode[6:0] | 备注 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `mrelease` | `0000` | `00` | `0` | `0` | `000` | `00000` | `major opcode` | 当前暂不实现 |
+| `msettileki` | `0001` | `00` | `0` | `uimm10[9:0]` | `000` | `00000` | `major opcode` | 已实现 |
+| `msettilek` | `0001` | `00` | `1` | `00000 / rs1` | `000` | `00000` | `major opcode` | 已实现 |
+| `msettilemi` | `0010` | `00` | `0` | `uimm10[9:0]` | `000` | `00000` | `major opcode` | 已实现 |
+| `msettilem` | `0010` | `00` | `1` | `00000 / rs1` | `000` | `00000` | `major opcode` | 已实现 |
+| `msettileni` | `0011` | `00` | `0` | `uimm10[9:0]` | `000` | `00000` | `major opcode` | 已实现 |
+| `msettilen` | `0011` | `00` | `1` | `00000 / rs1` | `000` | `00000` | `major opcode` | 已实现 |
+
+说明：
+
+- immediate 形式里，`uimm10[9:0]` 横跨 `inst[24:15]`
+- register 形式里，`ctrl=1`，`rs2=00000`，参数来自 `rs1`
+- `mrelease` 编码已记录，但当前阶段暂不实现；原因见后文“当前暂不实现的内容”
+
+### Decode 侧设计关键点
+
+- `Decode.scala` 已识别 6 组 matrix config 指令：
   - `msettilemi / msettilem`
   - `msettileki / msettilek`
   - `msettileni / msettilen`
-- 新增辅助判断函数：
+- 已加入辅助判断函数：
   - `isMatrixCfg()`
   - `isMatrixCfgImm()`
   - `isMatrixCfgReg()`
-- 将矩阵配置指令纳入 `forceSlot0Only()`，保证它们只从 `slot0` 发射
-- 在 `Dispatch` 接口中新增：
+- 已将 matrix config 指令并入 `forceSlot0Only()`
+  - 保证它们只从 `slot0` 发射
+- 已新增：
   - `matrixCfg : Valid[MatrixCfgCmd]`
 - 目前通过 `MatrixCfgCmd.op` 区分三种配置目标：
   - `SET_M`
   - `SET_K`
   - `SET_N`
 
-### Decode 设计原则
+### Decode 的统一数据策略
 
-这一版 Decode 的关键策略是：
+这一版最关键的设计，不是单纯“把指令识别出来”，而是把 immediate 和 register 两种形式统一成一份后端接口：
 
-- `msettilem/msettilek/msettilen`
-  - 把参数看作来自真实寄存器 `rs1`
-- `msettilemi/msettileki/msettileni`
-  - 不额外新建一套 immediate 数据通路
-  - 而是复用现有 `rs1Set` 机制，把 `uimm10` 直接注入为 `rs1.data`
+- `msettilem / msettilek / msettilen`
+  - 参数来自真实 `rs1`
+- `msettilemi / msettileki / msettileni`
+  - 复用现有 `rs1Set`
+  - 把 `uimm10` 直接注入为 `rs1.data`
 
-这样做的目的，是让后端看到统一的数据接口：
+这样后端只需要看：
 
 ```text
 matrixCfg.op  决定修改 M / K / N
 rs1.data      决定写入的新值
 ```
 
-也就是说，后续 `Csr.scala` 不需要区分：
+也就是说，到了 `SCore.scala` 和 `Csr.scala` 之后，就不需要再区分“这是立即数形式还是寄存器形式”。
 
-- 这是寄存器形式
-- 还是立即数形式
+### 顺序性约束
 
-只需要读统一的 `rs1.data` 即可。
-
-### 时序与顺序约束
-
-由于 `msettile*` 修改的是全局 matrix 配置状态：
+由于 `msettile*` 修改的是全局 tile shape 状态：
 
 - `mtilem`
 - `mtilen`
 - `mtilek`
 
-所以这一版已经让它和普通 CSR 一样，要求在 `retirement_buffer_empty` 时才能发射。这样可以避免后续矩阵 load/store/compute 接进来后，出现旧指令看到新 tile 配置的乱序问题。
+所以这一版已经让它和普通 CSR 一样，要求在 `retirement_buffer_empty` 时才能发射，避免后续矩阵 load/store/compute 看到乱序的 tile 配置。
 
-当前使用的约束思路是：
+当前约束可以概括为：
 
 ```text
 普通指令：不要求 ROB 为空
 CSR / MatrixCfg：要求 ROB 为空
 ```
 
-### 当前阶段的边界
+### 源码落点
 
-这一步只完成了“前端识别 + 发射分类”，还没有完成：
+- `Decode.scala`
+  - 负责识别 `msettile*`
+  - 负责把 immediate / register 两种来源统一成 `rs1.data`
+- `SCore.scala`
+  - 已将 `dispatch.io.matrixCfg` 接到 `csr.io.matrixCfgReq`
+  - 已把 `dispatch.io.matrixCfg.valid` 纳入 `csr.io.rs1` 的取数条件
+- `Csr.scala`
+  - 已根据 `matrixCfgReq.valid` 和 `matrixCfgReq.bits.op` 更新：
+    - `xtilem`
+    - `xtilek`
+    - `xtilen`
+  - 已删除普通 CSR 写路径里对这三个寄存器的直接 `wdata` 赋值
 
-- `SCore.scala` 中 `matrixCfg` 到 `CSR` 的接线
-- `Csr.scala` 中 `mtilem / mtilek / mtilen` 的真实更新
-- `xmcsr / xmisa / xtlenb / xtrlenb / xalenb` 的 CSR 建立
-- `MatrixUnit` 的数据执行路径
+### `SCore.scala` 中关键点
 
-因此现在可以把这一阶段理解为：
+- `msettile*` 没有被塞进普通 `csr.io.req` 这条通用 CSR 请求通路
+  - 而是单独走：
+    - `dispatch.io.matrixCfg`
+    - `csr.io.matrixCfgReq`
+  - 这样做的好处是，matrix 配置语义不需要伪装成“普通 CSR 编号 + CSR op”才能传到后端
+- `csr.io.rs1` 的取数条件做了一个关键扩展
+  - 原来只把普通 `dispatch.io.csr.valid` 当成“需要给 CSR 提供 rs1”
+  - 现在改成：
+    - `dispatch.io.csr.valid || dispatch.io.matrixCfg.valid`
+  - 也就是把 `msettile*` 也视为一类“CSR-like”请求
+- 这一点很关键，因为 `Csr.scala` 里真正写 `xtilem / xtilek / xtilen` 时，拿到的写入值就是统一的 `io.rs1.data`
+  - 对寄存器形式来说，这是 regfile 读出来的真实 `rs1`
+  - 对立即数形式来说，这是前面通过 `rs1Set` 注入进去的 `uimm10`
+- 这样以后回头看代码时，可以抓住一个核心设计：
 
-- matrix 配置指令已经“有名字、有分类、有发射出口”
-- 但还没有真正“落到 CSR 状态里生效”
+```text
+Decode 负责把 immediate / reg 两种来源统一成 rs1.data
+SCore 负责把这份统一后的 rs1.data 正确送到 CSR
+Csr 只关心 op 是 SET_M / SET_K / SET_N，以及 rs1.data 是多少
+```
+
+### `Csr.scala` 中值得记录的点
+
+- `msettile*` 在 CSR 内部不是直接组合生效，而是先进一个寄存后的 `matrixCfgReq`
+  - 当前写法是：
+    - `val matrixCfgReq = RegInit(MakeInvalid(new MatrixCfgCmd))`
+  - 然后每拍用 `io.matrixCfg` 去更新它
+  - 所以在波形里经常会看到：
+    - decode 命中在前
+    - `matrixCfgReq_valid` 拉高在后
+    - `xtilem / xtilek / xtilen` 更新再跟着发生
+- `xtilem / xtilek / xtilen` 现在和普通 matrix CSR 控制位分成了两类入口
+  - 一类仍然走普通 CSR 写路径：
+    - `xmcsr`
+    - `xmxrm`
+    - `xmsat`
+    - `xmfflags`
+    - `xmfrm`
+    - `xmsaten`
+  - 另一类只允许走 `msettile*` 专用配置路径：
+    - `xtilem`
+    - `xtilek`
+    - `xtilen`
+- 这意味着当前实现已经有一个明确分层：
+  - matrix rounding / sat / flags 仍是“普通 CSR 语义”
+  - tile shape 则是“专用 matrix config 指令语义”
+- 现在对 `xtilem / xtilek / xtilen` 的处理是：
+  - 可读：仍然能通过 CSR read path 被 `csrr` 读出来
+  - 不可被普通 CSR write 直接改写
+  - 可被 `msettile*` 修改
+- 当前写入逻辑还是最小实现
+  - `SET_M -> xtilem := rs1`
+  - `SET_K -> xtilek := rs1`
+  - `SET_N -> xtilen := rs1`
+  - 也就是说，当前先不做数值合法化、边界裁剪或非法值异常
+  - 这部分后续如果要和 spec 更严格对齐，还需要继续补
+- CSR 末端已经把这 3 个状态继续向外导出：
+  - `io.matrix.get.mtilem := xtilem`
+  - `io.matrix.get.mtilek := xtilek`
+  - `io.matrix.get.mtilen := xtilen`
+  - 所以即使现在还没有完整 `MatrixUnit`，tile shape 状态的“保存 + 对外发布”接口已经先立住了
+
+### 当前语义
+
+- `xtilem / xtilek / xtilen` 现在只允许由 `msettile*` 修改
+- 普通 CSR 写路径仍可读出这 3 个状态，但不再直接改写它们
+- 这样可以让架构语义入口、硬件状态入口和验证口径保持一致
+
+### 程序级验证
+
+为了不只停留在单元测试，这一轮补了独立 program 测试：
+
+- `tests/cocotb/tutorial/matrix_cfg_program.cc`
+- `tests/cocotb/tutorial/matrix_cfg.py`
+
+覆盖内容包括：
+
+- `M`：立即数形式 + 寄存器形式
+- `K`：立即数形式 + 寄存器形式
+- `N`：立即数形式 + 寄存器形式
+
+程序会把每一步 `(m, k, n)` 快照写回输出缓冲区，当前期望序列为：
+
+```text
+[0,0,0, 4,0,0, 7,0,0, 7,8,0, 7,9,0, 7,9,16, 7,9,11]
+```
+
+对应动作顺序是：
+
+1. 初始值读取
+2. `msettilemi 4`
+3. `msettilem rs1=7`
+4. `msettileki 8`
+5. `msettilek rs1=9`
+6. `msettileni 16`
+7. `msettilen rs1=11`
+
+### 波形观测建议
+
+如果用 `VCS + Verdi` 看这一轮 `msettile*` 行为，最有用的信号是：
+
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettilemi`
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettilem`
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettileki`
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettilek`
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettileni`
+- `CoreMiniAxi.dispatch.decodedInsts_0_msettilen`
+- `CoreMiniAxi.csr.matrixCfgReq_valid`
+- `CoreMiniAxi.csr.matrixCfgReq_bits_op`
+- `CoreMiniAxi.csr.io_rs1_data`
+- `CoreMiniAxi.csr.xtilem`
+- `CoreMiniAxi.csr.xtilek`
+- `CoreMiniAxi.csr.xtilen`
+
+可以按下面这条链路观察：
+
+```text
+指令 decode 命中
+-> dispatch 发出 matrixCfg
+-> CSR 收到 matrixCfgReq_valid
+-> xtilem / xtilek / xtilen 在对应周期更新
+```
 
 ## 相关代码结构
 
@@ -311,7 +465,7 @@ flowchart LR
 - 后续不再继续把矩阵语义堆在普通 `ALU` 里
 - 下一阶段转入独立 `MatrixUnit + CSR + Decode/Dispatch` 主线
 
-## 在 Coral 中实现矩阵扩展的计划表
+## 在 Coral 中实现矩阵扩展的总体路线
 
 当前最适合的思路不是一开始就改 RVV 大核，也不是先并编译器，而是先在 Coral 标量前端里增加一套独立的 `matrix extension` 通路，再逐步向玄铁矩阵扩展靠拢。
 
@@ -322,33 +476,34 @@ flowchart LR
 - 不修改 generated RVV 大文件，优先改 Chisel 源码
 - 不把矩阵操作长期塞在普通 `ALU` 里，要单独建 `MatrixUnit`
 
-### 第一版目标
+### 当前目标
 
-第一版建议只做一个可运行、可验证、可扩展的最小子集：
+当前版本的目标已经收敛为一个最小、可验证、可扩展的子集：
 
-- 输入数据最大先支持到 `16bit`
-- 累加输出先按 `32bit` 设计
 - 固定参数：
   - `ELEN = 32`
   - `TLEN = 256`
   - `TRLEN = 64`
-- 先实现 matrix CSR：
-  - `xmcsr`
-  - `mtilem`
-  - `mtilen`
-  - `mtilek`
-  - `xmisa`
-  - `xtlenb`
-  - `xtrlenb`
-  - `xalenb`
-- 先实现 matrix 指令子集：
-  - `msettilem`
-  - `msettilen`
-  - `msettilek`
-  - `mld`
-  - `mst`
-  - `mmacc`
-- `matadd` 先从“普通 ALU 占位操作”逐步迁到独立 matrix 通路
+- 已完成：
+  - `msettilemi/msettilem`
+  - `msettileki/msettilek`
+  - `msettileni/msettilen`
+  - `xtilem / xtilek / xtilen` 的 CSR 保存与程序级验证
+
+### 当前暂不实现的内容
+
+- `MS / mrelease` 当前阶段暂不实现
+- 原因是当前 Coral matrix v1 还没有引入完整的 matrix context status 语义，也还没有真正依赖 `MS` 的上下文切换、dirty tracking 和 `MS=Off` 非法指令检查
+- 现阶段优先级更高的是：
+  - `xtilem / xtilek / xtilen` 的边界与异常策略
+  - `xmcsr / xmisa / xtlenb / xtrlenb / xalenb`
+  - `MatrixUnit`
+  - `mld / mst / mmacc`
+- 等下面这些能力开始进入实现时，再回头补 `MS / mrelease` 会更合适：
+  - 需要完整对齐 matrix spec 的 context status 语义
+  - 需要支持 `mrelease`
+  - 需要实现 `MS=Off` 时对 matrix 指令和 matrix CSR 的非法访问检查
+  - 需要做真正的 matrix context save/restore 或上下文切换优化
 
 ### 当前参数配置为什么这样选
 
@@ -443,419 +598,33 @@ spec 还定义了三个由它们推导出来的量：
 - 顶层拼装：
   - `hdl/chisel/src/coralnpu/Core.scala`
 
-所以路线应该是：
-
-- 先加 `enableMatrix`
-- 再加 matrix CSR
-- 再加 `MatrixUnit`
-- 再把 `matadd` 和后续 matrix 指令接进去
-
-### 分阶段计划
-
-#### 当前优先开工顺序
-
-如果现在就要开始动手，建议严格按下面顺序推进：
-
-1. `Parameters.scala`
-   - 增加 `enableMatrix`
-   - 增加 `matrixElen / matrixTlen / matrixTrlen`
-2. `Csr.scala`
-   - 增加 matrix CSR 状态
-   - 先让软件能配置 tile 形状和能力位
-3. `matrix/MatrixInterface.scala`
-   - 定义 `MatrixCmd / MatrixConfigState / FaultInfo`
-4. `matrix/MatrixUnit.scala`
-   - 先做空壳
-   - 只要求能收命令、返回完成、保留扩展接口
-5. `Decode.scala`
-   - 把 `matadd` 从“ALU 占位操作”改成“matrix 通路入口”
-6. `SCore.scala`
-   - 实例化并接入 `MatrixUnit`
-7. 测试
-   - 先补 CSR 测试
-   - 再补 decode / dispatch 测试
-   - 最后补一条最小 matrix 指令执行测试
-
-#### P0：冻结第一版规范
-
-目标：
-
-- 定义 Coral matrix v1 的最小兼容范围
-- 明确第一版只做 Xuantie matrix `subset`
-
-需要输出：
-
-- 一份设计文档，建议新增 `doc/matrix_plan.md`
-
-文档至少写清：
-
-- CSR 列表
-- 指令列表
-- tile / acc 寄存器模型
-- 异常策略
-- 第一版不支持的内容
-
-#### P1：增加 matrix 参数开关
-
-目标：
-
-- 在参数系统里正式引入 matrix extension
-
-建议修改：
-
-- `hdl/chisel/src/coralnpu/Parameters.scala`
-
-建议增加：
-
-- `enableMatrix`
-- `matrixElen`
-- `matrixTlen`
-- `matrixTrlen`
-- `matrixTileRegCount`
-- `matrixAccRegCount`
-
-建议默认值：
-
-- `enableMatrix = false`
-- `matrixElen = 32`
-- `matrixTlen = 256`
-- `matrixTrlen = 64`
-- `matrixTileRegCount = 4`
-- `matrixAccRegCount = 4`
-
-验收标准：
-
-- 代码可 elaboration
-- 顶层可以通过参数打开或关闭 matrix
-
-#### P2：增加 matrix CSR 配置面
-
-目标：
-
-- 让软件可以读写 matrix 配置状态
-
-建议修改：
-
-- `hdl/chisel/src/coralnpu/scalar/Csr.scala`
-
-建议做法：
-
-- 新增 Xuantie 风格 matrix CSR 地址和状态寄存器
-- 第一版允许 CSR 直接读写 `mtilem / mtilen / mtilek`
-- `KISA` 中加入 matrix capability bit
-
-建议第一版 CSR：
-
-- `xmcsr`
-- `mtilem`
-- `mtilen`
-- `mtilek`
-- `xmisa`
-- `xtlenb`
-- `xtrlenb`
-- `xalenb`
-
-验收标准：
-
-- 软件可通过 `csrr/csrw` 正常访问 matrix CSR
-- 仿真中可以观察到 CSR 状态变化
-
-#### P3：建立独立 matrix 接口
-
-目标：
-
-- 不再把 matrix 扩展长期混在 `ALU` 语义里
-
-建议新增目录：
-
-- `hdl/chisel/src/coralnpu/matrix/`
-
-建议新增文件：
-
-- `MatrixInterface.scala`
-
-第一版建议定义：
-
-- `MatrixConfigState`
-- `MatrixCmd`
-- `TileRegWriteDataIO`
-- `AccRegWriteDataIO`
-- `MatrixFaultInfo`
-
-验收标准：
-
-- matrix 通路的接口独立成型
-- 不依赖 RVV 内部实现细节
-
-#### P4：扩展 Decode
-
-目标：
-
-- 在 decode 中正式识别 matrix 指令
-
-建议修改：
-
-- `hdl/chisel/src/coralnpu/scalar/Decode.scala`
-
-建议增加：
-
-- `isMatrix()`
-- `writesMatrixReg()`
-- `readsMatrixReg()`
-- `isMatrixLoadStore()`
-
-并新增第一版指令识别：
-
-- `msettilem`
-- `msettilen`
-- `msettilek`
-- `mld`
-- `mst`
-- `mmacc`
-
-当前已有：
-
-- `matadd`
-
-建议：
-
-- 把 `matadd` 作为 matrix 通路的过渡入口
-
-验收标准：
-
-- matrix 指令不落到 `undef`
-- dispatch 能把 matrix 指令分到独立端口
-
-#### P5：建立 MatrixUnit 空壳
-
-目标：
-
-- 先把 matrix 执行通路搭起来
-
-建议新增：
-
-- `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
-
-第一版空壳功能：
-
-- 接收 `MatrixCmd`
-- 接收 `MatrixConfigState`
-- 输出 `ready / valid / busy / trap`
-- 先不做复杂计算
-
-验收标准：
-
-- `SCore` 能实例化 `MatrixUnit`
-- matrix 指令可进入该单元
-
-#### P6：在 SCore / Core 中接线
-
-目标：
-
-- 把 matrix unit 真的接入 Coral
-
-建议修改：
-
-- `hdl/chisel/src/coralnpu/scalar/SCore.scala`
-- `hdl/chisel/src/coralnpu/Core.scala`
-
-需要完成：
-
-- dispatch 到 matrix unit 的连接
-- 标量寄存器读操作数连接
-- matrix fault 接入 fault manager
-- 结果回写路径接入 retirement / regfile
-
-验收标准：
-
-- 顶层可综合 elaboration
-- 波形中能看到 matrix 指令通过独立通路传播
-
-#### P7：实现 tile / accumulator 寄存器文件
-
-目标：
-
-- 建立真正的矩阵状态存储
-
-建议新增：
-
-- `MatrixRegfile.scala`
-
-第一版建议：
-
-- `4` 个 tile 寄存器
-- `4` 个 accumulator 寄存器
-
-验收标准：
-
-- CSR 与指令可以正确影响 tile shape
-- tile / acc 数据可被读写
-
-#### P8：实现 matrix load/store
-
-目标：
-
-- 支持矩阵数据在 DTCM 和 tile reg 之间搬运
-
-建议新增：
-
-- `MatrixLoadStore.scala`
-
-建议策略：
-
-- 第一版尽量复用现有 LSU / DTCM 通路
-- 不一开始新做一套复杂总线协议
-
-第一版支持：
-
-- `mld`
-- `mst`
-
-验收标准：
-
-- 可把 DTCM 数据装载进 tile reg
-- 可把 tile reg 数据写回 DTCM
-
-#### P9：实现最小计算 datapath
-
-目标：
-
-- 完成第一版真正有意义的矩阵算子
-
-建议新增：
-
-- `MatrixMac.scala`
-
-第一版功能建议只做：
-
-- `int32 mmacc`
-
-验收标准：
-
-- 能完成最小矩阵乘加
-- 和软件 golden model 对比一致
-
-#### P10：异常与状态管理
-
-目标：
-
-- 定义 matrix extension 的 fault 行为
-
-建议处理：
-
-- 非法 tile shape
-- CSR 配置非法
-- busy 冲突
-- 未初始化 tile 访问
-- 非法 matrix opcode
-
-建议修改：
-
-- `matrix/*`
-- `scalar/FaultManager.scala`
-
-验收标准：
-
-- 非法使用时 fault 行为稳定且可重复
-
-#### P11：软件 bring-up
-
-目标：
-
-- 先不依赖完整编译器，先把软件闭环跑起来
-
-第一版建议：
-
-- 继续使用 `.insn`
-- 手写 matrix 汇编
-- 先生成 `elf/bin/vmem`
-
-建议测试内容：
-
-- CSR 读写程序
-- `msettile*` 程序
-- `mld/mst` 程序
-- `mmacc` 程序
-
-验收标准：
-
-- 能从 bare-metal 程序驱动 matrix CSR 和 matrix 指令
-
-#### P12：工具链接入
-
-目标：
-
-- 在 RTL 跑通后，再考虑玄铁工具链能力
-
-建议顺序：
-
-1. 先接 `binutils/opcodes/objdump`
-2. 再考虑 intrinsic
-3. 最后考虑 GCC backend
-
-注意：
-
-- 建议“并入流程”，不要直接把整套 GCC 源码塞进 Coral 仓库
-- 更适合把玄铁工具链作为外部工具链使用
-
-验收标准：
-
-- 汇编器能识别 matrix 指令
-- `objdump` 能正确反汇编
-
-#### P13：RTL 导出与综合
-
-目标：
-
-- 把 matrix 版本纳入现有 RTL 导出与综合流
-
-需要完成：
-
-- 增加带 matrix 开关的 emit 目标
-- 增加 matrix 版本 Verilog 导出
-- 更新综合脚本
-
-验收标准：
-
-- 能导出带 matrix 的 RTL
-- 能进入综合流程
-
-### 建议实施顺序
-
-最适合现在马上开始的顺序是：
-
-1. 写 `matrix_plan.md`，冻结第一版范围
-2. 修改 `Parameters.scala`
-3. 修改 `Csr.scala`
-4. 新建 `matrix/MatrixInterface.scala`
-5. 修改 `Decode.scala`
-6. 新建 `matrix/MatrixUnit.scala`
-7. 修改 `SCore.scala`
-8. 修改 `Core.scala`
-9. 写最小 CSR / decode / dispatch 测试
-
-### 第一周目标
-
-第一周建议只追求这几个结果：
-
-- `enableMatrix` 参数加入系统
-- matrix CSR 能读写
-- matrix 指令能 decode
-- `MatrixUnit` 空壳能接入顶层
-- 仿真中能看到 matrix 指令进入独立通路
-
-不要第一周就追：
-
-- 完整 tile load/store
-- 完整 `mmacc`
-- GCC backend
-
-### 第二周目标
-
-- tile / acc regfile
-- `msettilem/n/k`
-- `mld / mst`
-- 最小 `mmacc`
+这些入口当前分别对应：
+
+- 参数开关与实现规模
+- CSR 状态与 matrix 配置
+- 指令前端识别与分发
+- `matadd` 的过渡实现
+- 标量核与顶层接线
+
+### 后续主线
+
+后续只保留 4 条主线，避免计划表过细后很快过时：
+
+1. 完善 matrix CSR
+   - 整理 `xmcsr / xmisa / xtlenb / xtrlenb / xalenb`
+   - 明确 `xtilem / xtilek / xtilen` 的边界值与异常策略
+2. 建立独立 matrix 通路
+   - 新建 `matrix/MatrixInterface.scala`
+   - 新建 `matrix/MatrixUnit.scala`
+   - 在 `SCore.scala / Core.scala` 中完成接线
+3. 补齐数据与计算路径
+   - tile / accumulator regfile
+   - `mld / mst`
+   - 最小 `mmacc`
+4. 完善验证与导出
+   - 保留 `.insn` 和 bare-metal program 的 bring-up 路线
+   - 补程序级与波形验证
+   - 最后再整理 RTL 导出和综合流程
 
 ### 不建议的路线
 
@@ -863,15 +632,6 @@ spec 还定义了三个由它们推导出来的量：
 - 不建议第一步就并入完整玄铁 GCC
 - 不建议长期把 matrix 逻辑继续塞在 `Alu.scala`
 - 不建议第一版就追 full Xuantie ISA
-
-### 里程碑
-
-- `M1`：CSR 与 decode 打通
-- `M2`：MatrixUnit 空壳接入完成
-- `M3`：tile load/store 跑通
-- `M4`：`mmacc` 计算正确
-- `M5`：bare-metal 程序可驱动
-- `M6`：RTL 可导出并可综合
 
 ### 玄铁工具什么时候用
 

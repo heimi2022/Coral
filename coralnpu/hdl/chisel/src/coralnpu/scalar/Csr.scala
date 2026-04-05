@@ -657,7 +657,7 @@ class Csr(p: Parameters) extends Module {
         io.matrix.get.xmfrm := xmfrm
         io.matrix.get.xmsaten := xmsaten
     }
-    
+
     val is_csr_write = req.valid && !(req.bits.op
         .isOneOf(CsrOp.CSRRS, CsrOp.CSRRC) && req.bits.rs1 === 0.U)
 
@@ -688,9 +688,9 @@ class Csr(p: Parameters) extends Module {
     mode := MuxCase(
         mode,
         Seq(
-        entering_debug_mode -> CsrMode.Debug,
-        exiting_debug_mode -> CsrMode.Machine,
-        io.bru.in.mode.valid -> io.bru.in.mode.bits
+            entering_debug_mode -> CsrMode.Debug,
+            exiting_debug_mode -> CsrMode.Machine,
+            io.bru.in.mode.valid -> io.bru.in.mode.bits
         )
     )
     io.dm.debug_mode := (mode === CsrMode.Debug) || entering_debug_mode
