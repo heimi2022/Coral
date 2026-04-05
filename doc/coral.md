@@ -17,6 +17,32 @@
   - 已新增 `tests/cocotb/tutorial/matrix_cfg_program.cc`
   - 已新增 `tests/cocotb/tutorial/matrix_cfg.py`
   - 已覆盖立即数形式、寄存器形式，以及 `M / K / N` 三个维度的改写验证
+- 已完成 matrix CSR 面的程序级验证
+  - 已新增 `tests/cocotb/tutorial/matrix_csr_program.cc`
+  - 已新增 `tests/cocotb/tutorial/matrix_csr.py`
+  - 已覆盖 `xmisa / xtlenb / xtrlenb / xalenb`
+  - 已覆盖 `xmcsr <-> xmxrm/xmsat/xmfflags/xmfrm/xmsaten` 的别名关系
+  - 已覆盖 `xtilem / xtilek / xtilen` 只能由 `msettile*` 修改、普通 CSR 写不会直接改写
+  - 已在 Verilator 下跑通 `//tests/cocotb/tutorial:matrix_csr_core_mini_axi_matrix_csr`
+  - 已补齐 VCS 目标 `//tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr`，但本次本地执行受 license 阻塞，暂未形成新的功能性结论
+
+## 当前阶段结论
+
+- 当前阶段的 matrix CSR 面可以认为已经完成
+  - 已完成能力 CSR 只读面
+  - 已完成 `xmcsr` 与子字段 CSR 的别名语义
+  - 已完成 `msettile* -> xtilem / xtilek / xtilen` 的专用写入口
+  - 已明确禁止普通 CSR 写路径直接改写 `xtilem / xtilek / xtilen`
+- 但这不等于 CSR 整体已经完成
+  - 现在完成的是“matrix CSR 最小可用闭环”
+  - 还不是“matrix spec 下完整 CSR 行为”
+- **后续 CSR 仍需要继续补的内容至少包括**
+  - `xmsat_set / xmfflags_set` 从矩阵执行单元的运行时回写
+  - `xmfrm` 非法值的约束与异常语义
+  - `xtilem / xtilek / xtilen` 的边界值、合法范围与非法配置处理
+  - `MS` 字段与 `mrelease`
+  - `MS=Off` 时 matrix 指令 / matrix CSR 的非法访问判定
+  - 如果后续不只支持 `mmi8i32`，还要继续扩展 `xmisa` 的能力位表达
 
 ## 下一步计划
 
@@ -24,9 +50,10 @@
    - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
    - 暂时不直接改 `RVV` generated Verilog
    - 暂时不先改 GCC / binutils
-2. 继续完善 matrix CSR 与只读能力寄存器
-   - 继续整理 `xmcsr / xmisa / xtlenb / xtrlenb / xalenb`
-   - 明确 `xtilem / xtilek / xtilen` 的边界值、约束和异常策略
+2. 收尾 matrix CSR 细节
+   - 按“当前阶段结论”里列出的未完成项继续补齐
+   - 优先补 `xtilem / xtilek / xtilen` 的边界值、约束和异常策略
+   - 再补 `xmsat_set / xmfflags_set` 运行时回写与异常语义
 3. 再建立独立 matrix 执行通路
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
@@ -210,10 +237,14 @@ Csr 只关心 op 是 SET_M / SET_K / SET_N，以及 rs1.data 是多少
 
 ### 程序级验证
 
-为了不只停留在单元测试，这一轮补了独立 program 测试：
+为了不只停留在单元测试，这一轮补了两类独立 program 测试：
 
 - `tests/cocotb/tutorial/matrix_cfg_program.cc`
 - `tests/cocotb/tutorial/matrix_cfg.py`
+- `tests/cocotb/tutorial/matrix_csr_program.cc`
+- `tests/cocotb/tutorial/matrix_csr.py`
+
+#### `matrix_cfg`：验证 `msettile* -> xtile*`
 
 覆盖内容包括：
 
@@ -236,6 +267,59 @@ Csr 只关心 op 是 SET_M / SET_K / SET_N，以及 rs1.data 是多少
 5. `msettilek rs1=9`
 6. `msettileni 16`
 7. `msettilen rs1=11`
+
+#### `matrix_csr`：验证 matrix CSR 面
+
+覆盖内容包括：
+
+- 只读能力 CSR：
+  - `xmisa`
+  - `xtlenb`
+  - `xtrlenb`
+  - `xalenb`
+- `xmcsr` 和子字段 CSR 的别名关系：
+  - `xmxrm`
+  - `xmsat`
+  - `xmfflags`
+  - `xmfrm`
+  - `xmsaten`
+- `xtilem / xtilek / xtilen` 的写入口语义：
+  - `msettile*` 可以修改
+  - 普通 CSR 写 `0x803 / 0x804 / 0x805` 不会直接改写
+
+`matrix_csr_program.cc` 的输出缓冲区当前按下面顺序排布：
+
+1. `xmisa / xtlenb / xtrlenb / xalenb`
+2. 初始 `xmxrm / xmsat / xmfflags / xmfrm / xmsaten / xmcsr`
+3. 单独写子字段后的读回
+4. 直接写 `xmcsr` 后的读回
+5. 初始 `xtilem / xtilek / xtilen`
+6. immediate `msettile*` 后的 `xtile*`
+7. 普通 CSR 写 `xtile*` 后再次读回
+8. register `msettile*` 后的 `xtile*`
+
+这一轮 `matrix_csr` 功能验证已经在 Verilator 下跑通；VCS 目标也已补齐，但本次本地执行受 license 影响，没有形成新的功能性结论。
+
+本轮实际整理下来的命令可以直接记成：
+
+```text
+bazel build //tests/cocotb/tutorial:matrix_cfg_program
+bazel build //tests/cocotb/tutorial:matrix_csr_program
+
+bazel --batch --output_user_root=/tmp/bazel_wjj test \
+  //tests/cocotb/tutorial:matrix_csr_core_mini_axi_matrix_csr \
+  --test_output=errors --cache_test_results=no
+
+bazel --batch --output_user_root=/tmp/bazel_wjj test --config=vcs \
+  //tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr \
+  --test_output=errors --cache_test_results=no
+```
+
+其中：
+
+- 第一、二条命令分别生成 `matrix_cfg_program` 和 `matrix_csr_program`
+- 第三条命令是本轮已经跑通的 Verilator 回归
+- 第四条命令是已经补好的 VCS 目标；本地这次卡在 license，而不是功能错误
 
 ### 波形观测建议
 
