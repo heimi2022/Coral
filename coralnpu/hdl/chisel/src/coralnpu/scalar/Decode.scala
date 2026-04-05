@@ -274,6 +274,8 @@ class Dispatch(p: Parameters) extends Module {
 
         // CSR interface.
         val csr = Valid(new CsrCmd)
+
+        // matrix csr interface
         val matrixCfg = Valid(new MatrixCfgCmd)
 
         // LSU interface.
@@ -693,7 +695,9 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             // (saturating arithmetic sets vxsat; vcsr contains vxsat as a bitfield).
             val isVxsatOrVcsr = csr_bits_index === 0x009.U || csr_bits_index === 0x00F.U
             val rvvIdleOrNotVxsat = io.rvvIdle.getOrElse(true.B) || !isVxsatOrVcsr
-            io.csr.valid := tryDispatch && csr.valid && csr_address_valid && (if (p.enableFloat) { io.float.get.ready } else { true.B }) && rvvIdleOrNotVxsat
+            io.csr.valid := tryDispatch && csr.valid && csr_address_valid && 
+                    (if (p.enableFloat) { io.float.get.ready } else { true.B }) && 
+                    rvvIdleOrNotVxsat
             io.csr.bits.addr := rdAddr(i)
             io.csr.bits.index := csr_bits_index
             io.csr.bits.rs1 := rs1Addr(i)
@@ -714,8 +718,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
                 (d.msettileni || d.msettilen) -> MatrixCfgOp.SET_N  )
                 ) 
         } 
-
-
 
         // -------------------------------------------------------------------------
         // Rvv

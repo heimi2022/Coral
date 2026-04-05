@@ -1,0 +1,3 @@
+Command Line: /opt/synopsys/verdi/V-2023.12-SP2/platform/LINUXAMD64/bin/Novas -ssf ./novas.fsdb -dbdir ./simv.daidir -simBin ./simv
+uname(Linux DESKTOP-PKME7FF 6.6.87.2-microsoft-standard-WSL2 #1 SMP PREEMPT_DYNAMIC Thu Jun  5 18:30:46 UTC 2025 x86_64)
+au time 828.548912 15.938826 16.255274 delta 336867328 336867328 total 966479872 966479872

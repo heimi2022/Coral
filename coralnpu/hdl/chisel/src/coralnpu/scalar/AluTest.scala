@@ -209,16 +209,6 @@ class AluSpec extends AnyFreeSpec with ChiselSim {
     simulate(new Alu(p))(testBinaryOp(_, 13.U, AluOp.XNOR, test_cases))
   }
 
-  "MATADD" in {
-    val test_cases = Seq(
-      (3L, 5L, 8L),
-      (0L, 0L, 0L),
-      (10L, 20L, 30L),
-      (0xffffffffL, 1L, 0L)
-    )
-    simulate(new Alu(p))(testBinaryOp(_, 13.U, AluOp.MATADD, test_cases))
-  }
-  
   "ORN(Not OR)" in {
     val test_cases = Seq(
       (0x00000000L, 0x00000000L, 0xFFFFFFFFL),

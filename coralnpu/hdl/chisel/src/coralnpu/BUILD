@@ -201,6 +201,7 @@ chisel_test(
     size = "large",
     srcs = [
         "scalar/AluTest.scala",
+        "scalar/CsrTest.scala",
         "scalar/DispatchTest.scala",
         "scalar/MluTest.scala",
     ],
@@ -457,6 +458,7 @@ template_rule(
                 "--enableFloat=True",
                 "--moduleName=CoreMini",
                 "--useAxi",
+                "--enableMatrix=True",
             ],
             "module_name": "CoreMiniAxi",
             "verilog_file_path": "CoreMiniAxi.sv",
