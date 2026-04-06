@@ -1,5 +1,5 @@
 #!/bin/bash
 
-rm ./simv ./csrc ./novas* ./ucli.key ./verdiLog ./vcdplus.vpd ./sim.log ./verilog.dump simv.daidir ./*.txt *.fsdb ./*.vcd -rf
+rm ./simv ./csrc ./novas* ./ucli.key ./verdiLog ./vcdplus.vpd ./sim.log ./verilog.dump simv.daidir ./*.txt *.fsdb ./*.vcd ./vfastLog -rf
 
 

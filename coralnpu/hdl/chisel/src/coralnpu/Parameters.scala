@@ -76,8 +76,8 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     // Enable RVM . This conforms to riscv_matrix_extension_proposal
     var enableMatrix = false
     val matrixElen = 32
-    val matrixTlen = 256
-    val matrixTrlen = 64
+    val matrixTlen = 1024
+    val matrixTrlen = 256
 
     def matrixRowNum: Int = { matrixTlen / matrixTrlen }
     def matrixArlen: Int = { matrixRowNum * matrixElen }

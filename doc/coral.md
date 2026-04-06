@@ -24,18 +24,15 @@
   - 已覆盖 `xmcsr <-> xmxrm/xmsat/xmfflags/xmfrm/xmsaten` 的别名关系
   - 已覆盖 `xtilem / xtilek / xtilen` 只能由 `msettile*` 修改、普通 CSR 写不会直接改写
   - 已在 Verilator 下跑通 `//tests/cocotb/tutorial:matrix_csr_core_mini_axi_matrix_csr`
-  - 已补齐 VCS 目标 `//tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr`，但本次本地执行受 license 阻塞，暂未形成新的功能性结论
+  - 已补齐 VCS 目标 `//tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr`
 
 ## 当前阶段结论
 
-- 当前阶段的 matrix CSR 面可以认为已经完成
+- 当前阶段的 matrix CSR 最小可用闭环已经完成
   - 已完成能力 CSR 只读面
   - 已完成 `xmcsr` 与子字段 CSR 的别名语义
   - 已完成 `msettile* -> xtilem / xtilek / xtilen` 的专用写入口
   - 已明确禁止普通 CSR 写路径直接改写 `xtilem / xtilek / xtilen`
-- 但这不等于 CSR 整体已经完成
-  - 现在完成的是“matrix CSR 最小可用闭环”
-  - 还不是“matrix spec 下完整 CSR 行为”
 - **后续 CSR 仍需要继续补的内容至少包括**
   - `xmsat_set / xmfflags_set` 从矩阵执行单元的运行时回写
   - `xmfrm` 非法值的约束与异常语义
@@ -50,18 +47,135 @@
    - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
    - 暂时不直接改 `RVV` generated Verilog
    - 暂时不先改 GCC / binutils
-2. 收尾 matrix CSR 细节
-   - 按“当前阶段结论”里列出的未完成项继续补齐
-   - 优先补 `xtilem / xtilek / xtilen` 的边界值、约束和异常策略
-   - 再补 `xmsat_set / xmfflags_set` 运行时回写与异常语义
-3. 再建立独立 matrix 执行通路
+2. 再建立独立 matrix 执行通路
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
    - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
    - 把当前 `matadd` 从 `ALU` 过渡到 `MatrixUnit`
-4. 最后补最小验证闭环
-   - 补边界值 / 覆写顺序 / 异常场景测试
-   - 保留 `msettile*` 的 Decode / Dispatch / Program / Waveform 四层验证
-   - 再补一条真正的 matrix 指令执行测试
+
+## `mmacc.w.b` 实施计划（当前主线）
+
+当前已经决定：第一条正式按 spec 落地的 matrix 指令，不再继续扩 `matadd`，而是直接做 `mmacc.w.b`。
+
+### 选型结论
+
+- 当前主线先做 `mmacc.w.b`
+  - 这是 `mmi8i32` 最核心的一条指令
+  - 语义是 `signed int8 x signed int8 -> int32 accumulate`
+- 暂时不一起做：
+  - `mmaccu.w.b`
+  - `mmaccus.w.b`
+  - `mmaccsu.w.b`
+- 暂时也不把 `madd.w.mm` 作为第一优先级
+  - 纯矩阵逐元素加法属于 `miew` 扩展，不是当前 `mmi8i32` 主线
+
+### 实现边界
+
+- Chisel 侧继续负责：
+  - `Decode.scala`
+  - `SCore.scala`
+  - `Csr.scala`
+  - cocotb / 单测框架
+- Verilog 侧负责：
+  - matrix register / accumulation register
+  - `mmacc.w.b` 计算核
+  - 饱和检测与 `xmsat_set`
+
+### 目录规划
+
+- Verilog 目录：
+  - `coralnpu/hdl/verilog/matrix`
+- Chisel 目录：
+  - `coralnpu/hdl/chisel/src/coralnpu/matrix`
+
+第一轮建议拆成下面 3 个 Verilog 模块：
+
+- `MatrixMacArray.sv`
+  - 负责 `mmacc.w.b` 的 `4x4` 输出阵列和 dot-product / accumulate
+- `MatrixRegFile.sv`
+  - 负责 `ms1 / ms2 / md` 对应的 tile / accumulation register
+- `MatrixCore.sv`
+  - 负责命令入口、配置输入、状态输出和内部调度
+
+对应的 Chisel 包装建议是：
+
+- `MatrixInterface.scala`
+- `MatrixCore.scala`
+
+### 第一轮最小范围
+
+- 只做 `mmacc.w.b`
+- 只做最小可运行闭环，不一次把整套 matrix ISA 铺开
+- 第一轮先不接：
+  - `mld`
+  - `mst`
+  - 浮点 matrix 指令
+- 第一轮先接：
+  - `mtilem`
+  - `mtilek`
+  - `mtilen`
+  - `xmsaten`
+  - `xmsat_set`
+- `xmfflags_set` 当前仍保持默认 0
+
+### 当前参数下的最大形状
+
+按当前 Coral 参数：
+
+- `ELEN = 32`
+- `TLEN = 1024`
+- `TRLEN = 256`
+- `ALEN = 512`
+
+因此当前这版 `mmacc.w.b` 先按下面的最大形状实现和验证：
+
+- `M <= 4`
+- `N <= 4`
+- `K <= 32`
+
+这也意味着第一轮 Verilog 设计可以围绕 `4x32 * 32x4 -> 4x4` 的 `mmacc.w.b` 规格来搭建。
+
+### 当前 RTL 落地进展
+
+- `MatrixRegFile.sv`
+  - 先按 4 个 tile reg + 4 个 acc reg 实现
+  - tile reg 宽度为 `1024b`
+  - acc reg 宽度为 `512b`
+  - 提供 2 个 tile whole-register 读口、1 个 acc whole-register 读口、1 个 acc whole-register 写口
+  - 保留 debug preload / readback 端口，便于第一轮 bring-up 和波形验证
+- `MatrixMacArray.sv`
+  - 先实现 `mmacc.w.b`
+  - 采用 `4 x 4` 输出阵列、`K=32` 的广播式读取模型
+  - 语义按 `C += A x BT`
+  - `mtilem x mtilen` 之外元素按 spec 置 0（agnostic）
+  - `xmsaten=1` 时做 int32 饱和，并通过 `xmsat_set` 上报
+- `MatrixCore.sv`
+  - 先实现最小控制闭环
+  - 包含 `IDLE / EXEC / DONE` 三态
+  - 当前先检查 `M <= 4`、`N <= 4`、`K <= 32` 的合法性
+  - 通过 `ms1 / ms2 / md` 选择 tile / acc 寄存器
+
+### 第一轮验证策略
+
+- 第一步先做单元级验证，不急着直接上 program 级
+- 为了尽快验证 `mmacc.w.b` 本身，第一轮允许在 `MatrixCore` 或 `MatrixRegFile` 上保留 test/backdoor preload 入口
+  - 直接把 `ms1 / ms2 / md` 预装进去
+  - 发一条 `mmacc.w.b`
+  - 检查 `md` 的新值是否正确
+  - 检查饱和场景下 `xmsat_set` 是否拉高
+- 等 `mmacc.w.b` 的 Verilog 计算与 Chisel 包装跑通后，再继续补：
+  - Decode -> MatrixCore 的正式派发
+  - `mld / mst`
+  - program 级闭环
+
+### 后续扩展顺序
+
+- `mmacc.w.b`
+- `mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b`
+- `mld / mst`
+- 之后再考虑 `miew` 相关逐元素指令，例如：
+  - `madd.w.mm`
+  - `msub.w.mm`
+  - `mmax / mmin`
 
 ## `msettile*` 从 Decode 到 CSR 的闭环记录（已完成）
 
@@ -566,13 +680,15 @@ flowchart LR
 
 - 固定参数：
   - `ELEN = 32`
-  - `TLEN = 256`
-  - `TRLEN = 64`
+  - `TLEN = 1024`
+  - `TRLEN = 256`
+  - `ALEN = 512`
 - 已完成：
   - `msettilemi/msettilem`
   - `msettileki/msettilek`
   - `msettileni/msettilen`
   - `xtilem / xtilek / xtilen` 的 CSR 保存与程序级验证
+  - `MatrixRegFile / MatrixMacArray / MatrixCore` 的第一版 Verilog 骨架
 
 ### 当前暂不实现的内容
 

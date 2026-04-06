@@ -182,6 +182,23 @@ chisel_library(
     ],
 )
 
+chisel_library(
+    name = "coralnpu_matrix",
+    srcs = [
+        "matrix/MatrixCore.scala",
+        "matrix/MatrixInterface.scala",
+    ],
+    resources = [
+        "//hdl/verilog/matrix:MatrixPE32Int8.sv",
+        "//hdl/verilog/matrix:MatrixRegFile.sv",
+        "//hdl/verilog/matrix:MatrixMacArray.sv",
+        "//hdl/verilog/matrix:MatrixCore.sv",
+    ],
+    deps = [
+        ":coralnpu_base",
+    ],
+)
+
 chisel_test(
     name = "coralnpu_rvv_tests",
     srcs = [

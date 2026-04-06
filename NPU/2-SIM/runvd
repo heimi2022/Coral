@@ -1,1 +1,1 @@
-verdi -f ./asic.f -ssf ./mac16_tb.fsdb &
+verdi -f ./asic.f -ssf ./MatrixCore_tb.vcd &
