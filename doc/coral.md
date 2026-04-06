@@ -25,6 +25,16 @@
   - 已覆盖 `xtilem / xtilek / xtilen` 只能由 `msettile*` 修改、普通 CSR 写不会直接改写
   - 已在 Verilator 下跑通 `//tests/cocotb/tutorial:matrix_csr_core_mini_axi_matrix_csr`
   - 已补齐 VCS 目标 `//tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr`
+- 已完成第一版 `mmacc.w.b` Verilog 原型
+  - 已编写 `MatrixPE32Int8.sv / MatrixRegFile.sv / MatrixMacArray.sv / MatrixCore.sv / MatrixCore_tb.sv`
+  - 当前阵列规格为 `4x4 PE`，每个 PE 处理 `32` 路 `int8 x int8` 乘法并累加到 `int32`
+  - 当前 tile / acc 寄存器规格为 `4 x 1024b tile reg` 与 `4 x 512b acc reg`
+  - 已在 `/home/wjj/2-NPU/NPU/2-SIM` 下跑通独立 VCS testbench
+- 已完成第一版 Chisel matrix 挂壳
+  - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
+  - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixCore.scala`
+  - 已把 `MatrixCoreWrapper` 以“仿 RVV”的方式挂到 `Core.scala + SCore.scala`
+  - 当前已接通 `CSR / busy / debug tie-off`，但 `mmacc.w.b` 的正式 `Decode -> Dispatch -> MatrixCore` 发射尚未接上
 
 ## 当前阶段结论
 
@@ -87,16 +97,21 @@
 - Chisel 目录：
   - `coralnpu/hdl/chisel/src/coralnpu/matrix`
 
-第一轮建议拆成下面 3 个 Verilog 模块：
+当前已经落地的第一版 Verilog 模块如下：
 
+- `MatrixPE32Int8.sv`
+  - 单个 `PE`
+  - 负责 `32` 路 `signed int8 x signed int8` 的点积、与 `int32 acc` 相加、并在 `xmsaten=1` 时做饱和判断
 - `MatrixMacArray.sv`
   - 负责 `mmacc.w.b` 的 `4x4` 输出阵列和 dot-product / accumulate
 - `MatrixRegFile.sv`
   - 负责 `ms1 / ms2 / md` 对应的 tile / accumulation register
 - `MatrixCore.sv`
   - 负责命令入口、配置输入、状态输出和内部调度
+- `MatrixCore_tb.sv`
+  - 负责独立 VCS bring-up 与波形验证
 
-对应的 Chisel 包装建议是：
+对应的 Chisel 包装当前已经落地为：
 
 - `MatrixInterface.scala`
 - `MatrixCore.scala`
@@ -136,6 +151,10 @@
 
 ### 当前 RTL 落地进展
 
+- `MatrixPE32Int8.sv`
+  - 单 PE 按 `32-lane int8 dot-product + int32 accumulate` 实现
+  - 内部按收窄后的位宽组织：乘积 `16b`、归约和约 `21b`、最终累加路径 `33b`
+  - `xmsaten=1` 时对最终结果做 `int32` 饱和，并输出 `sat_o`
 - `MatrixRegFile.sv`
   - 先按 4 个 tile reg + 4 个 acc reg 实现
   - tile reg 宽度为 `1024b`
@@ -144,7 +163,8 @@
   - 保留 debug preload / readback 端口，便于第一轮 bring-up 和波形验证
 - `MatrixMacArray.sv`
   - 先实现 `mmacc.w.b`
-  - 采用 `4 x 4` 输出阵列、`K=32` 的广播式读取模型
+  - 采用 `4 x 4` 输出阵列、`16` 个 PE、`K=32` 的广播式读取模型
+  - 每个 PE 一次读取一整行 `A` 和一整行 `B` 的 `32` 个 `int8` 元素做点积
   - 语义按 `C += A x BT`
   - `mtilem x mtilen` 之外元素按 spec 置 0（agnostic）
   - `xmsaten=1` 时做 int32 饱和，并通过 `xmsat_set` 上报
@@ -153,6 +173,47 @@
   - 包含 `IDLE / EXEC / DONE` 三态
   - 当前先检查 `M <= 4`、`N <= 4`、`K <= 32` 的合法性
   - 通过 `ms1 / ms2 / md` 选择 tile / acc 寄存器
+  - 对外导出 `busy / done / illegal / xmsat_set`
+- `MatrixCore_tb.sv`
+  - 已覆盖基础 `mmacc`
+  - 已覆盖 `K tail + accumulate`
+  - 已覆盖正向饱和
+  - 已覆盖非法配置
+  - 当前独立 VCS testbench 已跑通
+
+### 当前 Chisel 挂壳进展
+
+- `MatrixInterface.scala`
+  - 已定义 `MatrixCoreIO`
+  - 当前接口包括 `cmd / csr / status / debug`
+- `MatrixCore.scala`
+  - 已定义 `MatrixCoreBlackBox`
+  - 已通过 `addResource(...)` 把 `MatrixPE32Int8.sv / MatrixRegFile.sv / MatrixMacArray.sv / MatrixCore.sv` 挂入 Chisel 生成链路
+  - 已定义 `MatrixCoreWrapper`，把 Verilog `MatrixCore` 映射成 Chisel 可连接接口
+- `SCore.scala`
+  - 已新增 `io.matrixcore : Flipped(new MatrixCoreIO(p))`
+  - 已把 `dispatch.io.mactive` 接到 `matrixcore.status.busy`
+  - 已把 `csr.io.matrixCfg` 与 `csr.io.matrix` 分别接到 matrix 配置入口与 matrix CSR 反馈口
+  - 当前先将 `cmd / debug` 全部 tie-off，表示“壳已挂上、命令尚未发射”
+- `Core.scala`
+  - 已仿照 `RVV` 的挂接方式实例化 `MatrixCoreWrapper`
+  - 当前层次为 `Core -> { SCore, MatrixCoreWrapper }`
+  - 已通过 `matrixCore.get.io <> score.io.matrixcore.get` 完成顶层互连
+- `BUILD`
+  - 已新增 `coralnpu_matrix` Chisel 库
+  - 已在 `coralnpu_scalar` 和顶层 `coralnpu` 的 `deps` 中加入 `:coralnpu_matrix`
+
+### 当前阶段的明确边界
+
+- 现在已经完成的是：
+  - `msettile*` 到 CSR 的配置闭环
+  - `mmacc.w.b` 的第一版 Verilog 原型
+  - `MatrixCoreWrapper` 按仿 `RVV` 方式挂入 `Core/SCore`
+- 现在还没有完成的是：
+  - `Decode -> Dispatch -> MatrixCore` 的正式 `mmacc.w.b` 发射
+  - `RetirementBuffer` 对 matrix 多拍完成语义的正式支持
+  - `mld / mst`
+  - program 级 `mmacc.w.b` 闭环
 
 ### 第一轮验证策略
 
@@ -537,6 +598,45 @@ bazel --batch --output_user_root=/tmp/bazel_wjj test --config=vcs \
   包括 `ALU / BRU / LSU / MLU / DVU`，可选再接 `FloatCore / RvvCore`
 - `RetirementBuffer + FaultManager`
   负责退休顺序、精确异常、trap 汇总和状态一致性
+
+### RVV 与 Matrix 的挂接方式对照
+
+这里要特别记住一点：`RVV` 不是实例化在 `SCore` 里面，而是实例化在更上层的 `Core` 里；`SCore` 只保留一个对外接口。`Matrix` 建议完全仿照这一路线来接。
+
+当前 `RVV` 的层次关系是：
+
+```text
+Core
+├── SCore
+│   └── io.rvvcore : Flipped(new RvvCoreIO(p))
+└── RvvCore
+    └── rvvCore.io <> score.io.rvvcore.get
+```
+
+推荐中的 `Matrix` 层次关系是：
+
+```text
+Core
+├── SCore
+│   └── io.matrixcore : Flipped(new MatrixCoreIO(p))
+└── MatrixCoreWrapper
+    └── matrixCore.io <> score.io.matrixcore.get
+```
+
+可以把两者的职责对照成下面这张表：
+
+| 层次 | RVV 当前做法 | Matrix 仿照做法 | 目的 |
+| --- | --- | --- | --- |
+| `Core.scala` | 实例化 `RvvCore` | 实例化 `MatrixCoreWrapper` | 顶层总装，保持扩展单元平级 |
+| `SCore.scala` IO | `rvvcore` 作为对外端口 | `matrixcore` 作为对外端口 | `SCore` 只负责连接，不直接包执行体 |
+| `SCore.scala` 内部连接 | 接 `Dispatch / CSR / Regfile / LSU / trap` | 先接 `CSR / busy`，后续再接 `cmd` | 先打通框架，再逐步补执行通路 |
+| `Dispatch` | 走 RVV 专用指令/队列接口 | 先看 `matrix busy`，后续再发 `matrix cmd` | 保持控制和顺序性一致 |
+
+这张图背后的核心原则是：
+
+- `SCore` 是标量前端和标量控制的“总装层”，不是所有扩展执行单元的层级容器
+- `RVV / Matrix` 这类扩展执行体，放在 `Core` 顶层与 `SCore` 平级，更容易保持边界清晰
+- 这样后续补 `mmacc.w.b`、`mld/mst` 时，矩阵路径也能沿着 “`Core` 实例化 -> `SCore` 连接 -> `Dispatch/CSR` 对接” 这条路线平滑扩展
 
 ### CSR 连接关系速览
 

@@ -22,6 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.{RvvCoreIO}
 import _root_.circt.stage.ChiselStage
+import coralnpu.matrix.MatrixCoreIO
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -43,6 +44,9 @@ class SCore(p: Parameters) extends Module {
         val ebus = new EBusIO(p)
 
         val rvvcore = Option.when(p.enableRvv)(Flipped(new RvvCoreIO(p)))
+
+        // matrix
+        val matrixcore = Option.when(p.enableMatrix)(Flipped(new MatrixCoreIO(p)))
 
         val iflush = new IFlushIO(p)
         val dflush = new DFlushIO(p)
@@ -126,7 +130,7 @@ class SCore(p: Parameters) extends Module {
     // Decode/Dispatch
     dispatch.io.inst <> fetch.io.inst.lanes
     dispatch.io.halted := csr.io.halted || csr.io.wfi || csr.io.dm.debug_mode
-    dispatch.io.mactive := false.B
+    dispatch.io.mactive := io.matrixcore.map(_.status.busy).getOrElse(false.B)  // matrix
     dispatch.io.lsuActive := lsu.io.active
     dispatch.io.lsuQueueCapacity := lsu.io.queueCapacity
     dispatch.io.scoreboard.comb := regfile.io.scoreboard.comb
@@ -204,14 +208,33 @@ class SCore(p: Parameters) extends Module {
     if (p.enableMatrix) {
         csr.io.matrixCfg.get.valid := dispatch.io.matrixCfg.valid
         csr.io.matrixCfg.get.bits := dispatch.io.matrixCfg.bits
-
-        // 现在还没有 MatrixUnit，先把来自 MatrixCore 的状态更新脚绑成默认值
-        csr.io.matrix.get.xmsat_set.valid := false.B
-        csr.io.matrix.get.xmsat_set.bits := false.B
-        csr.io.matrix.get.xmfflags_set.valid := false.B
-        csr.io.matrix.get.xmfflags_set.bits := 0.U
     }
 
+    // from matrixcore to csr
+    if (p.enableMatrix) {
+        io.matrixcore.get.csr <> csr.io.matrix.get
+    }
+
+    if (p.enableMatrix) {
+        io.matrixcore.get.cmd.valid := false.B
+        io.matrixcore.get.cmd.bits.ms1 := 0.U
+        io.matrixcore.get.cmd.bits.ms2 := 0.U
+        io.matrixcore.get.cmd.bits.md := 0.U
+
+        io.matrixcore.get.debug.tileWrite.enable := false.B
+        io.matrixcore.get.debug.tileWrite.reg := 0.U
+        io.matrixcore.get.debug.tileWrite.data := 0.U
+
+        io.matrixcore.get.debug.accWrite.enable := false.B
+        io.matrixcore.get.debug.accWrite.reg := 0.U
+        io.matrixcore.get.debug.accWrite.data := 0.U
+
+        io.matrixcore.get.debug.tileRead.enable := false.B
+        io.matrixcore.get.debug.tileRead.reg := 0.U
+
+        io.matrixcore.get.debug.accRead.enable := false.B
+        io.matrixcore.get.debug.accRead.reg := 0.U
+    }
 
     val dmRs1 = Wire(new RegfileReadDataIO)
     dmRs1.valid := true.B

@@ -23,6 +23,8 @@ import java.nio.charset.{StandardCharsets}
 import coralnpu.rvv.{RvvCore}
 import _root_.circt.stage.ChiselStage
 import scala.collection.mutable.Stack
+import coralnpu.matrix.MatrixCoreWrapper
+
 
 object Core {
   def apply(p: Parameters): Core = {
@@ -34,54 +36,58 @@ object Core {
 }
 
 class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncReset {
-  override val desiredName = moduleName
-  val io = IO(new Bundle {
-    val csr = new CsrInOutIO(p)
-    val halted = Output(Bool())
-    val fault = Output(Bool())
-    val wfi = Output(Bool())
-    val irq = Input(Bool())
-    val debug_req = Input(Bool())
-    val dm = new CoreDMIO(p)
+    override val desiredName = moduleName
+    val io = IO(new Bundle {
+        val csr = new CsrInOutIO(p)
+        val halted = Output(Bool())
+        val fault = Output(Bool())
+        val wfi = Output(Bool())
+        val irq = Input(Bool())
+        val debug_req = Input(Bool())
+        val dm = new CoreDMIO(p)
 
-    // Bus between core and instruction memories.
-    val ibus = new IBusIO(p)
-    // Bus between core and data memories.
-    val dbus = new DBusIO(p)
-    // Bus between core and and external memories or peripherals.
-    val ebus = new EBusIO(p)
+        // Bus between core and instruction memories.
+        val ibus = new IBusIO(p)
+        // Bus between core and data memories.
+        val dbus = new DBusIO(p)
+        // Bus between core and and external memories or peripherals.
+        val ebus = new EBusIO(p)
 
-    val iflush = new IFlushIO(p)
-    val dflush = new DFlushIO(p)
+        val iflush = new IFlushIO(p)
+        val dflush = new DFlushIO(p)
 
-    val debug = new DebugIO(p)
+        val debug = new DebugIO(p)
   })
 
-  val score = SCore(p)
-  val rvvCore = Option.when(p.enableRvv)(RvvCore(p))
-  if (p.enableRvv) {
-    rvvCore.get.io <> score.io.rvvcore.get
-  }
+    val score = SCore(p)
+    val rvvCore = Option.when(p.enableRvv)(RvvCore(p))
+    val matrixCore = Option.when(p.enableMatrix)(Module(new MatrixCoreWrapper(p)))
+    if (p.enableRvv) {
+        rvvCore.get.io <> score.io.rvvcore.get
+    }
+    if (p.enableMatrix) {
+        matrixCore.get.io <> score.io.matrixcore.get
+    }
 
-  // ---------------------------------------------------------------------------
-  // Scalar Core outputs.
-  io.csr    <> score.io.csr
-  io.ibus   <> score.io.ibus
-  io.ebus   <> score.io.ebus
-  io.halted := score.io.halted
-  io.fault  := score.io.fault
-  io.wfi    := score.io.wfi
-  score.io.irq := io.irq
+    // ---------------------------------------------------------------------------
+    // Scalar Core outputs.
+    io.csr    <> score.io.csr
+    io.ibus   <> score.io.ibus
+    io.ebus   <> score.io.ebus
+    io.halted := score.io.halted
+    io.fault  := score.io.fault
+    io.wfi    := score.io.wfi
+    score.io.irq := io.irq
 
-  score.io.dm <> io.dm
+    score.io.dm <> io.dm
 
-  io.iflush <> score.io.iflush
-  io.dflush <> score.io.dflush
-  io.debug  <> score.io.debug
+    io.iflush <> score.io.iflush
+    io.dflush <> score.io.dflush
+    io.debug  <> score.io.debug
 
-  // ---------------------------------------------------------------------------
-  // Local Data Bus Port
-  io.dbus <> score.io.dbus
+    // ---------------------------------------------------------------------------
+    // Local Data Bus Port
+    io.dbus <> score.io.dbus
 }
 
 object EmitCore extends App {
@@ -93,35 +99,35 @@ object EmitCore extends App {
     var useTlul = false
     for (arg <- args) {
         if (arg.startsWith("--enableFetchL0")) {
-        p.enableFetchL0 = arg.split("=")(1).toBoolean
+            p.enableFetchL0 = arg.split("=")(1).toBoolean
         } else if (arg.startsWith("--moduleName")) {
-        moduleName = arg.split("=")(1)
+            moduleName = arg.split("=")(1)
         } else if (arg.startsWith("--fetchDataBits")) {
-        p.fetchDataBits = arg.split("=")(1).toInt
+            p.fetchDataBits = arg.split("=")(1).toInt
         } else if (arg.startsWith("--enableRvv")) {
-        p.enableRvv = arg.split("=")(1).toBoolean
+            p.enableRvv = arg.split("=")(1).toBoolean
         } else if (arg.startsWith("--enableFloat")) {
-        p.enableFloat = arg.split("=")(1).toBoolean
+            p.enableFloat = arg.split("=")(1).toBoolean
         } else if (arg.startsWith("--enableMatrix")) { 
-        p.enableMatrix = arg.split("=")(1).toBoolean 
+            p.enableMatrix = arg.split("=")(1).toBoolean 
         } else if (arg.startsWith("--enableVerification")) {
-        p.enableVerification = arg.split("=")(1).toBoolean
+            p.enableVerification = arg.split("=")(1).toBoolean
         } else if (arg.startsWith("--lsuDataBits")) {
-        p.lsuDataBits = arg.split("=")(1).toInt
-        // itcmSizeKBytes, and dtcmSizeKBytes replace highmem flag
-        // if highmem is needed, set both tcm sizes to 1024
+            p.lsuDataBits = arg.split("=")(1).toInt
+            // itcmSizeKBytes, and dtcmSizeKBytes replace highmem flag
+            // if highmem is needed, set both tcm sizes to 1024
         } else if (arg.startsWith("--itcmSizeKBytes")) {
-        p.itcmSizeKBytes = arg.split("=")(1).toInt
+            p.itcmSizeKBytes = arg.split("=")(1).toInt
         } else if (arg.startsWith("--dtcmSizeKBytes")) {
-        p.dtcmSizeKBytes = arg.split("=")(1).toInt
+            p.dtcmSizeKBytes = arg.split("=")(1).toInt
         } else if (arg.startsWith("--useAxi")) {
-        useAxi = true
+            useAxi = true
         } else if (arg.startsWith("--useTlul")) {
-        useTlul = true
+            useTlul = true
         } else if (arg.startsWith("--target-dir")) {
-        targetDir = Some(arg.split("=")(1))
+            targetDir = Some(arg.split("=")(1))
         } else {
-        chiselArgs = chiselArgs :+ arg
+            chiselArgs = chiselArgs :+ arg
         }
     }
     assert(!(useAxi && useTlul))
@@ -176,9 +182,9 @@ object EmitCore extends App {
         case Some(targetDir) => {
         {
             lazy val core2 = if (useAxi) {
-            new CoreAxi(p, moduleName)
+                new CoreAxi(p, moduleName)
             } else {
-            new Core(p, moduleName)
+                new Core(p, moduleName)
             }
 
             ChiselStage.emitSystemVerilogFile(
@@ -194,14 +200,14 @@ object EmitCore extends App {
             val files = dir.listFiles
             files.foreach { name =>
                 if (name.isDirectory()) {
-                dirStack.push(name)
+                    dirStack.push(name)
                 } else {
-                val zipName = name.getPath().replace(targetDir + "/", "")
-                if (zipName != s"${coreName}.zip") {
-                    zip.putNextEntry(new ZipEntry(zipName))
-                    zip.write(Files.readAllBytes(Paths.get(name.getPath())))
-                    zip.closeEntry()
-                }
+                    val zipName = name.getPath().replace(targetDir + "/", "")
+                    if (zipName != s"${coreName}.zip") {
+                        zip.putNextEntry(new ZipEntry(zipName))
+                        zip.write(Files.readAllBytes(Paths.get(name.getPath())))
+                        zip.closeEntry()
+                    }
                 }
             }
             }

@@ -33,20 +33,6 @@ class CsrRvvIO(p: Parameters) extends Bundle {
     val frm = Output(UInt(3.W))
 }
 
-class CsrMatrixIO(p: Parameters) extends Bundle {
-    // To Csr from MatrixCore
-    val xmsat_set = Input(Valid(Bool()))
-    val xmfflags_set = Input(Valid(UInt(5.W)))
-
-    // From Csr to MatrixCore
-    val mtilem = Output(UInt(32.W))
-    val mtilen = Output(UInt(32.W))
-    val mtilek = Output(UInt(32.W))
-    val xmxrm = Output(UInt(2.W))
-    val xmfrm = Output(UInt(3.W))
-    val xmsaten = Output(Bool())
-}
-
 object Csr {
     def apply(p: Parameters): Csr = {
         return Module(new Csr(p))
