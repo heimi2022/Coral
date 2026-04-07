@@ -27,7 +27,7 @@
   - 已补齐 VCS 目标 `//tests/cocotb/tutorial:vcs_matrix_csr_core_mini_axi_matrix_csr`
 - 已完成第一版 `mmacc.w.b` Verilog 原型
   - 已编写 `MatrixPE32Int8.sv / MatrixRegFile.sv / MatrixMacArray.sv / MatrixCore.sv / MatrixCore_tb.sv`
-  - 当前阵列规格为 `4x4 PE`，每个 PE 处理 `32` 路 `int8 x int8` 乘法并累加到 `int32`
+  - 当前阵列规格为 `4x4 PE`，每个 PE 处理 `32` 路 `int8 x int8` 乘法并累加到 `int32`, **500M时钟下,算力为0.512TOPs**
   - 当前 tile / acc 寄存器规格为 `4 x 1024b tile reg` 与 `4 x 512b acc reg`
   - 已在 `/home/wjj/2-NPU/NPU/2-SIM` 下跑通独立 VCS testbench
 - 已完成第一版 Chisel matrix 挂壳

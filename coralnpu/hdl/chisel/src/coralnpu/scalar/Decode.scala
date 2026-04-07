@@ -25,6 +25,8 @@ import chisel3.util._
 import common._
 import coralnpu.float.{FloatInstruction, FloatOpcode}
 import coralnpu.rvv._
+import coralnpu.matrix.{MatrixInstCmd, MatrixInstOp}
+
 
 class DecodedInstruction(p: Parameters) extends Bundle {
     // The original encoding
@@ -131,6 +133,10 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     val msettilek = Bool()
     val msettileni = Bool()
     val msettilen = Bool()
+    val mmacc_w_b = Bool()
+    val mmaccu_w_b = Bool()
+    val mmaccus_w_b = Bool()
+    val mmaccsu_w_b = Bool()
 
     // rvv
     val rvv = Option.when(p.enableRvv)(Valid(new RvvCompressedInstruction()))
@@ -143,6 +149,10 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     }
     def isMatrixCfgImm(): Bool = { isMatrixCfg() && !inst(25) }
     def isMatrixCfgReg(): Bool = { isMatrixCfg() &&  inst(25) }
+
+    def isMatrixMul(): Bool = {
+        mmacc_w_b || mmaccu_w_b || mmaccus_w_b || mmaccsu_w_b
+    }
 
     def isAluImm(): Bool = {
         addi || slti || sltiu || xori || ori || andi || slli || srli || srai || rori 
@@ -181,7 +191,7 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     // Instructions that should dispatch out of slot 0, with no other instructions
     // dispatched on the same cycle.
     def forceSlot0Only(): Bool = {
-        isFency() || isCsr() || isMatrixCfg()
+        isFency() || isCsr() || isMatrixCfg() || isMatrixMul()
     }
 
     // Checks if an instruction is a jump or changes context switch. Instructions
@@ -277,6 +287,9 @@ class Dispatch(p: Parameters) extends Module {
 
         // matrix csr interface
         val matrixCfg = Valid(new MatrixCfgCmd)
+
+        // matrix interface
+        val matrix = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd(p)))
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -719,6 +732,21 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
                 ) 
         } 
 
+        if (p.enableMatrix && i == 0) {
+            val matrixValid = d.isMatrixMul()
+
+            io.matrix.get.valid := tryDispatch && matrixValid
+            io.matrix.get.bits.op := MuxCase(MatrixInstOp.MMACC_W_B, Seq(
+                d.mmacc_w_b   -> MatrixInstOp.MMACC_W_B,
+                d.mmaccu_w_b  -> MatrixInstOp.MMACCU_W_B,
+                d.mmaccus_w_b -> MatrixInstOp.MMACCUS_W_B,
+                d.mmaccsu_w_b -> MatrixInstOp.MMACCSU_W_B
+            ))
+
+            io.matrix.get.bits.ms2 := io.inst(i).bits.inst(22,20)
+            io.matrix.get.bits.ms1 := io.inst(i).bits.inst(17,15)
+            io.matrix.get.bits.md  := io.inst(i).bits.inst(9,7)
+        }
         // -------------------------------------------------------------------------
         // Rvv
         if (p.enableRvv) {
@@ -746,7 +774,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.alu(i).fire, io.bru(i).fire, io.mlu(i).fire, io.dvu(i).fire, io.lsu(i).fire
             ) ++
             Option.when(i == 0)(Seq(
-                io.csr.valid, fenceValid, io.matrixCfg.valid
+                io.csr.valid, fenceValid, io.matrixCfg.valid, io.matrix.get.fire
                 )).getOrElse(Seq()) ++
             Option.when(p.enableRvv)(Seq(
                 io.rvv.get(i).fire)).getOrElse(Seq()) ++
@@ -858,6 +886,11 @@ object DecodeInstruction {
         d.msettilem  := op === BitPat("b0010_00_1_00000_?????_000_00000_0101011")
         d.msettileni := op === BitPat("b0011_00_0_?????_?????_000_00000_0101011")
         d.msettilen  := op === BitPat("b0011_00_1_00000_?????_000_00000_0101011")
+
+        d.mmacc_w_b     := op === BitPat("b0001_01_011_???_00_???_000_10_???_0101011")
+        d.mmaccu_w_b    := op === BitPat("b0001_01_000_???_00_???_000_10_???_0101011")
+        d.mmaccus_w_b   := op === BitPat("b0001_01_001_???_00_???_000_10_???_0101011")
+        d.mmaccsu_w_b   := op === BitPat("b0001_01_010_???_00_???_000_10_???_0101011")
 
 
         // RV32I
@@ -980,6 +1013,11 @@ object DecodeInstruction {
             d.msettileni := false.B
             d.msettilen  := false.B
 
+            d.mmacc_w_b := false.B
+            d.mmaccu_w_b := false.B
+            d.mmaccus_w_b := false.B
+            d.mmaccsu_w_b := false.B
+
             if (p.enableFloat) {
                 d.float.get := MakeInvalid(new FloatInstruction)
             }
@@ -1008,7 +1046,8 @@ object DecodeInstruction {
                         d.mpause, d.mret, d.fencei, d.flushat, d.flushall,
                         d.rvv.map(_.valid).getOrElse(false.B),
                         d.float.map(_.valid).getOrElse(false.B),
-                        d.msettileki,d.msettilek ,d.msettilemi,d.msettilem ,d.msettileni,d.msettilen 
+                        d.msettileki,d.msettilek ,d.msettilemi,d.msettilem ,d.msettileni,d.msettilen ,
+                        d.mmacc_w_b, d.mmaccu_w_b, d.mmaccus_w_b, d.mmaccsu_w_b
                         )
 
         d.undef := decoded === 0.U

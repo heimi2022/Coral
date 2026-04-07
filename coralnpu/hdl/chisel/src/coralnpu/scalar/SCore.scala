@@ -216,10 +216,7 @@ class SCore(p: Parameters) extends Module {
     }
 
     if (p.enableMatrix) {
-        io.matrixcore.get.cmd.valid := false.B
-        io.matrixcore.get.cmd.bits.ms1 := 0.U
-        io.matrixcore.get.cmd.bits.ms2 := 0.U
-        io.matrixcore.get.cmd.bits.md := 0.U
+        io.matrixcore.get.cmd <> dispatch.io.matrix.get
 
         io.matrixcore.get.debug.tileWrite.enable := false.B
         io.matrixcore.get.debug.tileWrite.reg := 0.U

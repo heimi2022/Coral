@@ -14,9 +14,10 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
 
     val cmd_valid_i = Input(Bool())
     val cmd_ready_o = Output(Bool())
-    val cmd_ms1_i = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-    val cmd_ms2_i = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-    val cmd_md_i = Input(UInt(log2Ceil(p.matrixAccRegCount).W))
+    val cmd_op_i = Input(UInt(2.W))
+    val cmd_ms1_i = Input(UInt(3.W))
+    val cmd_ms2_i = Input(UInt(3.W))
+    val cmd_md_i = Input(UInt(3.W))
 
     val cfg_m_i = Input(UInt(32.W))
     val cfg_k_i = Input(UInt(32.W))
@@ -59,6 +60,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.rst_n := !reset.asBool
 
   matrixCore.io.cmd_valid_i := io.cmd.valid
+  matrixCore.io.cmd_op_i := io.cmd.bits.op.asUInt
   matrixCore.io.cmd_ms1_i := io.cmd.bits.ms1
   matrixCore.io.cmd_ms2_i := io.cmd.bits.ms2
   matrixCore.io.cmd_md_i := io.cmd.bits.md

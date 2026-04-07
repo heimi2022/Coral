@@ -7,9 +7,10 @@ module MatrixCore_tb;
 
     logic         cmd_valid_i;
     logic         cmd_ready_o;
-    logic [1:0]   cmd_ms1_i;
-    logic [1:0]   cmd_ms2_i;
-    logic [1:0]   cmd_md_i;
+    logic [1:0]   cmd_op_i;
+    logic [2:0]   cmd_ms1_i;
+    logic [2:0]   cmd_ms2_i;
+    logic [2:0]   cmd_md_i;
 
     logic [31:0]  cfg_m_i;
     logic [31:0]  cfg_k_i;
@@ -43,6 +44,7 @@ module MatrixCore_tb;
         .rst_n(rst_n),
         .cmd_valid_i(cmd_valid_i),
         .cmd_ready_o(cmd_ready_o),
+        .cmd_op_i(cmd_op_i),
         .cmd_ms1_i(cmd_ms1_i),
         .cmd_ms2_i(cmd_ms2_i),
         .cmd_md_i(cmd_md_i),
@@ -83,6 +85,7 @@ module MatrixCore_tb;
         begin
             rst_n = 1'b0;
             cmd_valid_i = 1'b0;
+            cmd_op_i = '0;
             cmd_ms1_i = '0;
             cmd_ms2_i = '0;
             cmd_md_i = '0;
@@ -193,18 +196,21 @@ module MatrixCore_tb;
     endtask
 
     task automatic issue_cmd(
-        input logic [1:0] ms1,
-        input logic [1:0] ms2,
-        input logic [1:0] md
+        input logic [1:0] op,
+        input logic [2:0] ms1,
+        input logic [2:0] ms2,
+        input logic [2:0] md
     );
         begin
             while (cmd_ready_o !== 1'b1) @(negedge clk);
+            cmd_op_i = op;
             cmd_ms1_i = ms1;
             cmd_ms2_i = ms2;
             cmd_md_i = md;
             cmd_valid_i = 1'b1;
             @(negedge clk);
             cmd_valid_i = 1'b0;
+            cmd_op_i = '0;
             cmd_ms1_i = '0;
             cmd_ms2_i = '0;
             cmd_md_i = '0;
@@ -300,7 +306,7 @@ module MatrixCore_tb;
             dbg_write_tile(2'd1, tile_b);
             dbg_write_acc(2'd0, acc_init);
 
-            issue_cmd(2'd0, 2'd1, 2'd0);
+            issue_cmd(2'd0, 3'd0, 3'd1, 3'd4);
             wait_done_and_check(1'b0, 1'b0);
             dbg_read_acc(2'd0, acc_got);
 
@@ -350,7 +356,7 @@ module MatrixCore_tb;
             dbg_write_tile(2'd3, tile_b);
             dbg_write_acc(2'd1, acc_init);
 
-            issue_cmd(2'd2, 2'd3, 2'd1);
+            issue_cmd(2'd0, 3'd2, 3'd3, 3'd5);
             wait_done_and_check(1'b0, 1'b0);
             dbg_read_acc(2'd1, acc_got);
 
@@ -389,7 +395,7 @@ module MatrixCore_tb;
             dbg_write_tile(2'd2, tile_b);
             dbg_write_acc(2'd2, acc_init);
 
-            issue_cmd(2'd1, 2'd2, 2'd2);
+            issue_cmd(2'd0, 3'd1, 3'd2, 3'd6);
             wait_done_and_check(1'b0, 1'b1);
             dbg_read_acc(2'd2, acc_got);
 
@@ -423,7 +429,7 @@ module MatrixCore_tb;
             dbg_write_tile(2'd1, tile_b);
             dbg_write_acc(2'd3, acc_init);
 
-            issue_cmd(2'd0, 2'd1, 2'd3);
+            issue_cmd(2'd0, 3'd0, 3'd1, 3'd7);
             wait_done_and_check(1'b1, 1'b0);
             dbg_read_acc(2'd3, acc_got);
 

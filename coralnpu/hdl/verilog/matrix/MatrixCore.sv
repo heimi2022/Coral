@@ -4,9 +4,10 @@ module MatrixCore (
 
     input  logic         cmd_valid_i,
     output logic         cmd_ready_o,
-    input  logic [1:0]   cmd_ms1_i,
-    input  logic [1:0]   cmd_ms2_i,
-    input  logic [1:0]   cmd_md_i,
+    input  logic [1:0]   cmd_op_i,
+    input  logic [2:0]   cmd_ms1_i,
+    input  logic [2:0]   cmd_ms2_i,
+    input  logic [2:0]   cmd_md_i,
 
     input  logic [31:0]  cfg_m_i,
     input  logic [31:0]  cfg_k_i,
@@ -44,9 +45,9 @@ localparam int MAX_N = 4;
 localparam int MAX_K = 32;
 
 logic [1:0] state_q;
-logic [1:0] ms1_q;
-logic [1:0] ms2_q;
-logic [1:0] md_q;
+logic [2:0] ms1_q;
+logic [2:0] ms2_q;
+logic [2:0] md_q;
 logic       illegal_q;
 logic       sat_q;
 
@@ -68,20 +69,29 @@ logic [511:0] acc_wr_data_w;
 logic [511:0] mac_c_acc_w;
 logic         mac_sat_w;
 logic         illegal_cfg_w;
+logic         illegal_reg_class_w;
+logic         illegal_op_w;
+logic  [1:0]  ms1_idx_w;
+logic  [1:0]  ms2_idx_w;
+logic  [1:0]  md_idx_w;
 
 assign illegal_cfg_w = (cfg_m_i > MAX_M) || (cfg_n_i > MAX_N) || (cfg_k_i > MAX_K);
+assign illegal_reg_class_w = cmd_ms1_i[2] || cmd_ms2_i[2] || !cmd_md_i[2];
+assign illegal_op_w = (cmd_op_i != 2'b00);
+assign ms1_idx_w = ms1_q[1:0];
+assign ms2_idx_w = ms2_q[1:0];
+assign md_idx_w = md_q[1:0];
 
-// 矩阵寄存器 使能和地址信号生成
 assign tile_rd0_en_w = (state_q == STATE_EXEC);
 assign tile_rd1_en_w = (state_q == STATE_EXEC);
-assign tile_rd0_reg_w = ms1_q;
-assign tile_rd1_reg_w = ms2_q;
+assign tile_rd0_reg_w = ms1_idx_w;
+assign tile_rd1_reg_w = ms2_idx_w;
 
 assign acc_rd_en_w = (state_q == STATE_EXEC);
-assign acc_rd_reg_w = md_q;
+assign acc_rd_reg_w = md_idx_w;
 
 assign acc_wr_en_w = (state_q == STATE_EXEC) && !illegal_q;
-assign acc_wr_reg_w = md_q;
+assign acc_wr_reg_w = md_idx_w;
 assign acc_wr_data_w = mac_c_acc_w;
 
 assign cmd_ready_o = (state_q == STATE_IDLE);
@@ -154,7 +164,7 @@ always_ff @(posedge clk or negedge rst_n) begin
                     ms2_q <= cmd_ms2_i;
                     md_q <= cmd_md_i;
                     sat_q <= 1'b0;
-                    if (illegal_cfg_w) begin
+                    if (illegal_cfg_w || illegal_reg_class_w || illegal_op_w) begin
                         illegal_q <= 1'b1;
                         state_q <= STATE_DONE;
                     end else begin

@@ -4,12 +4,19 @@ import chisel3._
 import chisel3.util._
 import coralnpu.{CsrMatrixIO, Parameters}
 
-class MatrixInstCmd(p: Parameters) extends Bundle {
-  val ms1 = UInt(log2Ceil(p.matrixTileRegCount).W)
-  val ms2 = UInt(log2Ceil(p.matrixTileRegCount).W)
-  val md = UInt(log2Ceil(p.matrixAccRegCount).W)
+object MatrixInstOp extends ChiselEnum {
+  val MMACC_W_B   = Value // 00
+  val MMACCU_W_B  = Value // 01
+  val MMACCUS_W_B = Value // 10
+  val MMACCSU_W_B = Value // 11
 }
 
+class MatrixInstCmd(p: Parameters) extends Bundle {
+  val op  = MatrixInstOp()
+  val ms1 = UInt(3.W)
+  val ms2 = UInt(3.W)
+  val md  = UInt(3.W)
+}
 class MatrixStatusIO extends Bundle {
   val busy = Output(Bool())
   val done = Output(Bool())
@@ -48,3 +55,5 @@ class MatrixCoreIO(p: Parameters) extends Bundle {
   val status = new MatrixStatusIO
   val debug = new MatrixDebugIO(p)
 }
+
+
