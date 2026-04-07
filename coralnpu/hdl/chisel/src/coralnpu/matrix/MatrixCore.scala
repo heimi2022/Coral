@@ -3,8 +3,7 @@ package coralnpu.matrix
 import chisel3._
 import chisel3.util._
 import chisel3.util.HasBlackBoxResource
-import coralnpu.{CsrMatrixIO, Parameters}
-
+import coralnpu.Parameters
 class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResource {
   override def desiredName: String = "MatrixCore"
 
@@ -14,6 +13,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
 
     val cmd_valid_i = Input(Bool())
     val cmd_ready_o = Output(Bool())
+    val cmd_pc_i = Input(UInt(32.W))
     val cmd_op_i = Input(UInt(2.W))
     val cmd_ms1_i = Input(UInt(3.W))
     val cmd_ms2_i = Input(UInt(3.W))
@@ -27,6 +27,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val busy_o = Output(Bool())
     val done_valid_o = Output(Bool())
     val done_illegal_o = Output(Bool())
+    val done_pc_o = Output(UInt(32.W))
 
     val xmsat_set_valid_o = Output(Bool())
     val xmsat_set_bits_o = Output(Bool())
@@ -60,6 +61,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.rst_n := !reset.asBool
 
   matrixCore.io.cmd_valid_i := io.cmd.valid
+  matrixCore.io.cmd_pc_i := io.cmd.bits.pc
   matrixCore.io.cmd_op_i := io.cmd.bits.op.asUInt
   matrixCore.io.cmd_ms1_i := io.cmd.bits.ms1
   matrixCore.io.cmd_ms2_i := io.cmd.bits.ms2
@@ -74,6 +76,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.status.busy := matrixCore.io.busy_o
   io.status.done := matrixCore.io.done_valid_o
   io.status.illegal := matrixCore.io.done_illegal_o
+  io.status.donePc := matrixCore.io.done_pc_o
 
   io.csr.xmsat_set.valid := matrixCore.io.xmsat_set_valid_o
   io.csr.xmsat_set.bits := matrixCore.io.xmsat_set_bits_o

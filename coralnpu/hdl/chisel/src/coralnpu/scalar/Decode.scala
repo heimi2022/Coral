@@ -746,6 +746,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.matrix.get.bits.ms2 := io.inst(i).bits.inst(22,20)
             io.matrix.get.bits.ms1 := io.inst(i).bits.inst(17,15)
             io.matrix.get.bits.md  := io.inst(i).bits.inst(9,7)
+            io.matrix.get.bits.pc := io.inst(i).bits.addr
         }
         // -------------------------------------------------------------------------
         // Rvv

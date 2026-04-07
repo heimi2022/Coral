@@ -46,6 +46,18 @@ MATRIX_CSR_TESTCASES = [
 ]
 # END_TESTCASES_FOR_matrix_csr
 
+# BEGIN_TESTCASES_FOR_matrix_mmacc_rob
+MATRIX_MMACC_ROB_TESTCASES = [
+    "core_mini_axi_matrix_mmacc_rob",
+]
+# END_TESTCASES_FOR_matrix_mmacc_rob
+
+# BEGIN_TESTCASES_FOR_matrix_mmacc_arith
+MATRIX_MMACC_ARITH_TESTCASES = [
+    "core_mini_axi_matrix_mmacc_arith",
+]
+# END_TESTCASES_FOR_matrix_mmacc_arith
+
 cocotb_test_suite(
     name = "tutorial",
     simulators = [
@@ -170,6 +182,67 @@ cocotb_test_suite(
     verilator_model = "//tests/cocotb:core_mini_axi_model",
 )
 
+cocotb_test_suite(
+    name = "matrix_mmacc_rob",
+    simulators = [
+        "verilator",
+        "vcs",
+    ],
+    testcases = MATRIX_MMACC_ROB_TESTCASES,
+    testcases_vname = "MATRIX_MMACC_ROB_TESTCASES",
+    tests_kwargs = {
+        "waves": False,
+        "hdl_toplevel": "CoreMiniAxi",
+        "seed": "42",
+        "test_module": ["matrix_mmacc_rob.py"],
+        "deps": [
+            "//coralnpu_test_utils:core_mini_axi_sim_interface",
+            "@rules_python//python/runfiles",
+        ],
+        "data": [":matrix_mmacc_rob_program"],
+        "size": "small",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_mmacc_rob_program",
+        "//tests/cocotb:coverage_exclude.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = ["//hdl/chisel/src/coralnpu:core_mini_axi_cc_library_verilog"],
+    verilator_model = "//tests/cocotb:core_mini_axi_model",
+)
+
+cocotb_test_suite(
+    name = "matrix_mmacc_arith",
+    simulators = [
+        "vcs",
+    ],
+    testcases = MATRIX_MMACC_ARITH_TESTCASES,
+    testcases_vname = "MATRIX_MMACC_ARITH_TESTCASES",
+    tests_kwargs = {
+        "waves": False,
+        "hdl_toplevel": "CoreMiniAxi",
+        "seed": "42",
+        "test_module": ["matrix_mmacc_arith.py"],
+        "deps": [
+            "//coralnpu_test_utils:core_mini_axi_sim_interface",
+            "@rules_python//python/runfiles",
+        ],
+        "data": [":matrix_mmacc_arith_program"],
+        "size": "small",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_mmacc_arith_program",
+        "//tests/cocotb:coverage_exclude.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = ["//hdl/chisel/src/coralnpu:core_mini_axi_cc_library_verilog"],
+    verilator_model = "//tests/cocotb:core_mini_axi_model",
+)
+
 coralnpu_v2_binary(
     name = "coralnpu_v2_program",
     srcs = ["program.cc"],
@@ -183,6 +256,16 @@ coralnpu_v2_binary(
 coralnpu_v2_binary(
     name = "matrix_csr_program",
     srcs = ["matrix_csr_program.cc"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_mmacc_rob_program",
+    srcs = ["matrix_mmacc_rob_program.cc"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_mmacc_arith_program",
+    srcs = ["matrix_mmacc_arith_program.cc"],
 )
 
 coralnpu_v2_binary(

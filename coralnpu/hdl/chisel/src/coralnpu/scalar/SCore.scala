@@ -89,6 +89,16 @@ class SCore(p: Parameters) extends Module {
     rob_io.fault := fault_manager.io.out
     rob_io.storeComplete := lsu.io.storeComplete
 
+    // matrix
+    if (p.enableMatrix){
+        rob_io.matrixComplete.get.valid := io.matrixcore.get.status.done
+        rob_io.matrixComplete.get.bits := io.matrixcore.get.status.donePc
+        
+        rob_io.matrixInstr.get := VecInit(Seq.tabulate(p.instructionLanes) { i =>
+        if (i == 0) dispatch.io.matrix.get.fire else false.B
+        })
+    }
+
     dispatch.io.single_step := csr.io.dm.single_step || csr.io.dm.dcsr_step
     dispatch.io.debug_mode := csr.io.dm.debug_mode
     fetch.io.debug_pc := csr.io.dm.debug_pc

@@ -4,6 +4,7 @@ module MatrixCore (
 
     input  logic         cmd_valid_i,
     output logic         cmd_ready_o,
+    input  logic [31:0]  cmd_pc_i,
     input  logic [1:0]   cmd_op_i,
     input  logic [2:0]   cmd_ms1_i,
     input  logic [2:0]   cmd_ms2_i,
@@ -17,6 +18,7 @@ module MatrixCore (
     output logic         busy_o,
     output logic         done_valid_o,
     output logic         done_illegal_o,
+    output logic [31:0]  done_pc_o,
 
     output logic         xmsat_set_valid_o,
     output logic         xmsat_set_bits_o,
@@ -48,6 +50,7 @@ logic [1:0] state_q;
 logic [2:0] ms1_q;
 logic [2:0] ms2_q;
 logic [2:0] md_q;
+logic [31:0] pc_q;
 logic       illegal_q;
 logic       sat_q;
 
@@ -98,6 +101,7 @@ assign cmd_ready_o = (state_q == STATE_IDLE);
 assign busy_o = (state_q == STATE_EXEC);
 assign done_valid_o = (state_q == STATE_DONE);
 assign done_illegal_o = (state_q == STATE_DONE) && illegal_q;
+assign done_pc_o = pc_q;
 
 assign xmsat_set_valid_o = (state_q == STATE_DONE) && !illegal_q && sat_q;
 assign xmsat_set_bits_o = sat_q;
@@ -154,12 +158,14 @@ always_ff @(posedge clk or negedge rst_n) begin
         ms1_q <= '0;
         ms2_q <= '0;
         md_q <= '0;
+        pc_q <= '0;
         illegal_q <= 1'b0;
         sat_q <= 1'b0;
     end else begin
         case (state_q)
             STATE_IDLE: begin
                 if (cmd_valid_i) begin
+                    pc_q <= cmd_pc_i;
                     ms1_q <= cmd_ms1_i;
                     ms2_q <= cmd_ms2_i;
                     md_q <= cmd_md_i;

@@ -34,7 +34,18 @@
   - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
   - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixCore.scala`
   - 已把 `MatrixCoreWrapper` 以“仿 RVV”的方式挂到 `Core.scala + SCore.scala`
-  - 当前已接通 `CSR / busy / debug tie-off`，但 `mmacc.w.b` 的正式 `Decode -> Dispatch -> MatrixCore` 发射尚未接上
+  - 当前已接通 `CSR / busy / cmd`
+  - 已为 `mmacc.w.b / mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b` 预留 `Decode -> Dispatch -> MatrixCore` 的 `op` 通路
+  - 当前 Verilog `MatrixCore` 真正落地执行的仍只有 `mmacc.w.b`
+  - 当前 `debug` 端口仍主要用于 bring-up / preload / readback
+- 已完成 matrix compute -> ROB 的 completion token 闭环
+  - `MatrixInstCmd` 已携带 `pc`
+  - `MatrixCore` 已输出 `donePc`
+  - `RetirementBuffer` 已新增 `matrixInstr / matrixComplete`
+  - `matrixDone` 已按 `donePc == bufferEntry.addr` 阻止 matrix 指令过早退休
+- 已完成 `mmacc.w.b` 的两条 program 级验证
+  - `matrix_mmacc_rob`：验证 `mmacc.w.b` 发射后，后继 `msettilem` 必须等到其退休后才能继续发射
+  - `matrix_mmacc_arith`：在 VCS 下通过 cocotb backdoor preload/readback，验证 `mmacc.w.b` 的算术结果与独立 `MatrixCore_tb` 黄金值一致
 
 ## 当前阶段结论
 
@@ -50,17 +61,99 @@
   - `MS` 字段与 `mrelease`
   - `MS=Off` 时 matrix 指令 / matrix CSR 的非法访问判定
   - 如果后续不只支持 `mmi8i32`，还要继续扩展 `xmisa` 的能力位表达
+- 当前阶段的 matrix compute 最小闭环也已经完成
+  - 已完成 `mmacc.w.b` 的 `Decode -> Dispatch -> MatrixCore -> ROB retirement` 闭环
+  - 已完成 program 级“发射/退休顺序”验证
+  - 已完成 program 级“算术结果正确性”验证
+  - 但当前 program 级算术验证仍依赖 cocotb backdoor preload/readback，不是纯 ISA 端到端闭环
+- 当前最主要的缺口已经从“能不能发射/能不能算”转到“数据怎么进来、结果怎么出去”
+  - 也就是下一步优先补 `mld / mst` 或等价的矩阵数据搬运路径
 
 ## 下一步计划
 
-1. 先冻结 Coral matrix v1 的最小范围
-   - 第一版只做 `matrix CSR + 1 条 matrix 指令通路 + 1 个 MatrixUnit 占位实现`
-   - 暂时不直接改 `RVV` generated Verilog
-   - 暂时不先改 GCC / binutils
-2. 再建立独立 matrix 执行通路
-   - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
-   - 新建 `hdl/chisel/src/coralnpu/matrix/MatrixUnit.scala`
-   - 把当前 `matadd` 从 `ALU` 过渡到 `MatrixUnit`
+1. 先做矩阵数据搬运
+   - 优先补 `mld / mst`，或者至少先定义一个软件可见的最小矩阵装载/回写路径
+   - 目标是去掉当前 program 级算术验证对 cocotb backdoor 的依赖
+2. 再做纯 ISA 端到端闭环
+   - `memory -> tile/acc -> mmacc.w.b -> acc/tile -> memory`
+   - 让 `mmacc.w.b` 的 program 级验证不再依赖内部层级注数
+3. 最后扩到剩余 `mmi8i32` 变体
+   - `mmaccu.w.b`
+   - `mmaccus.w.b`
+   - `mmaccsu.w.b`
+
+## 最新 matrix compute 闭环记录（已完成）
+
+### 为后续 `mmaccu/mmaccus/mmaccsu` 发射预留的修改
+
+- `Decode.scala` 已识别 4 条 `mmi8i32` accumulate 指令编码：
+  - `mmacc.w.b`
+  - `mmaccu.w.b`
+  - `mmaccus.w.b`
+  - `mmaccsu.w.b`
+- `MatrixInterface.scala` 已新增：
+  - `MatrixInstOp`
+  - `MatrixInstCmd.op`
+  - `MatrixInstCmd.pc`
+- `MatrixCore.scala` / Verilog `MatrixCore.sv` 已新增：
+  - `cmd_op_i`
+  - `cmd_pc_i`
+  - `done_pc_o`
+- 当前这套修改的准确语义是：
+  - **已经把 4 条指令的“编码识别 + 发射字段 + wrapper 接口”预留好了**
+  - **但真正落地执行的 Verilog kernel 目前仍只有 `op=00 -> mmacc.w.b`**
+  - 所以后续补 `mmaccu/mmaccus/mmaccsu` 时，重点在 Verilog 计算核的有符号/无符号乘法语义，而不是再重做前端发射通路
+
+### ROB 修改
+
+- `RetirementBuffer.scala` 已新增：
+  - `matrixInstr`
+  - `matrixComplete`
+- ROB entry 已新增 `isMatrix`
+  - 这样 matrix 指令不会再被简单归类成“普通 no-write 指令”
+- `SCore.scala` 已把两类 sideband 接入 ROB：
+  - `dispatch.io.matrix.fire -> rob_io.matrixInstr`
+  - `matrixcore.status.done + donePc -> rob_io.matrixComplete`
+- `MatrixCore.sv` 已在接收命令时锁存 `cmd_pc_i`
+  - 完成时通过 `done_pc_o` 把这条 matrix 命令的 completion token 回给 ROB
+- ROB 当前的 matrix 完成语义是：
+
+```text
+Dispatch 发 matrix 指令时，ROB 记住这条指令是 isMatrix
+MatrixCore 完成时，回传 donePc
+ROB 用 donePc == bufferEntry.addr 判定 matrixDone
+只有 matrixDone 成立，这条 matrix 指令才会 dataReady / retirement
+```
+
+- 这次修改解决的是“matrix compute 过早退休”的问题
+- 但这**不等于** matrix `tr/acc` 已经纳入 ROB 的统一 writeback 匹配体系
+  - 当前 `tr0~tr3 / acc0~acc3` 仍是 `MatrixCore` 内部私有寄存器文件
+  - ROB 现在只“看得见它做完了”，还“看不见它像 x/f/v 那样逐拍 writeback”
+
+### 两条 program 级验证结果
+
+- `matrix_mmacc_rob`
+  - 目标：验证 `mmacc.w.b` 与后继 `msettilem` 之间的 ROB 顺序
+  - 结果：
+    - 输出缓冲区为 `[1, 1, 1, 9]`
+    - 事件顺序为 `mmacc dispatch = 141 -> mmacc retire = 143 -> post-msettilem dispatch = 145`
+  - 结论：后继 `msettilem` 没有越过 `mmacc.w.b` 提前发射，ROB 的 matrix completion 语义已经生效
+- `matrix_mmacc_arith`
+  - 目标：验证 `mmacc.w.b` 的算术结果
+  - 方式：程序先完成 `m/k/n` 配置，再由 cocotb 通过 VCS 内部层级直接 preload `tile_q/acc_q`，最后读取 `acc_q`
+  - 结果：
+    - 输出缓冲区为 `[2, 4, 3, 0xACCE5501]`
+    - `acc0` 对应矩阵结果为：
+
+```text
+[70, 12, 10, 0]
+[18,  8,  2, 0]
+[ 0,  0,  0, 0]
+[ 0,  0,  0, 0]
+```
+
+  - 结论：program 级 `mmacc.w.b` 算术结果与独立 `MatrixCore_tb` 的黄金值一致
+  - 备注：这条测试当前是 **VCS-only + backdoor preload/readback**，还不是纯 ISA 端到端闭环
 
 ## `mmacc.w.b` 实施计划（当前主线）
 
@@ -194,7 +287,8 @@
   - 已新增 `io.matrixcore : Flipped(new MatrixCoreIO(p))`
   - 已把 `dispatch.io.mactive` 接到 `matrixcore.status.busy`
   - 已把 `csr.io.matrixCfg` 与 `csr.io.matrix` 分别接到 matrix 配置入口与 matrix CSR 反馈口
-  - 当前先将 `cmd / debug` 全部 tie-off，表示“壳已挂上、命令尚未发射”
+  - 已把 `dispatch.io.matrix` 正式接到 `matrixcore.cmd`
+  - `debug` 端口当前仍默认 tie-off，仅保留独立 bring-up / 波形观察用途
 - `Core.scala`
   - 已仿照 `RVV` 的挂接方式实例化 `MatrixCoreWrapper`
   - 当前层次为 `Core -> { SCore, MatrixCoreWrapper }`
@@ -209,30 +303,33 @@
   - `msettile*` 到 CSR 的配置闭环
   - `mmacc.w.b` 的第一版 Verilog 原型
   - `MatrixCoreWrapper` 按仿 `RVV` 方式挂入 `Core/SCore`
+  - matrix 多拍完成到 ROB 的 completion token 闭环
+  - program 级 `mmacc.w.b` 闭环验证（顺序 + 算术）
 - 现在还没有完成的是：
-  - `Decode -> Dispatch -> MatrixCore` 的正式 `mmacc.w.b` 发射
-  - `RetirementBuffer` 对 matrix 多拍完成语义的正式支持
   - `mld / mst`
-  - program 级 `mmacc.w.b` 闭环
+  - 纯 ISA 端到端的矩阵数据搬运
+  - `mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b` 的 Verilog 执行语义
 
 ### 第一轮验证策略
 
-- 第一步先做单元级验证，不急着直接上 program 级
-- 为了尽快验证 `mmacc.w.b` 本身，第一轮允许在 `MatrixCore` 或 `MatrixRegFile` 上保留 test/backdoor preload 入口
-  - 直接把 `ms1 / ms2 / md` 预装进去
-  - 发一条 `mmacc.w.b`
-  - 检查 `md` 的新值是否正确
-  - 检查饱和场景下 `xmsat_set` 是否拉高
-- 等 `mmacc.w.b` 的 Verilog 计算与 Chisel 包装跑通后，再继续补：
-  - Decode -> MatrixCore 的正式派发
-  - `mld / mst`
-  - program 级闭环
+- 已完成单元级验证
+  - `MatrixCore_tb` 已覆盖基础 `mmacc`
+  - 已覆盖 `K tail + accumulate`
+  - 已覆盖正向饱和
+  - 已覆盖非法配置
+- 已完成 program 级顺序验证
+  - `matrix_mmacc_rob`
+- 已完成 program 级算术验证
+  - `matrix_mmacc_arith`
+  - 当前仍允许通过 `MatrixRegFile` backdoor preload/readback 做 bring-up
+- 下一阶段的验证重点不再是“能不能发射/能不能算”
+  - 而是“去掉 backdoor 后，软件如何把矩阵数据正式搬进去/搬出来”
 
 ### 后续扩展顺序
 
 - `mmacc.w.b`
-- `mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b`
 - `mld / mst`
+- `mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b`
 - 之后再考虑 `miew` 相关逐元素指令，例如：
   - `madd.w.mm`
   - `msub.w.mm`
@@ -496,31 +593,7 @@ bazel --batch --output_user_root=/tmp/bazel_wjj test --config=vcs \
 - 第三条命令是本轮已经跑通的 Verilator 回归
 - 第四条命令是已经补好的 VCS 目标；本地这次卡在 license，而不是功能错误
 
-### 波形观测建议
 
-如果用 `VCS + Verdi` 看这一轮 `msettile*` 行为，最有用的信号是：
-
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettilemi`
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettilem`
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettileki`
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettilek`
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettileni`
-- `CoreMiniAxi.dispatch.decodedInsts_0_msettilen`
-- `CoreMiniAxi.csr.matrixCfgReq_valid`
-- `CoreMiniAxi.csr.matrixCfgReq_bits_op`
-- `CoreMiniAxi.csr.io_rs1_data`
-- `CoreMiniAxi.csr.xtilem`
-- `CoreMiniAxi.csr.xtilek`
-- `CoreMiniAxi.csr.xtilen`
-
-可以按下面这条链路观察：
-
-```text
-指令 decode 命中
--> dispatch 发出 matrixCfg
--> CSR 收到 matrixCfgReq_valid
--> xtilem / xtilek / xtilen 在对应周期更新
-```
 
 ## 相关代码结构
 
@@ -599,6 +672,181 @@ bazel --batch --output_user_root=/tmp/bazel_wjj test --config=vcs \
 - `RetirementBuffer + FaultManager`
   负责退休顺序、精确异常、trap 汇总和状态一致性
 
+### RetirementBuffer（ROB）是做什么的
+
+可以先把 `RetirementBuffer.scala` 理解成：**指令发射之后、真正“算完成并允许退休”之前的最后一道总闸门**。
+
+它主要负责 4 件事：
+
+- 收下 `Dispatch` 发来的指令元数据
+  - 例如 `PC / inst / 目的寄存器编号 / 是否分支跳转 / 是否 trap`
+- 等待执行完成的“证据”回来
+  - 例如 scalar / float / vector writeback
+  - 例如 `storeComplete`
+  - 例如 `fault`
+- 保证**按序退休**
+  - 后面的指令就算先做完，也不能越过前面的指令先退休
+- 保证**精确异常**
+  - 如果中间某条指令 trap，只退休到它为止，后面的年轻指令都不能带着副作用溜过去
+
+所以它在系统里的角色，不是“再做一次执行”，而是：
+
+- 维护 dispatch 之后的顺序状态
+- 判断每条指令是否真的完成
+- 决定这一拍最多能退休几条
+- 给外部导出：
+  - `nRetired`
+  - `empty`
+  - `trapPending`
+  - debug trace
+
+### 从源码看，它内部大致分三层
+
+- 第一层：`instBuffer`
+  - 保存 dispatch 进来的指令元数据
+  - 这是“顺序队列”本体
+- 第二层：`resultBuffer`
+  - 保存每条指令当前是否 `dataDone / cfDone / trap`
+  - 这是“完成状态表”
+- 第三层：retire 决策逻辑
+  - 根据 writeback / store / trap / 控制流连续性，算出这一拍可以 `deqReady` 多少条
+  - 如果 trap 已经 ready，则 flush 更年轻的项
+
+### RetirementBuffer 系统框图
+
+```mermaid
+flowchart LR
+    D[Dispatch / io.inst] -->|PC, inst, idx, jump/branch| IB[instBuffer]
+    T[targets / jalrTargets / jump / branch] --> CF[控制流连续性检查]
+    W[Scalar / Float / Vector writeback] --> DR[完成判定 dataReady]
+    S[LSU storeComplete] --> DR
+    F[FaultManager / io.fault] --> DR
+
+    IB --> DR
+    IB --> CF
+
+    DR --> RB[resultBuffer]
+    CF --> RB
+
+    IB --> RET[按序退休判定 deqReady]
+    RB --> RET
+
+    RET --> O1[nRetired / empty / trapPending]
+    RET --> O2[debug trace]
+    RET --> O3[trap 时 flush younger entries]
+```
+
+如果按 `RetirementBuffer.scala` 的实际结构去对照，可以近似理解成：
+
+- `instBuffer`
+  - 管“谁先来、谁在前面”
+- `resultBuffer`
+  - 管“谁已经完成、谁还没完成”
+- `deqReady`
+  - 管“这一拍从队头开始，最多能退休几条”
+
+### 它在当前 Coral 里的关键判断链
+
+- dispatch 进入时，会先给每条指令分一个 `idx`
+  - 正常写 GPR / FPR / VRF 的指令，会记录对应目的编号
+  - store 会被映射成专用 `storeRegIdx`
+  - 不写回寄存器的指令，会落到 `noWriteRegIdx`
+- 后面每拍会检查：
+  - 有没有匹配的 scalar writeback
+  - 有没有匹配的 float writeback
+  - 有没有匹配的 vector writeback
+  - store 有没有等到 `storeComplete`
+  - 控制流类指令的“下一条 PC”是否连续
+- 当某条指令既满足 data ready，又满足 control-flow ready 时，它才算“可退休”
+- 但最终退休仍然必须从队头开始连续计算，不能乱序穿透
+
+### 对 matrix 最重要的一点
+
+当前这份 `RetirementBuffer.scala` **已经补上了 matrix 多拍完成回传口**。  
+这次补的是一条比较轻量但很关键的 completion sideband：
+
+- `Dispatch -> ROB`：通过 `matrixInstr` 标出“这是一条 matrix 指令”
+- `MatrixCore -> ROB`：通过 `matrixComplete(donePc)` 标出“这条 matrix 指令已经做完”
+
+所以现在 `mmacc.w.b` 不会再被简单当成“普通 no-write 指令”过早退休。  
+这也是为什么这次已经能把 `mmacc.w.b` 真正接成 program 级 ROB 闭环。
+
+### 为什么 `tr0~tr3 / acc0~acc3` 当前不走 ROB 的 writeback 匹配口
+
+这里要特别记住：这不是 spec 规定“matrix 一定不能走 ROB writeback 口”，而是**当前这版实现的接口分层就是这样设计的**。
+
+当前原因可以直接归纳成 3 条：
+
+- `MatrixCoreIO` 现在对外只暴露：
+  - `cmd`
+  - `csr`
+  - `status`
+  - `debug`
+  - 也就是说，当前并没有像 scalar / float / rvv 那样，单独对外暴露 `writeAddrMatrix / writeDataMatrix` 之类可供 ROB 直接匹配的完成口
+- `MatrixRegFile` 现在是 `MatrixCore` 的**内部私有寄存器文件**
+  - `ms1 / ms2` 的 tile 读
+  - `md(acc)` 的读写
+  - 都是在 `MatrixCore.sv` 内部直接接到 `MatrixRegFile.sv`
+  - 对 `SCore / RetirementBuffer` 来说，这些寄存器改写目前是“黑盒内部状态变化”
+- `RetirementBuffer` 当前认识的完成来源只有：
+  - scalar writeback
+  - float writeback
+  - vector writeback
+  - `storeComplete`
+  - `no-write`
+  - `matrixComplete`
+
+所以当前语义下，事情本质上是：
+
+```text
+x / f / v 的写回，ROB 看得见
+matrix 的完成事件，ROB 现在也看得见
+matrix tr / acc 的逐拍写回，ROB 仍然看不见
+```
+
+这也解释了为什么**不能因为 matrix 有 8 个寄存器，就直接把它们机械塞进 `retirementBufferIdxWidth`**：
+
+- 问题的根本不在“编号空间够不够”
+- 当前 ROB 虽然已经能看到 matrix 完成事件
+- 但它仍然没有像 x/f/v 那样直接观察到 matrix reg 的逐拍 writeback
+
+因此当前更合理的阶段性结论是：
+
+- 第一拍先补 `matrixComplete`
+- 让 ROB **先看得见 matrix 指令完成**
+- 这一拍已经完成
+- 后面再决定是否需要把 matrix reg 也纳入更统一的 writeback / tag 体系
+
+### Matrix 相关时序图
+
+下面这张图，专门用来说明这次补上的 `matrixComplete(donePc)` 语义。
+
+```mermaid
+sequenceDiagram
+    participant Dispatch
+    participant ROB as RetirementBuffer
+    participant Matrix as MatrixCore
+    participant Commit as Arch Commit / CSR-visible State
+
+    Dispatch->>ROB: 发射 mmacc.w.b，记录 PC / idx / 属性
+    Dispatch->>Matrix: 发 matrix cmd
+    Matrix-->>Matrix: 多拍执行
+
+    Matrix-->>ROB: matrixComplete(donePc = cmdPc)
+    ROB->>ROB: 收到 completion token 后置 matrixDone
+    ROB-->>Commit: 按序退休，保持精确异常
+```
+
+可以把这个问题记成一句最核心的话：
+
+```text
+当前 ROB 能看懂 scalar / float / vector / store 的“完成”
+现在也已经能看懂 matrix compute 的“完成”
+但还看不懂 matrix tr / acc 像普通寄存器那样的逐拍 writeback
+```
+
+所以当前 `mmacc.w.b` 的 core 级闭环已经打通；下一步重点不再是 ROB 完成语义，而是矩阵数据搬运。
+
 ### RVV 与 Matrix 的挂接方式对照
 
 这里要特别记住一点：`RVV` 不是实例化在 `SCore` 里面，而是实例化在更上层的 `Core` 里；`SCore` 只保留一个对外接口。`Matrix` 建议完全仿照这一路线来接。
@@ -629,8 +877,8 @@ Core
 | --- | --- | --- | --- |
 | `Core.scala` | 实例化 `RvvCore` | 实例化 `MatrixCoreWrapper` | 顶层总装，保持扩展单元平级 |
 | `SCore.scala` IO | `rvvcore` 作为对外端口 | `matrixcore` 作为对外端口 | `SCore` 只负责连接，不直接包执行体 |
-| `SCore.scala` 内部连接 | 接 `Dispatch / CSR / Regfile / LSU / trap` | 先接 `CSR / busy`，后续再接 `cmd` | 先打通框架，再逐步补执行通路 |
-| `Dispatch` | 走 RVV 专用指令/队列接口 | 先看 `matrix busy`，后续再发 `matrix cmd` | 保持控制和顺序性一致 |
+| `SCore.scala` 内部连接 | 接 `Dispatch / CSR / Regfile / LSU / trap` | 已接 `CSR / busy / cmd / ROB-complete` | 先打通框架，再逐步补执行通路 |
+| `Dispatch` | 走 RVV 专用指令/队列接口 | 已发 `matrix cmd`，并用 `matrix busy` 做顺序控制 | 保持控制和顺序性一致 |
 
 这张图背后的核心原则是：
 
@@ -812,8 +1060,8 @@ flowchart LR
 ```scala
 var enableMatrix = false
 val matrixElen = 32
-val matrixTlen = 256
-val matrixTrlen = 64
+val matrixTlen = 1024
+val matrixTrlen = 256
 
 def matrixRowNum: Int = { matrixTlen / matrixTrlen }
 def matrixArlen: Int = { matrixRowNum * matrixElen }
@@ -835,25 +1083,25 @@ def matrixAlenBytes: Int = { matrixAlen / 8 }
 
 spec 还定义了三个由它们推导出来的量：
 
-- `ROWNUM = TLEN / TRLEN = 256 / 64 = 4`
+- `ROWNUM = TLEN / TRLEN = 1024 / 256 = 4`
 - `ARLEN = (TLEN / TRLEN) * ELEN = 4 * 32 = 128`
 - `ALEN = ARLEN * ROWNUM = 128 * 4 = 512`
 
 因此当前硬件含义就是：
 
-- tile register 总宽度 `256bit`
-- tile register 每行 `64bit`
+- tile register 总宽度 `1024bit`
+- tile register 每行 `256bit`
 - tile register 一共 `4` 行
 - accumulation register 每行 `128bit`
 - accumulation register 总宽度 `512bit`
 
-这组参数和计划中的 `4x4` 脉动阵列正好能自然对齐。
+这组参数和当前计划中的 `4x4` 输出阵列、`K<=32` 的 `mmi8i32` 原型正好能自然对齐。
 
-如果输入元素最大是 `16bit`：
+如果当前做的是 `mmi8i32`，输入元素是 `8bit`：
 
-- tile 每一行可放 `64 / 16 = 4` 个元素
+- tile 每一行可放 `256 / 8 = 32` 个元素
 - 一共有 `4` 行
-- 所以一个 source tile 正好就是 `4 x 4`
+- 所以一个 source tile 当前可表达为 `4 x 32`
 
 如果输出累加元素按 `32bit`：
 
@@ -863,9 +1111,10 @@ spec 还定义了三个由它们推导出来的量：
 
 也就是说，这套参数可以直接支撑下面这个映射：
 
-- `4 x 4` tile 输入块进入脉动阵列
+- `4 x 32` 的 `A/B` 输入切片进入 dot-product 路径
 - `4 x 4` accumulation tile 保存输出块
-- `mtilem / mtilen / mtilek` 的第一版最大目标值都可以先收敛到 `4`
+- `mtilem / mtilen` 的第一版最大目标值先收敛到 `4`
+- `mtilek` 的第一版最大目标值先收敛到 `32`
 
 为什么 `matrixTileRegCount` 和 `matrixAccRegCount` 都先定成 `4`：
 
@@ -875,11 +1124,11 @@ spec 还定义了三个由它们推导出来的量：
 
 这组参数还能直接映射到只读 CSR：
 
-- `xtlenb = 256 / 8 = 32`
-- `xtrlenb = 64 / 8 = 8`
+- `xtlenb = 1024 / 8 = 128`
+- `xtrlenb = 256 / 8 = 32`
 - `xalenb = 512 / 8 = 64`
 
-所以，当前这套配置的本质不是“完全照搬 Xuantie 某个现成实现”，而是在遵守其参数模型的前提下，为 Coral 第一版 `4x4`、`16bit` 输入、`32bit` 累加的脉动阵列原型做的最小收敛选择。
+所以，当前这套配置的本质不是“完全照搬 Xuantie 某个现成实现”，而是在遵守其参数模型的前提下，为 Coral 第一版 `mmi8i32`、`4x4` 输出、`K=32` dot-product 原型做的最小收敛选择。
 
 ### 现有可复用入口
 
