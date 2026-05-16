@@ -34,7 +34,7 @@
   - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixInterface.scala`
   - 已新增 `hdl/chisel/src/coralnpu/matrix/MatrixCore.scala`
   - 已把 `MatrixCoreWrapper` 以“仿 RVV”的方式挂到 `Core.scala + SCore.scala`
-  - 当前已接通 `CSR / busy / cmd`
+  - 当前已稳定接通 `CSR / busy / cmd`
   - 已为 `mmacc.w.b / mmaccu.w.b / mmaccus.w.b / mmaccsu.w.b` 预留 `Decode -> Dispatch -> MatrixCore` 的 `op` 通路
   - 当前 Verilog `MatrixCore` 真正落地执行的仍只有 `mmacc.w.b`
   - 当前 `debug` 端口仍主要用于 bring-up / preload / readback
@@ -46,6 +46,26 @@
 - 已完成 `mmacc.w.b` 的两条 program 级验证
   - `matrix_mmacc_rob`：验证 `mmacc.w.b` 发射后，后继 `msettilem` 必须等到其退休后才能继续发射
   - `matrix_mmacc_arith`：在 VCS 下通过 cocotb backdoor preload/readback，验证 `mmacc.w.b` 的算术结果与独立 `MatrixCore_tb` 黄金值一致
+- 已完成 matrix load/store 的 `Decode.scala` 侧工作
+  - 已补齐 `ml*/ms*` 指令的解码、`matrixMem` 发射口、`forceSlot0Only` 与 `dispatched` 统计
+  - 已补齐 `readsRs1/readsRs2` 与 scoreboard 相关逻辑，其中 whole-register `mlme/msme` 不读取 `rs2`
+  - 已修正 whole-register `mlme/msme` 的 `rs2 = 00000` 编码约束
+  - 结论：**load/store 在 Decode 内部的识别与发射前端已完成**
+- 已开始 matrix load/store 的执行路径接线
+  - `MatrixInterface.scala` 已新增：
+    - `MatrixMemReq`
+    - `MatrixMemExecReq`
+    - `Matrix2Lsu / Lsu2Matrix`
+  - `SCore.scala` 已开始把 `dispatch.io.matrixMem` 组包后接到 `io.matrixcore.mem`
+  - `SCore.scala` 已按当前版本先补：
+    - `base := regfile.io.readData(0).data`
+    - `stride := Mux(isWhole, 0.U, regfile.io.readData(1).data)`
+  - `SCore.scala` 里也已经预留了 `lsu <-> matrixcore` sideband 接线
+  - 但当前仍未完成 `MatrixCore(mem) -> LSU -> matrix regfile` 的系统级闭环
+  - 真实状态应定义为：
+    - **Decode 前端已完成**
+    - **SCore / interface scaffold 已开始铺**
+    - **MatrixCore / LSU 的执行落地仍未完成**
 
 ## 当前阶段结论
 
@@ -68,12 +88,23 @@
   - 但当前 program 级算术验证仍依赖 cocotb backdoor preload/readback，不是纯 ISA 端到端闭环
 - 当前最主要的缺口已经从“能不能发射/能不能算”转到“数据怎么进来、结果怎么出去”
   - 也就是下一步优先补 `mld / mst` 或等价的矩阵数据搬运路径
+- 当前 matrix load/store 的真实边界状态是
+  - `Decode.scala` 前端已完成
+  - `MatrixInterface.scala` sideband 定义已完成
+  - `SCore.scala` 组包与接线已开始落地
+  - `MatrixCoreWrapper / Verilog MatrixCore / LSU` 的执行级落地仍未完成
+- 当前代码树已经进入一个“接线中间态”
+  - 上层 `SCore` 已经开始使用 `matrixMem / matrix2lsu / lsu2matrix`
+  - 但底层 `BlackBox / Verilog / LSU` 还没有全部齐平
+  - 所以当前最需要的是把这条执行路径真正收口，而不是继续外扩更多 matrix ISA
 
 ## 下一步计划
 
 1. 先做矩阵数据搬运
    - 优先补 `mld / mst`，或者至少先定义一个软件可见的最小矩阵装载/回写路径
    - 目标是去掉当前 program 级算术验证对 cocotb backdoor 的依赖
+   - 当前应先把 `MatrixCoreWrapper / Verilog MatrixCore / LSU` 三边的 interface 对齐
+   - 当前阶段的推荐路线是：**接口上先解耦，访存后端先借 LSU 落地**
 2. 再做纯 ISA 端到端闭环
    - `memory -> tile/acc -> mmacc.w.b -> acc/tile -> memory`
    - 让 `mmacc.w.b` 的 program 级验证不再依赖内部层级注数
@@ -81,6 +112,61 @@
    - `mmaccu.w.b`
    - `mmaccus.w.b`
    - `mmaccsu.w.b`
+
+## 当前矩阵访存路线选择
+
+当前对 Coral matrix load/store 的阶段性建议是：
+
+- **现在先借 LSU 落地**
+- **但接口不要绑死 LSU**
+
+也就是说，当前更推荐下面这条路线：
+
+- `Decode / SCore / MatrixCore` 继续保留独立的 matrix 访存接口
+  - `matrixMem`
+  - `MatrixMemExecReq`
+  - `matrix2lsu / lsu2matrix`
+- 真正的访存后端第一阶段先复用现有 LSU 去打 `DTCM / DBUS / EBUS`
+- 等纯 ISA 数据闭环跑通后，再评估是否有必要把 matrix 访存后端进一步独立出去
+
+### 矩阵访存走 LSU 的优缺点
+
+- 优点
+  - 复用现有地址路径、对齐处理、异常处理和存储系统接入，第一版最容易落地
+  - 更容易和当前 core 的精确异常、调试与顺序语义保持一致
+  - 最适合当前阶段先做 `memory -> matrix reg -> mmacc -> memory` 的最小纯 ISA 闭环
+  - 验证复杂度明显更低，不容易同时把问题扩散到 MatrixCore、总线和异常处理三边
+- 缺点
+  - matrix 搬运会和 scalar/vector 访存竞争 LSU 资源
+  - 后续做 matrix-vector overlap 时更容易受到 LSU backpressure 限制
+  - tile 搬运数据量较大时，LSU 可能成为性能瓶颈
+  - 如果后面继续深度扩展，LSU 内部状态机会越来越脏
+
+### 矩阵访存不走 LSU 的优缺点
+
+- 优点
+  - 更接近 `CUTEv2` 那种独立 `Memory Loader + Scratchpad` 的解耦思路
+  - matrix 访存不会直接占用 CPU 原有 LSU 发射与调度资源
+  - 更容易做独立预取、大块 tile 搬运以及 matrix-vector overlap
+  - 如果后面重点转向外部 DDR/L2 带宽利用，这条路的性能上限更高
+- 缺点
+  - 需要自己补齐请求生成、返回重排、fault、ordering、flush、coherence 等一整套机制
+  - 集成和验证成本明显更高
+  - 对当前 Coral matrix bring-up 阶段来说，跨度过大，容易久拖不通
+
+### 当前推荐
+
+- 当前不推荐一开始就做“完全不经过 LSU”的独立 loader 路线
+- 当前也不推荐把 matrix 访存彻底伪装成普通 scalar LSU 指令，导致前后端完全绑死
+- 当前最合适的做法是：
+  - **架构边界上按解耦方式设计**
+  - **实现上先借 LSU 落地**
+
+可以把这条路线记成一句话：
+
+```text
+先借 LSU 跑通，接口别绑死 LSU。
+```
 
 ## 最新 matrix compute 闭环记录（已完成）
 

@@ -3,6 +3,11 @@
 /verdiLog/
 .metals/
 .vscode/
+.bloop/
+.scala-build/
+.idea/
+.bazelbsp/
+__pycache__/
 /NPU/2-SIM/*
 !/NPU/2-SIM/asic.f
 !/NPU/2-SIM/clean.sh
@@ -15,4 +20,16 @@
 !/riscv-matrix-extension-spec/doc/**
 .codex
 
+# Generated simulation / waveform outputs
+**/csrc/
+**/simv.daidir/
+**/verdiLog/
+**/vfastLog/
+**/*.vcd
+**/*.vpd
+**/*.fsdb
+**/sim.log
+
+# OS cruft
+**/.DS_Store
 

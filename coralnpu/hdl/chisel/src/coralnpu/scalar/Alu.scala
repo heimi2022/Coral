@@ -72,106 +72,106 @@ class AluCmd extends Bundle {
 }
 
 class Alu(p: Parameters) extends Module {
-  val io = IO(new Bundle {
-    // Decode cycle.
-    val req = Flipped(Valid(new AluCmd))
-    // Execute 阶段从寄存器堆读出的两个源操作数
-    // Execute cycle.
-    val rs1 = Flipped(new RegfileReadDataIO)
-    val rs2 = Flipped(new RegfileReadDataIO)
-    val rd  = Valid(Flipped(new RegfileWriteDataIO))
-  })
+    val io = IO(new Bundle {
+        // Decode cycle.
+        val req = Flipped(Valid(new AluCmd))
+        // Execute 阶段从寄存器堆读出的两个源操作数
+        // Execute cycle.
+        val rs1 = Flipped(new RegfileReadDataIO)
+        val rs2 = Flipped(new RegfileReadDataIO)
+        val rd  = Valid(Flipped(new RegfileWriteDataIO))
+    })
 
-  val valid = RegInit(false.B)
-  val addr = RegInit(0.U(5.W))
-  val op = RegInit(AluOp.ADD)
+    val valid = RegInit(false.B)
+    val addr = RegInit(0.U(5.W))
+    val op = RegInit(AluOp.ADD)
 
-  // Pulse the cycle after the decoded request.
-  valid := io.req.valid
+    // Pulse the cycle after the decoded request.
+    valid := io.req.valid
 
-  // Avoid output toggles by not updating state between uses.
-  // The Regfile has the same behavior, leaving read ports unchanged.
-  when (io.req.valid) {
-    addr := io.req.bits.addr
-    op := io.req.bits.op
-  }
+    // Avoid output toggles by not updating state between uses.
+    // The Regfile has the same behavior, leaving read ports unchanged.
+    when (io.req.valid) {
+        addr := io.req.bits.addr
+        op := io.req.bits.op
+    }
 
-  val rs1 = io.rs1.data
-  val rs2 = io.rs2.data
-  val shamt = rs2(4,0)
+    val rs1 = io.rs1.data
+    val rs2 = io.rs2.data
+    val shamt = rs2(4,0)
 
-  io.rd.valid := valid
-  io.rd.bits.addr  := addr
+    io.rd.valid := valid
+    io.rd.bits.addr  := addr
 
-  val r2IsGreater = rs1.asSInt < rs2.asSInt
-  val r2IsGreaterU = rs1 < rs2
+    val r2IsGreater = rs1.asSInt < rs2.asSInt
+    val r2IsGreaterU = rs1 < rs2
 
-  val rsWidth  = 32
-  val rsWidthH = 32/2
+    val rsWidth  = 32
+    val rsWidthH = 32/2
 
-  // 符号位拓展 ， 输出位宽为 length.W
-  def SignExtend(x: UInt, length: Int): UInt = {
-    val ext = Wire(SInt(length.W))
-    ext := x.asSInt
-    ext.asUInt
-  }
+    // 符号位拓展 ， 输出位宽为 length.W
+    def SignExtend(x: UInt, length: Int): UInt = {
+        val ext = Wire(SInt(length.W))
+        ext := x.asSInt
+        ext.asUInt
+    }
 
-  def Orcb(x: UInt, length: Int): UInt = {
-    val orcb = Wire(UInt(length.W))
-    orcb := Cat((0 until length by 8).reverse.map(i =>
-      Mux(x(i+7, i) === 0.U, 0x0.U(8.W), 0xFF.U(8.W))
+    def Orcb(x: UInt, length: Int): UInt = {
+        val orcb = Wire(UInt(length.W))
+        orcb := Cat((0 until length by 8).reverse.map(i =>
+        Mux(x(i+7, i) === 0.U, 0x0.U(8.W), 0xFF.U(8.W))
+        ))
+        orcb
+    }
+
+    io.rd.bits.data  := MuxLookup(op, 0.U)(Seq(
+        AluOp.ADD  -> (rs1 + rs2),
+        AluOp.SUB  -> (rs1 - rs2),
+        AluOp.SLT  -> (r2IsGreater),
+        AluOp.SLTU -> (r2IsGreaterU),
+        AluOp.XOR  -> (rs1 ^ rs2),
+        AluOp.OR   -> (rs1 | rs2),
+        AluOp.AND  -> (rs1 & rs2),
+        AluOp.SLL  -> ((rs1 << shamt)(31,0)),
+        AluOp.SRL  -> ((rs1 >> shamt)(31,0)),
+        AluOp.SRA  -> (((rs1.asSInt >> shamt).asUInt)(31,0)),
+        AluOp.LUI  -> rs2,
+        // ZBB
+        AluOp.ANDN -> (rs1 & ~rs2),
+        AluOp.ORN  -> (rs1 | ~rs2),
+        AluOp.XNOR -> ~(rs1 ^ rs2),
+        AluOp.CLZ  -> Clz(rs1),
+        AluOp.CTZ  -> Ctz(rs1),
+        AluOp.CPOP -> PopCount(rs1),
+        AluOp.MAX  -> Mux(r2IsGreater,  rs2, rs1),
+        AluOp.MAXU -> Mux(r2IsGreaterU, rs2, rs1),
+        AluOp.MIN  -> Mux(r2IsGreater,  rs1, rs2),
+        AluOp.MINU -> Mux(r2IsGreaterU, rs1, rs2),
+        AluOp.SEXTB -> SignExtend(rs1(7, 0), rsWidth),
+        AluOp.SEXTH -> SignExtend(rs1(rsWidthH-1,0), rsWidth),
+        AluOp.ROL -> rs1.rotateLeft(shamt),
+        AluOp.ROR -> rs1.rotateRight(shamt),
+        AluOp.ORCB -> Orcb(rs1, rsWidth),
+        AluOp.REV8 -> Cat(UIntToVec(rs1, 8)),
+        AluOp.ZEXTH -> rs1(rsWidthH - 1, 0),
     ))
-    orcb
-  }
-
-  io.rd.bits.data  := MuxLookup(op, 0.U)(Seq(
-    AluOp.ADD  -> (rs1 + rs2),
-    AluOp.SUB  -> (rs1 - rs2),
-    AluOp.SLT  -> (r2IsGreater),
-    AluOp.SLTU -> (r2IsGreaterU),
-    AluOp.XOR  -> (rs1 ^ rs2),
-    AluOp.OR   -> (rs1 | rs2),
-    AluOp.AND  -> (rs1 & rs2),
-    AluOp.SLL  -> ((rs1 << shamt)(31,0)),
-    AluOp.SRL  -> ((rs1 >> shamt)(31,0)),
-    AluOp.SRA  -> (((rs1.asSInt >> shamt).asUInt)(31,0)),
-    AluOp.LUI  -> rs2,
-    // ZBB
-    AluOp.ANDN -> (rs1 & ~rs2),
-    AluOp.ORN  -> (rs1 | ~rs2),
-    AluOp.XNOR -> ~(rs1 ^ rs2),
-    AluOp.CLZ  -> Clz(rs1),
-    AluOp.CTZ  -> Ctz(rs1),
-    AluOp.CPOP -> PopCount(rs1),
-    AluOp.MAX  -> Mux(r2IsGreater,  rs2, rs1),
-    AluOp.MAXU -> Mux(r2IsGreaterU, rs2, rs1),
-    AluOp.MIN  -> Mux(r2IsGreater,  rs1, rs2),
-    AluOp.MINU -> Mux(r2IsGreaterU, rs1, rs2),
-    AluOp.SEXTB -> SignExtend(rs1(7, 0), rsWidth),
-    AluOp.SEXTH -> SignExtend(rs1(rsWidthH-1,0), rsWidth),
-    AluOp.ROL -> rs1.rotateLeft(shamt),
-    AluOp.ROR -> rs1.rotateRight(shamt),
-    AluOp.ORCB -> Orcb(rs1, rsWidth),
-    AluOp.REV8 -> Cat(UIntToVec(rs1, 8)),
-    AluOp.ZEXTH -> rs1(rsWidthH - 1, 0),
-  ))
 
 
-  // Assertions.
-  val rs1Only = op.isOneOf(
-    AluOp.CLZ, AluOp.CTZ, AluOp.CPOP,
-    AluOp.ZEXTH, AluOp.SEXTH, AluOp.SEXTB,
-    AluOp.ORCB, AluOp.REV8,
-  )
-  assert(!(valid && !io.rs1.valid && !op.isOneOf(AluOp.LUI)))
-  assert(!(valid && !io.rs2.valid && !rs1Only))
+    // Assertions.
+    val rs1Only = op.isOneOf(
+        AluOp.CLZ, AluOp.CTZ, AluOp.CPOP,
+        AluOp.ZEXTH, AluOp.SEXTH, AluOp.SEXTB,
+        AluOp.ORCB, AluOp.REV8,
+    )
+    assert(!(valid && !io.rs1.valid && !op.isOneOf(AluOp.LUI)))
+    assert(!(valid && !io.rs2.valid && !rs1Only))
 }
 
 @nowarn
 object EmitAlu extends App {
-  val p = new Parameters
-  (new ChiselStage).execute(
-    Array("--target", "systemverilog") ++ args,
-    Seq(ChiselGeneratorAnnotation(() => new Alu(p))) ++ Seq(FirtoolOption("-enable-layers=Verification"))
-  )
+    val p = new Parameters
+    (new ChiselStage).execute(
+        Array("--target", "systemverilog") ++ args,
+        Seq(ChiselGeneratorAnnotation(() => new Alu(p))) ++ Seq(FirtoolOption("-enable-layers=Verification"))
+    )
 }

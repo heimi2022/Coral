@@ -22,7 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.{RvvCoreIO}
 import _root_.circt.stage.ChiselStage
-import coralnpu.matrix.MatrixCoreIO
+import coralnpu.matrix.{MatrixCoreIO, MatrixMemOp}
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -214,20 +214,29 @@ class SCore(p: Parameters) extends Module {
     csr.io.req.bits := csrReqArbiter.io.out.bits
     csr.io.req.valid := csrReqArbiter.io.out.valid
 
-    // matrix from dispatch to csr 
+    
     if (p.enableMatrix) {
+        // matrix from dispatch to csr 
         csr.io.matrixCfg.get.valid := dispatch.io.matrixCfg.valid
         csr.io.matrixCfg.get.bits := dispatch.io.matrixCfg.bits
-    }
 
-    // from matrixcore to csr
-    if (p.enableMatrix) {
+        // from matrixcore to csr
         io.matrixcore.get.csr <> csr.io.matrix.get
-    }
 
-    if (p.enableMatrix) {
+        // matrix instruction dispatch
         io.matrixcore.get.cmd <> dispatch.io.matrix.get
 
+        val matrixMemIsWhole = dispatch.io.matrixMem.get.bits.op.isOneOf(
+            MatrixMemOp.LD_WHOLE,
+            MatrixMemOp.ST_WHOLE
+        )
+        io.matrixcore.get.mem.valid := dispatch.io.matrixMem.get.valid
+        io.matrixcore.get.mem.bits.req := dispatch.io.matrixMem.get.bits
+        io.matrixcore.get.mem.bits.base := regfile.io.readData(0).data
+        io.matrixcore.get.mem.bits.stride := Mux(matrixMemIsWhole, 0.U, regfile.io.readData(1).data)
+        dispatch.io.matrixMem.get.ready := io.matrixcore.get.mem.ready
+
+        // debug
         io.matrixcore.get.debug.tileWrite.enable := false.B
         io.matrixcore.get.debug.tileWrite.reg := 0.U
         io.matrixcore.get.debug.tileWrite.data := 0.U
@@ -290,6 +299,7 @@ class SCore(p: Parameters) extends Module {
         lsu.io.lsu2rvv.get <> io.rvvcore.get.lsu2rvv
         io.rvvcore.get.rvv2lsu <> lsu.io.rvv2lsu.get
     }
+
 
     // ---------------------------------------------------------------------------
     // Multiplier Unit
@@ -373,12 +383,12 @@ class SCore(p: Parameters) extends Module {
         MuxOR(dispatch.io.rdMark_flt.get.valid, UIntToOH(dispatch.io.rdMark_flt.get.addr))
         // Mux input to read port
         fRegfile.get.io.read_ports(0).valid := MuxCase(false.B, Seq(
-        io.dm.float_rs.get.valid -> true.B,
-        floatCore.get.io.read_ports(0).valid -> true.B,
+            io.dm.float_rs.get.valid -> true.B,
+            floatCore.get.io.read_ports(0).valid -> true.B,
         ))
         fRegfile.get.io.read_ports(0).addr := MuxCase(0.U, Seq(
-        io.dm.float_rs.get.valid -> io.dm.float_rs.get.addr,
-        floatCore.get.io.read_ports(0).valid -> floatCore.get.io.read_ports(0).addr,
+            io.dm.float_rs.get.valid -> io.dm.float_rs.get.addr,
+            floatCore.get.io.read_ports(0).valid -> floatCore.get.io.read_ports(0).addr,
         ))
         // Broadcast data back from read port
         io.dm.float_rs.get.data := fRegfile.get.io.read_ports(0).data
@@ -386,16 +396,16 @@ class SCore(p: Parameters) extends Module {
 
         // Mux input to write port
         fRegfile.get.io.write_ports(0).valid := MuxCase(false.B, Seq(
-        io.dm.float_rd.get.valid -> true.B,
-        floatCore.get.io.write_ports(0).valid -> true.B,
+            io.dm.float_rd.get.valid -> true.B,
+            floatCore.get.io.write_ports(0).valid -> true.B,
         ))
         fRegfile.get.io.write_ports(0).addr := MuxCase(0.U, Seq(
-        io.dm.float_rd.get.valid -> io.dm.float_rd.get.addr,
-        floatCore.get.io.write_ports(0).valid -> floatCore.get.io.write_ports(0).addr,
+            io.dm.float_rd.get.valid -> io.dm.float_rd.get.addr,
+            floatCore.get.io.write_ports(0).valid -> floatCore.get.io.write_ports(0).addr,
         ))
         fRegfile.get.io.write_ports(0).data := MuxCase(Fp32.Zero(false.B), Seq(
-        io.dm.float_rd.get.valid -> io.dm.float_rd.get.data,
-        floatCore.get.io.write_ports(0).valid -> floatCore.get.io.write_ports(0).data,
+            io.dm.float_rd.get.valid -> io.dm.float_rd.get.data,
+            floatCore.get.io.write_ports(0).valid -> floatCore.get.io.write_ports(0).data,
         ))
         fRegfile.get.io.dm_write_valid := io.dm.float_rd.get.valid
 
