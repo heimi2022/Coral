@@ -19,25 +19,25 @@ import chisel3.util._
 import common._
 
 class TCM128(tcmSizeBytes: Int, tcmSubEntryWidth: Int) extends Module {
-  val tcmWidth = 128
-  val tcmEntries = tcmSizeBytes / (tcmWidth / 8)
-  val tcmSubEntries = tcmWidth / tcmSubEntryWidth
+    val tcmWidth = 128
+    val tcmEntries = tcmSizeBytes / (tcmWidth / 8)
+    val tcmSubEntries = tcmWidth / tcmSubEntryWidth
 
-  val io = IO(new Bundle {
-    val addr = Input(UInt(log2Ceil(tcmEntries).W)) // 9 for 512 rows to address
-    val enable = Input(Bool())
-    val write = Input(Bool())
-    val wdata = Input(Vec(tcmSubEntries, UInt(tcmSubEntryWidth.W)))
-    val wmask = Input(Vec(tcmSubEntries, Bool()))
-    val rdata = Output(Vec(tcmSubEntries, UInt(tcmSubEntryWidth.W)))
-  })
+    val io = IO(new Bundle {
+        val addr = Input(UInt(log2Ceil(tcmEntries).W)) // 9 for 512 rows to address
+        val enable = Input(Bool())
+        val write = Input(Bool())
+        val wdata = Input(Vec(tcmSubEntries, UInt(tcmSubEntryWidth.W)))
+        val wmask = Input(Vec(tcmSubEntries, Bool()))
+        val rdata = Output(Vec(tcmSubEntries, UInt(tcmSubEntryWidth.W)))
+    })
 
 
-  val sram = Module(new Sram_Nx128(tcmEntries))
-  sram.io.addr := io.addr
-  sram.io.enable := io.enable
-  sram.io.write := Cat(io.write)
-  sram.io.wdata := Cat(io.wdata.reverse)
-  sram.io.wmask := Cat(io.wmask.reverse)
-  io.rdata := UIntToVec(sram.io.rdata, tcmSubEntryWidth).reverse
+    val sram = Module(new Sram_Nx128(tcmEntries))
+    sram.io.addr := io.addr
+    sram.io.enable := io.enable
+    sram.io.write := Cat(io.write)
+    sram.io.wdata := Cat(io.wdata.reverse)
+    sram.io.wmask := Cat(io.wmask.reverse)
+    io.rdata := UIntToVec(sram.io.rdata, tcmSubEntryWidth).reverse
 }

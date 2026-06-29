@@ -23,7 +23,7 @@ import java.nio.charset.{StandardCharsets}
 import coralnpu.rvv.{RvvCore}
 import _root_.circt.stage.ChiselStage
 import scala.collection.mutable.Stack
-import coralnpu.matrix.MatrixCoreWrapper
+import coralnpu.matrix.{MatrixCoreWrapper, MatrixMemDirectIO}
 
 
 object Core {
@@ -53,6 +53,9 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
         // Bus between core and and external memories or peripherals.
         val ebus = new EBusIO(p)
 
+        // matrix direct memory path
+        val matrixMem = Option.when(p.enableMatrix)(new MatrixMemDirectIO(p))
+
         val iflush = new IFlushIO(p)
         val dflush = new DFlushIO(p)
 
@@ -61,12 +64,18 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
 
     val score = SCore(p)
     val rvvCore = Option.when(p.enableRvv)(RvvCore(p))
-    val matrixCore = Option.when(p.enableMatrix)(Module(new MatrixCoreWrapper(p)))
     if (p.enableRvv) {
         rvvCore.get.io <> score.io.rvvcore.get
     }
+
+    val matrixCore = Option.when(p.enableMatrix)(Module(new MatrixCoreWrapper(p)))
     if (p.enableMatrix) {
-        matrixCore.get.io <> score.io.matrixcore.get
+        matrixCore.get.io.core <> score.io.matrixcore.get
+        io.matrixMem.get.req.valid := matrixCore.get.io.dmem.req.valid
+        io.matrixMem.get.req.bits := matrixCore.get.io.dmem.req.bits
+        matrixCore.get.io.dmem.busy := io.matrixMem.get.busy
+        matrixCore.get.io.dmem.rvalid := io.matrixMem.get.rvalid
+        matrixCore.get.io.dmem.rdata := io.matrixMem.get.rdata
     }
 
     // ---------------------------------------------------------------------------

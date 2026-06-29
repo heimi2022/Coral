@@ -66,6 +66,36 @@
     - **Decode 前端已完成**
     - **SCore / interface scaffold 已开始铺**
     - **MatrixCore / LSU 的执行落地仍未完成**
+- 已完成第一版通用矩阵计算内核原型设计，准备作为 coral 初版矩阵计算单元
+  - 当前设计文档位于 `hdl/verilog/matrix/PE.md`
+  - 当前核心模块包括：
+    - `pe_ws`
+    - `pe_array`
+    - `pe_ctrl`
+    - `matmul_tiling`
+    - `accumulaters`
+  - 当前数据流采用 **WS（Weight Stationary）**
+    - `B/weight` 尽量静止在 PE 内部
+    - `A/activation` 从阵列顶部逐拍送入
+    - 历史 `C/psum` 不再从顶部输入，而是在阵列尾部统一累加
+  - 当前控制上已经形成比较完整的 block 化执行框架
+    - 前端 `matmul_tiling` 负责命令拆块
+    - `pe_ctrl` 负责装权、发激活、控制 ping/pong weight bank、组织输出 metadata 与写回
+    - 阵列内部负责 `A * B`，尾部 `accumulaters` 负责 `C + A * B`
+  - 当前阶段定位是：
+    - **作为 coral 第一版矩阵计算后端原型，优先支撑可运行的矩阵乘加执行**
+  - 当前已知边界包括：
+    - 设计假设仍偏 `32x32 tile`
+    - 当前暂不支持 `n > 32`
+    - 当前 `K` 最大按 `64` 处理，即最多拆两段
+    - 当前外部 `rs1 / rs2 / rd` 侧还不是完整 ready/valid 握手
+    - 当前这套 PE 内核仍处于“独立设计已成形，尚待正式接入 coral matrixcore”的阶段
+
+
+
+## 待解决问题
+
+- matrix 寄存器读写冲突
 
 ## 当前阶段结论
 
@@ -86,6 +116,10 @@
   - 已完成 program 级“发射/退休顺序”验证
   - 已完成 program 级“算术结果正确性”验证
   - 但当前 program 级算术验证仍依赖 cocotb backdoor preload/readback，不是纯 ISA 端到端闭环
+- 除当前 `mmacc.w.b` 原型外，另一条更偏工程化的计算主线也已经初步成形
+  - 即 `pe_ctrl + pe_array + pe_ws + accumulaters + matmul_tiling` 这套 WS 矩阵计算内核
+  - 它更适合作为 coral 后续第一版“可扩展矩阵计算后端”来承接真正的数据搬运与 block 执行
+  - 但目前它仍主要停留在独立模块/设计文档层面，尚未与 coral 现有 `MatrixCore` 执行路径正式并轨
 - 当前最主要的缺口已经从“能不能发射/能不能算”转到“数据怎么进来、结果怎么出去”
   - 也就是下一步优先补 `mld / mst` 或等价的矩阵数据搬运路径
 - 当前 matrix load/store 的真实边界状态是
@@ -108,7 +142,11 @@
 2. 再做纯 ISA 端到端闭环
    - `memory -> tile/acc -> mmacc.w.b -> acc/tile -> memory`
    - 让 `mmacc.w.b` 的 program 级验证不再依赖内部层级注数
-3. 最后扩到剩余 `mmi8i32` 变体
+3. 评估并推进 `PE.md` 这套计算内核与 coral matrixcore 的正式接入
+   - 明确它是替换当前 `MatrixPE32Int8/MatrixMacArray` 路线，还是作为新的计算后端演进
+   - 明确它与 matrix regfile / load-store / completion token / 写回路径的接口边界
+   - 优先保证第一版接入后，能支撑可运行的矩阵 block 计算闭环
+4. 最后扩到剩余 `mmi8i32` 变体
    - `mmaccu.w.b`
    - `mmaccus.w.b`
    - `mmaccsu.w.b`

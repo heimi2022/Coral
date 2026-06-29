@@ -7,6 +7,9 @@
 .scala-build/
 .idea/
 .bazelbsp/
+.agents/
+.codegraph/
+.bsp/
 __pycache__/
 /NPU/2-SIM/*
 !/NPU/2-SIM/asic.f
@@ -19,6 +22,9 @@ __pycache__/
 !/riscv-matrix-extension-spec/doc/
 !/riscv-matrix-extension-spec/doc/**
 .codex
+
+/coralnpu/hdl/verilog/SIM/*
+
 
 # Generated simulation / waveform outputs
 **/csrc/

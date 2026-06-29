@@ -57,8 +57,11 @@ class Regfile(p: Parameters) extends Module {
     val extraWritePorts = 2
     val io = IO(new Bundle {
         // Decode cycle.
+        // 读地址
         val readAddr = Vec(p.instructionLanes * 2, new RegfileReadAddrIO)
+        // 读数据覆盖
         val readSet  = Vec(p.instructionLanes * 2, new RegfileReadSetIO)
+        // 写地址
         val writeAddr = Vec(p.instructionLanes, new RegfileWriteAddrIO)
         val busAddr = Vec(p.instructionLanes, Input(new RegfileBusAddrIO))
         val target = Vec(p.instructionLanes, new RegfileBranchTargetIO)
@@ -154,10 +157,10 @@ class Regfile(p: Parameters) extends Module {
 
     // We care if someone tried to write x0 (e.g. nop is encoded this way), but want
     // it separate for above mentioned optimization.
-    val x0 = (0 until p.instructionLanes).map(x =>
-        io.writeData(x).valid &&
-        io.writeData(x).bits.addr === 0.U &&
-        !io.writeMask(x).valid)
+    // val x0 = (0 until p.instructionLanes).map(x =>
+    //     io.writeData(x).valid &&
+    //     io.writeData(x).bits.addr === 0.U &&
+    //     !io.writeMask(x).valid)
 
     // ***************************************************************************
     // Read ports with write forwarding.  同拍写前递
@@ -188,7 +191,7 @@ class Regfile(p: Parameters) extends Module {
 
   // Bus port priority encoded address.
   val busAddr = Wire(Vec(p.instructionLanes, UInt(32.W)))
-  val busValid = Cat((0 until p.instructionLanes).reverse.map(x => io.busAddr(x).valid))
+//   val busValid = Cat((0 until p.instructionLanes).reverse.map(x => io.busAddr(x).valid))
 
   for (i <- 0 until p.instructionLanes) {
     busAddr(i) := Mux(io.busAddr(i).bypass, rwdata(2 * i),

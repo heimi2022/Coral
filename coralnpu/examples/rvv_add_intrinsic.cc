@@ -15,6 +15,10 @@
 #include <riscv_vector.h>
 #include <string.h>
 
+#ifdef __INTELLISENSE__
+#include "rvv_intellisense_shim.h"
+#endif
+
 int8_t input_1[1024];
 int8_t input_2[1024];
 int16_t output[1024];

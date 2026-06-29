@@ -20,40 +20,41 @@ import chisel3.util._
 import common._
 
 class SRAMIO(p: Parameters, sramAddressWidth: Int) extends Bundle {
-  val address = Output(UInt(sramAddressWidth.W))
-  val enable = Output(Bool())
-  val isWrite = Output(Bool())
-  val readData = Input(Vec(p.axi2DataBits / 8, UInt(8.W)))
-  val writeData = Output(Vec(p.axi2DataBits / 8, UInt(8.W)))
-  val mask = Output(Vec(p.axi2DataBits / 8, Bool()))
+    val address = Output(UInt(sramAddressWidth.W))
+    val enable = Output(Bool())
+    val isWrite = Output(Bool())
+    val readData = Input(Vec(p.axi2DataBits / 8, UInt(8.W)))
+    val writeData = Output(Vec(p.axi2DataBits / 8, UInt(8.W)))
+    val mask = Output(Vec(p.axi2DataBits / 8, Bool()))
 }
 
+// SoCChiselConfig 中设置axi2DataBits为128。
 class SRAM(p: Parameters, sramAddressWidth: Int) extends Module {
-  val io = IO(new Bundle{
-    val fabric = Flipped(new FabricIO(p))
-    val sram = new SRAMIO(p, sramAddressWidth)
-  })
+    val io = IO(new Bundle{
+        val fabric = Flipped(new FabricIO(p))
+        val sram = new SRAMIO(p, sramAddressWidth)
+    })
 
-  val lsb = log2Ceil(p.axi2DataBits / 8)
-  io.sram.address := MuxUpTo1H(0.U, Seq(
-    io.fabric.writeDataAddr.valid -> io.fabric.writeDataAddr.bits(sramAddressWidth + lsb - 1, lsb),
-    io.fabric.readDataAddr.valid -> io.fabric.readDataAddr.bits(sramAddressWidth + lsb - 1, lsb)
-  ))
+    val lsb = log2Ceil(p.axi2DataBits / 8)
+    io.sram.address := MuxUpTo1H(0.U, Seq(
+        io.fabric.writeDataAddr.valid -> io.fabric.writeDataAddr.bits(sramAddressWidth + lsb - 1, lsb),
+        io.fabric.readDataAddr.valid -> io.fabric.readDataAddr.bits(sramAddressWidth + lsb - 1, lsb)
+    ))
 
-  val readData = Cat(io.sram.readData)
-  val readIssued = RegInit(false.B)
-  val issueRead = io.fabric.readDataAddr.valid && !io.fabric.writeDataAddr.valid
-  readIssued := issueRead
-  io.fabric.readData.bits := Mux(readIssued, readData, 0.U)
-  io.fabric.readData.valid := readIssued
+    val readData = Cat(io.sram.readData)
+    val readIssued = RegInit(false.B)
+    val issueRead = io.fabric.readDataAddr.valid && !io.fabric.writeDataAddr.valid
+    readIssued := issueRead
+    io.fabric.readData.bits := Mux(readIssued, readData, 0.U)
+    io.fabric.readData.valid := readIssued
 
-  io.sram.enable := (io.fabric.readDataAddr.valid || io.fabric.writeDataAddr.valid)
-  io.sram.isWrite := io.fabric.writeDataAddr.valid
-  val writeDataVec = UIntToVec(io.fabric.writeDataBits, 8)
-  val writeMaskData = VecInit(io.fabric.writeDataStrb.asBools)
-  io.sram.writeData := Mux(io.fabric.writeDataAddr.valid, writeDataVec, 0.U.asTypeOf(writeDataVec))
-  val readMaskData = RegInit(VecInit(Seq.fill(io.fabric.writeDataBits.getWidth / 8)(true.B)))
-  val maskData = Mux(io.fabric.writeDataAddr.valid, writeMaskData, readMaskData)
-  io.sram.mask := maskData
-  io.fabric.writeResp := true.B
+    io.sram.enable := (io.fabric.readDataAddr.valid || io.fabric.writeDataAddr.valid)
+    io.sram.isWrite := io.fabric.writeDataAddr.valid
+    val writeDataVec = UIntToVec(io.fabric.writeDataBits, 8)
+    val writeMaskData = VecInit(io.fabric.writeDataStrb.asBools)
+    io.sram.writeData := Mux(io.fabric.writeDataAddr.valid, writeDataVec, 0.U.asTypeOf(writeDataVec))
+    val readMaskData = RegInit(VecInit(Seq.fill(io.fabric.writeDataBits.getWidth / 8)(true.B)))
+    val maskData = Mux(io.fabric.writeDataAddr.valid, writeMaskData, readMaskData)
+    io.sram.mask := maskData
+    io.fabric.writeResp := true.B
 }

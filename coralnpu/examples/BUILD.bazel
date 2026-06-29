@@ -25,3 +25,15 @@ coralnpu_v2_binary(
     name = "coralnpu_v2_rvv_add_intrinsic",
     srcs = ["rvv_add_intrinsic.cc"],
 )
+
+coralnpu_v2_binary(
+    name = "coralnpu_v2_rvv_add_intrinsic_print",
+    srcs = ["rvv_add_intrinsic_print.cc"],
+    semihosting = True,
+)
+
+coralnpu_v2_binary(
+    name = "coralnpu_v2_rvv_silu_demo",
+    srcs = ["rvv_silu_demo.cc"],
+    semihosting = True,
+)

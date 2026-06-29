@@ -417,6 +417,8 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
                             io.csrFrm.getOrElse(0.U))
     )
 
+    io.matrixCfg := MakeInvalid(new MatrixCfgCmd)
+
     // ---------------------------------------------------------------------------
     // Jumps
     // Determine if there has been a jump in the instruction stream. This can
@@ -933,11 +935,14 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         val fenceValid = if (i == 0) { tryDispatch && d.fence } else { false.B }
 
         // Set next lastReady if dispatched.
+        val matrixIssued = io.matrix.map(_.fire).getOrElse(false.B)
+        val matrixMemIssued = io.matrixMem.map(_.fire).getOrElse(false.B)
+
         val dispatched = Seq(
             io.alu(i).fire, io.bru(i).fire, io.mlu(i).fire, io.dvu(i).fire, io.lsu(i).fire
             ) ++
             Option.when(i == 0)(Seq(
-                io.csr.valid, fenceValid, io.matrixCfg.valid, io.matrix.get.fire, io.matrixMem.get.fire
+                io.csr.valid, fenceValid, io.matrixCfg.valid, matrixIssued, matrixMemIssued
                 )).getOrElse(Seq()) ++
             Option.when(p.enableRvv)(Seq(
                 io.rvv.get(i).fire)).getOrElse(Seq()) ++

@@ -189,9 +189,7 @@ chisel_library(
         "matrix/MatrixInterface.scala",
     ],
     resources = [
-        "//hdl/verilog/matrix:MatrixPE32Int8.sv",
         "//hdl/verilog/matrix:MatrixRegFile.sv",
-        "//hdl/verilog/matrix:MatrixMacArray.sv",
         "//hdl/verilog/matrix:MatrixCore.sv",
     ],
     deps = [

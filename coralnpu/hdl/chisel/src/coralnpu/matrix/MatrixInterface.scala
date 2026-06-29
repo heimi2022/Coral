@@ -81,37 +81,27 @@ class MatrixMemExecReq(p: Parameters) extends Bundle {
     val stride = UInt(32.W)
 }
 
-class Matrix2Lsu(p: Parameters) extends Bundle {
-    val addr = UInt(32.W)         // 当前 beat 地址
-    val write = Bool()            // 0=load, 1=store
-    val size = UInt(2.W)          // beat 大小编码；第一版可固定成 256b 对应值
-    val data = UInt(p.lsuDataBits.W) // store 时有效；load 时可置0
-    val last = Bool()             // 这是不是本条 matrix 搬运的最后一个 beat
-
-    val reg = UInt(3.W)           // 目标 matrix reg
-    val regType = UInt(1.W)       // 0=tile, 1=acc
-    val beatIdx = UInt(3.W)       // 第几个 beat
-    val pc = UInt(32.W)           // 出错/完成时定位
+class MatrixMemDirectReq(p: Parameters) extends Bundle {
+    val write = Bool()  // 0=读, 1=写
+    val addr = UInt(p.axi2AddrBits.W)   // 地址
+    val wdata = UInt(p.axi2DataBits.W)  // 写数据
+    val wmask = UInt((p.axi2DataBits / 8).W)    // 写掩码
 }
 
-class Lsu2Matrix(p: Parameters) extends Bundle {
-    val data = UInt(p.lsuDataBits.W)
-    val fault = Bool()
-    val last = Bool()
-
-    val reg = UInt(3.W)
-    val regType = UInt(1.W)
-    val beatIdx = UInt(3.W)
-    val pc = UInt(32.W)
+class MatrixMemDirectIO(p: Parameters) extends Bundle {
+    val req = Output(Valid(new MatrixMemDirectReq(p)))
+    val busy = Input(Bool())
+    val rvalid = Input(Bool())
+    val rdata = Input(UInt(p.axi2DataBits.W))
 }
+
+
 
 class MatrixCoreIO(p: Parameters) extends Bundle {
     val cmd = Flipped(Decoupled(new MatrixInstCmd(p)))
     val mem = Flipped(Decoupled(new MatrixMemExecReq(p)))
     val csr = Flipped(new CsrMatrixIO(p))
     val status = new MatrixStatusIO
-    val matrix2lsu = Decoupled(new Matrix2Lsu(p))
-    val lsu2matrix = Flipped(Decoupled(new Lsu2Matrix(p)))
     val debug = new MatrixDebugIO(p)
 }
 
