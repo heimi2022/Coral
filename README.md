@@ -1,81 +1,128 @@
-# Coral 工作区
+# Coral Matrix / RVV Workspace
 
-这是一个面向 Coral NPU 学习、RTL 开发、仿真验证、综合实现以及矩阵扩展探索的本地硬件开发工作区。
+这是一个围绕 Google Coral NPU 展开的本地研发仓库，目标不是做上游镜像，而是在 Coral 基础上持续推进矩阵扩展、DMA 重构、RVV 算子实验，以及后续的架构与 DSE 探索。
 
-## 顶层目录结构
+仓库当前的共享主线有三部分：
 
-当前仓库根目录主要包含以下内容：
+- `coralnpu/`：Coral 主源码树，以及在其上进行的本地开发
+- `doc/`：架构说明、设计小 spec、实验记录与阶段性结论
+- `riscv-matrix-extension-spec/`：矩阵扩展语义和体系结构边界的参考资料
 
-```text
-.
-├── NPU/
-├── coralnpu/
-├── picorv32/
-├── doc/
-└── riscv-matrix-extension-spec/
-```
+## 仓库定位
+
+这份仓库更像一个“Coral 矩阵化研发工作区”，而不是单纯的软件工程仓库。
+
+它主要承担四类工作：
+
+- 追踪和修改 Coral 主工程
+- 承载矩阵寄存器、DMA、Load/Store 等 RTL 方向的本地实现
+- 记录架构决策、接口约束、误差分析和验证路径
+- 为后续 DSE 工具或其他 AI 分析器提供结构化输入
+
+## 与上游的关系
+
+`coralnpu/` 目录来源于 Google Coral NPU 工程，是当前所有实现、构建和仿真的主要入口。这个根仓库在其外层补充了本地文档、矩阵扩展参考资料，以及一部分不准备直接放进上游仓库的研发内容。
+
+如果要找“真正执行的代码”和“真正参与构建的 RTL”，优先看 `coralnpu/`。如果要理解为什么这样改、接口边界怎么定、下一步往哪里走，优先看 `doc/`。
 
 ## 目录说明
 
-- `coralnpu/`
-  Coral NPU 主源码树。这里是当前最重要的上游风格工程，包含 Chisel RTL、Bazel 构建规则、软件、测试和官方文档。
+### `coralnpu/`
 
-- `picorv32/`
-  本地 PicoRV32 源码树，可作为参考设计或集成组件使用。
+主工程目录，包含 Chisel、Verilog、Bazel 构建规则、示例程序、测试和仿真基础设施。
 
-- `NPU/`
-  本地实现工作区，主要放生成后的 RTL、仿真脚本和综合脚本。
-  当前包含：
-  - `NPU/1-RTL/`：整理后的 RTL 产物或生成后的 Verilog
-  - `NPU/2-SIM/`：仿真脚本、filelist、testbench 辅助文件
-  - `NPU/3-SYN/`：多文件版本综合流程
-  - `NPU/3-SYN-Single/`：单文件版本综合流程
+建议优先关注这些路径：
 
-- `doc/`
-  本地学习笔记、计划和工作记录目录。
+- `coralnpu/hdl/chisel/src/coralnpu/`
+- `coralnpu/hdl/verilog/matrix/`
+- `coralnpu/examples/`
+- `coralnpu/tests/`
+- `coralnpu/sw/`
 
-- `riscv-matrix-extension-spec/`
-  玄铁 RISC-V 矩阵扩展提案及相关参考资料的本地副本。
+### `doc/`
 
-## 建议先看哪里
+本地设计文档目录，推荐先看下面这些文件：
 
-- 当前工作计划、学习笔记、参数决策、矩阵扩展推进记录：
-  [`doc/coral.md`](doc/coral.md)
-
-- Coral 主工程说明：
-  [`coralnpu/README.md`](coralnpu/README.md)
-
-- 玄铁矩阵扩展规范源码：
-  [`riscv-matrix-extension-spec/spec/`](riscv-matrix-extension-spec/spec/)
-
-## 推荐阅读路径
-
-如果要理解或修改 Coral 本体，建议从这里开始：
-
-- [`coralnpu/hdl/`](coralnpu/hdl/)
-- [`coralnpu/tests/`](coralnpu/tests/)
-- [`coralnpu/sw/`](coralnpu/sw/)
-
-如果要使用本地仿真或综合流程，建议从这里开始：
-
-- [`NPU/2-SIM/`](NPU/2-SIM/)
-- [`NPU/3-SYN/`](NPU/3-SYN/)
-- [`NPU/3-SYN-Single/`](NPU/3-SYN-Single/)
-
-如果要跟踪当前矩阵扩展实现进度，建议直接看：
-
+- [`doc/coral_intro.md`](doc/coral_intro.md)
 - [`doc/coral.md`](doc/coral.md)
+- [`doc/matrix_dma_spec.md`](doc/matrix_dma_spec.md)
+- [`doc/coral_matrix_dse_target.md`](doc/coral_matrix_dse_target.md)
+- [`doc/coral_matrix_dse_prompt.md`](doc/coral_matrix_dse_prompt.md)
+- [`doc/silu_piecewise_quadratic_spec.md`](doc/silu_piecewise_quadratic_spec.md)
+- [`doc/coral_axi_silu_service_spec.md`](doc/coral_axi_silu_service_spec.md)
 
-该文件目前记录了：
+这些文档分别覆盖工程介绍、当前推进记录、DMA 设计、DSE 输入建模、RVV 上的 SiLU 实验，以及外部 AXI 调用 Coral 服务的方案。
 
-- 学习笔记
-- 当前进度
-- 参数配置原因
-- 矩阵扩展实施计划
-- 下一步任务拆解
+### `riscv-matrix-extension-spec/`
 
-## 当前使用上的说明
+该目录主要用于对照矩阵扩展语义、寄存器组织和指令行为。阅读矩阵寄存器、矩阵 load/store、累加寄存器或命令语义时，建议与 `doc/` 中的小 spec 一起看。
 
-- 当前真正的 Coral 源码在 [`coralnpu/`](coralnpu/)，不是 `NPU/1-RTL/`。
-- `NPU/1-RTL/` 更偏向下游流程使用，主要存放整理后的 RTL 产物、拆分版 Verilog 或综合输入文件。
-- 这个仓库目前仍处于持续整理和开发阶段，目录组织、脚本和生成产物会继续演进。
+## 快速开始
+
+下面的命令默认在 `coralnpu/` 目录中执行。
+
+### 生成 RVV Core Verilog
+
+```bash
+cd coralnpu
+bazel build //hdl/chisel/src/coralnpu:rvv_core_mini_axi_cc_library_emit_verilog
+```
+
+常用输出文件：
+
+- `bazel-bin/hdl/chisel/src/coralnpu/RvvCoreMiniAxi.sv`
+- `bazel-bin/hdl/chisel/src/coralnpu/VRvvCoreMiniAxi_parameters.h`
+
+### 构建 RVV 示例程序
+
+```bash
+cd coralnpu
+bazel build //examples:coralnpu_v2_rvv_add_intrinsic
+```
+
+### 运行 RVV Verilator 仿真
+
+```bash
+cd coralnpu
+bazel build //tests/verilator_sim:rvv_core_mini_axi_sim //examples:coralnpu_v2_rvv_add_intrinsic
+ELF=$(bazel cquery --output=files //examples:coralnpu_v2_rvv_add_intrinsic.elf | tail -n 1)
+./bazel-bin/tests/verilator_sim/rvv_core_mini_axi_sim --binary "./${ELF}"
+```
+
+如果要跑带输出的 demo，可以把 ELF 换成 `examples/` 中启用了 semihosting 的目标。
+
+## 建议阅读顺序
+
+第一次进入这个仓库，建议按下面的顺序建立上下文：
+
+1. [`doc/coral_intro.md`](doc/coral_intro.md)
+2. [`doc/coral.md`](doc/coral.md)
+3. [`coralnpu/README.md`](coralnpu/README.md)
+4. [`doc/matrix_dma_spec.md`](doc/matrix_dma_spec.md)
+5. [`doc/coral_matrix_dse_target.md`](doc/coral_matrix_dse_target.md)
+6. [`doc/silu_piecewise_quadratic_spec.md`](doc/silu_piecewise_quadratic_spec.md)
+
+## 当前研发重点
+
+目前仓库内的主要研发方向包括：
+
+- Coral 上的矩阵扩展集成
+- 矩阵寄存器组织与 bank 化设计
+- 统一 2D DMA，尤其是 load 路径的 burst 拆分与 outstanding 支持
+- RVV 非线性算子实验，例如 SiLU
+- 面向片上存储和数据通路的 DSE 输入整理
+
+## 本地文件与共享文件的边界
+
+这个仓库会主动把一部分本地工作目录排除在版本管理之外，例如：
+
+- 本地仿真与综合目录
+- IDE、BSP 与索引数据库
+- 波形、日志、缓存和临时生成物
+
+例如 `NPU/`、`.bsp/`、波形文件等内容目前都只保留在本地，不作为共享源码的一部分上传。理解或修改公开内容时，应优先以 `coralnpu/` 和 `doc/` 为准。
+
+## 备注
+
+- 这是一个持续演进中的研发工作区，目录组织和文档会随着实现推进继续调整。
+- 如果要理解当前矩阵实现，通常不能只看单个 RTL 文件，最好同时结合 `doc/` 中的小 spec 和 `riscv-matrix-extension-spec/` 中的参考语义。
