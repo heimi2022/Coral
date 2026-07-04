@@ -11,11 +11,14 @@
 .codegraph/
 .bsp/
 __pycache__/
-/NPU/2-SIM/*
-!/NPU/2-SIM/asic.f
-!/NPU/2-SIM/clean.sh
-!/NPU/2-SIM/run.sh
-!/NPU/2-SIM/runvd.sh
+# /NPU/2-SIM/*
+# !/NPU/2-SIM/asic.f
+# !/NPU/2-SIM/clean.sh
+# !/NPU/2-SIM/run.sh
+# !/NPU/2-SIM/runvd.sh
+
+/NPU/* 
+
 /riscv-matrix-extension-spec/*
 !/riscv-matrix-extension-spec/spec/
 !/riscv-matrix-extension-spec/spec/**
@@ -38,4 +41,3 @@ __pycache__/
 
 # OS cruft
 **/.DS_Store
-

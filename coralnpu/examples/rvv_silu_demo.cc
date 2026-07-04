@@ -21,190 +21,273 @@
 #include "rvv_intellisense_shim.h"
 #endif
 
-namespace {
+namespace
+{
 
-constexpr size_t kElementCount = 16;
-constexpr int kInputFracBits = 12;
-constexpr int kSigmoidFracBits = 15;
-constexpr int kSigmoidBucketShift = 11;  // Q4.12 -> 0.5 step LUT bucket.
-constexpr int kSigmoidLutSize = 32;
+    constexpr size_t kElementCount = 32;
+    constexpr int kFracBits = 10;
+    constexpr int kNeg16Q = -(16 << kFracBits);
+    constexpr int kNeg1Q = -(1 << kFracBits);
+    constexpr int kPos2Q = 2 << kFracBits;
+    constexpr int kPos8Q = 8 << kFracBits;
 
-// Input uses Q4.12 fixed-point. Example: 4096 -> 1.0000, -2048 -> -0.5000.
-const int16_t kInputQ4_12[kElementCount] = {
-    -20480, -16384, -12288, -8192, -4096, -2048, -1024, 0,
-    1024,   2048,   4096,   6144,  8192,  12288, 16384, 20480,
-};
+    // Input uses 32 Q6.10 values so the current Coral RVV configuration can fill
+    // one full e16,m4 vector iteration while still covering the piecewise
+    // boundaries and representative interior points.
+    const int16_t kInputQ6_10[kElementCount] = {
+        -20 << kFracBits,
+        -18 << kFracBits,
+        -16 << kFracBits,
+        -15 << kFracBits,
+        -14 << kFracBits,
+        -12 << kFracBits,
+        -10 << kFracBits,
+        -8 << kFracBits,
+        -6 << kFracBits,
+        -4 << kFracBits,
+        -3 << kFracBits,
+        -2 << kFracBits,
+        -(3 << (kFracBits - 1)),
+        -1 << kFracBits,
+        -(1 << (kFracBits - 1)),
+        0,
+        1 << (kFracBits - 1),
+        1 << kFracBits,
+        3 << (kFracBits - 1),
+        2 << kFracBits,
+        3 << kFracBits,
+        4 << kFracBits,
+        5 << kFracBits,
+        6 << kFracBits,
+        7 << kFracBits,
+        8 << kFracBits,
+        9 << kFracBits,
+        10 << kFracBits,
+        12 << kFracBits,
+        14 << kFracBits,
+        16 << kFracBits,
+        20 << kFracBits,
+    };
 
-// 32-entry sigmoid LUT over 0.5-step buckets in [-8.0, 8.0), quantized to
-// Q0.15. This keeps the demo fully integer while giving noticeably better
-// accuracy than the earlier 16-entry int8 version.
-const int16_t kSigmoidQ0_15Lut[kSigmoidLutSize] = {
-    11,    18,    30,    49,    81,    133,   219,   360,
-    589,   961,   1554,  2486,  3906,  5978,  8813,  12371,
-    16384, 20397, 23955, 26790, 28862, 30282, 31214, 31807,
-    32179, 32408, 32549, 32635, 32687, 32719, 32738, 32750,
-};
+    // Piecewise quadratic SiLU approximation coefficients in Q6.10.
+    constexpr int16_t kSeg0A2 = -3;
+    constexpr int16_t kSeg0A1 = -62;
+    constexpr int16_t kSeg0A0 = -315;
 
-int16_t output_rvv[kElementCount];
-int16_t output_ref[kElementCount];
+    constexpr int16_t kSeg1A2 = 201;
+    constexpr int16_t kSeg1A1 = 514;
+    constexpr int16_t kSeg1A0 = 16;
 
-void print_str(const char* str) {
-  const char* ptr = str;
-  while (*ptr != '\0') {
-    ++ptr;
-  }
-  write(1, str, ptr - str);
-}
+    constexpr int16_t kSeg2A2 = -10;
+    constexpr int16_t kSeg2A1 = 1162;
+    constexpr int16_t kSeg2A0 = -472;
 
-void print_char(char ch) { write(1, &ch, 1); }
+    int16_t output_rvv[kElementCount];
+    int16_t output_ref[kElementCount];
 
-void print_u32(uint32_t value) {
-  char buf[10];
-  int pos = 0;
-  if (value == 0) {
-    print_char('0');
-    return;
-  }
-  while (value > 0) {
-    buf[pos++] = static_cast<char>('0' + (value % 10));
-    value /= 10;
-  }
-  while (pos > 0) {
-    print_char(buf[--pos]);
-  }
-}
-
-void print_i32(int32_t value) {
-  if (value < 0) {
-    print_char('-');
-    value = -value;
-  }
-  print_u32(static_cast<uint32_t>(value));
-}
-
-void print_zero_padded_u32(uint32_t value, int digits) {
-  char buf[10];
-  int pos = digits;
-  while (pos > 0) {
-    buf[pos - 1] = static_cast<char>('0' + (value % 10));
-    value /= 10;
-    --pos;
-  }
-  write(1, buf, digits);
-}
-
-void print_q4_12(int16_t raw_value) {
-  int32_t value = raw_value;
-  if (value < 0) {
-    print_char('-');
-    value = -value;
-  }
-  print_u32(static_cast<uint32_t>(value >> kInputFracBits));
-  print_char('.');
-  const uint32_t frac =
-      static_cast<uint32_t>((((value & 0xFFF) * 10000) + 2048) >> 12);
-  print_zero_padded_u32(frac, 4);
-}
-
-int16_t lookup_sigmoid_q0_15(int16_t input_q4_12) {
-  int bucket = input_q4_12 >> kSigmoidBucketShift;
-  if (bucket < -16) {
-    bucket = -16;
-  } else if (bucket > 15) {
-    bucket = 15;
-  }
-  return kSigmoidQ0_15Lut[bucket + 16];
-}
-
-int16_t silu_scalar_q4_12(int16_t input_q4_12) {
-  const int16_t sigmoid_q0_15 = lookup_sigmoid_q0_15(input_q4_12);
-  const int32_t product_q4_27 =
-      static_cast<int32_t>(input_q4_12) * sigmoid_q0_15;
-  return static_cast<int16_t>(product_q4_27 >> kSigmoidFracBits);
-}
-
-void silu_scalar_ref(const int16_t* input, int16_t* output, size_t count) {
-  for (size_t i = 0; i < count; ++i) {
-    output[i] = silu_scalar_q4_12(input[i]);
-  }
-}
-
-bool silu_rvv_q4_12(const int16_t* input, int16_t* output, size_t count) {
-  const size_t lut_vlmax = __riscv_vsetvlmax_e16m4();
-  if (lut_vlmax < kSigmoidLutSize) {
-    return false;
-  }
-
-  // The 32-entry LUT fits in one i16m4 register group, so lookup stays on the
-  // RVV datapath without extra scalar staging.
-  const vint16m4_t lut_v =
-      __riscv_vle16_v_i16m4(kSigmoidQ0_15Lut, kSigmoidLutSize);
-
-  size_t idx = 0;
-  while (idx < count) {
-    const size_t vl = __riscv_vsetvl_e16m4(count - idx);
-    const vint16m4_t in_v = __riscv_vle16_v_i16m4(input + idx, vl);
-
-    vint16m4_t bucket_v = __riscv_vsra_vx_i16m4(in_v, kSigmoidBucketShift, vl);
-    bucket_v = __riscv_vmax_vx_i16m4(bucket_v, -16, vl);
-    bucket_v = __riscv_vmin_vx_i16m4(bucket_v, 15, vl);
-
-    const vint16m4_t lut_idx_i16_v = __riscv_vadd_vx_i16m4(bucket_v, 16, vl);
-    const vuint16m4_t lut_idx_v =
-        __riscv_vreinterpret_v_i16m4_u16m4(lut_idx_i16_v);
-    const vint16m4_t sigmoid_v =
-        __riscv_vrgather_vv_i16m4(lut_v, lut_idx_v, vl);
-
-    const vint32m8_t product_v = __riscv_vwmul_vv_i32m8(in_v, sigmoid_v, vl);
-    const vint16m4_t out_v =
-        __riscv_vnsra_wx_i16m4(product_v, kSigmoidFracBits, vl);
-    __riscv_vse16_v_i16m4(output + idx, out_v, vl);
-
-    idx += vl;
-  }
-
-  return true;
-}
-
-void print_row(size_t idx, int16_t input_value, int16_t output_value) {
-  print_str("x[");
-  print_u32(static_cast<uint32_t>(idx));
-  print_str("] = ");
-  print_q4_12(input_value);
-  print_str(" -> ");
-  print_q4_12(output_value);
-  print_str(" (raw ");
-  print_i32(output_value);
-  print_str(")\n");
-}
-
-}  // namespace
-
-int main() {
-  silu_scalar_ref(kInputQ4_12, output_ref, kElementCount);
-  const bool rvv_ok = silu_rvv_q4_12(kInputQ4_12, output_rvv, kElementCount);
-
-  print_str("RVV SiLU demo (int16 Q4.12, LUT-based sigmoid)\n");
-  if (!rvv_ok) {
-    print_str("FAIL: VLEN too small for 32-entry LUT\n");
-    return 1;
-  }
-
-  for (size_t i = 0; i < kElementCount; ++i) {
-    print_row(i, kInputQ4_12[i], output_rvv[i]);
-    if (output_rvv[i] != output_ref[i]) {
-      print_str("Mismatch at index ");
-      print_u32(static_cast<uint32_t>(i));
-      print_str(": rvv=");
-      print_i32(output_rvv[i]);
-      print_str(", ref=");
-      print_i32(output_ref[i]);
-      print_char('\n');
-      print_str("FAIL\n");
-      return 1;
+    void print_str(const char *str)
+    {
+        const char *ptr = str;
+        while (*ptr != '\0')
+        {
+            ++ptr;
+        }
+        write(1, str, ptr - str);
     }
-  }
 
-  print_str("PASS\n");
-  return 0;
+    void print_char(char ch) { write(1, &ch, 1); }
+
+    void print_u32(uint32_t value)
+    {
+        char buf[10];
+        int pos = 0;
+        if (value == 0)
+        {
+            print_char('0');
+            return;
+        }
+        while (value > 0)
+        {
+            buf[pos++] = static_cast<char>('0' + (value % 10));
+            value /= 10;
+        }
+        while (pos > 0)
+        {
+            print_char(buf[--pos]);
+        }
+    }
+
+    void print_i32(int32_t value)
+    {
+        if (value < 0)
+        {
+            print_char('-');
+            value = -value;
+        }
+        print_u32(static_cast<uint32_t>(value));
+    }
+
+    void print_zero_padded_u32(uint32_t value, int digits)
+    {
+        char buf[10];
+        int pos = digits;
+        while (pos > 0)
+        {
+            buf[pos - 1] = static_cast<char>('0' + (value % 10));
+            value /= 10;
+            --pos;
+        }
+        write(1, buf, digits);
+    }
+
+    void print_q6_10(int16_t raw_value)
+    {
+        int32_t value = raw_value;
+        if (value < 0)
+        {
+            print_char('-');
+            value = -value;
+        }
+        print_u32(static_cast<uint32_t>(value >> kFracBits));
+        print_char('.');
+        const uint32_t frac =
+            static_cast<uint32_t>((((value & ((1 << kFracBits) - 1)) * 10000) +
+                                   (1 << (kFracBits - 1))) >>
+                                  kFracBits);
+        print_zero_padded_u32(frac, 4);
+    }
+
+    int16_t eval_poly_scalar(int16_t input_q6_10, int16_t a2_q, int16_t a1_q,
+                             int16_t a0_q)
+    {
+        const int32_t t =
+            ((static_cast<int32_t>(a2_q) * input_q6_10) >> kFracBits) + a1_q;
+        const int32_t y =
+            ((t * input_q6_10) >> kFracBits) + static_cast<int32_t>(a0_q);
+        return static_cast<int16_t>(y);
+    }
+
+    int16_t silu_scalar_q6_10(int16_t input_q6_10)
+    {
+        if (input_q6_10 <= kNeg16Q)
+        {
+            return 0;
+        }
+        if (input_q6_10 > kPos8Q)
+        {
+            return input_q6_10;
+        }
+        if (input_q6_10 < kNeg1Q)
+        {
+            return eval_poly_scalar(input_q6_10, kSeg0A2, kSeg0A1, kSeg0A0);
+        }
+        if (input_q6_10 < kPos2Q)
+        {
+            return eval_poly_scalar(input_q6_10, kSeg1A2, kSeg1A1, kSeg1A0);
+        }
+        return eval_poly_scalar(input_q6_10, kSeg2A2, kSeg2A1, kSeg2A0);
+    }
+
+    void silu_scalar_ref(const int16_t *input, int16_t *output, size_t count)
+    {
+        for (size_t i = 0; i < count; ++i)
+        {
+            output[i] = silu_scalar_q6_10(input[i]);
+        }
+    }
+
+    bool silu_rvv_q6_10(const int16_t *input, int16_t *output, size_t count)
+    {
+        size_t idx = 0;
+        while (idx < count)
+        {
+            const size_t vl = __riscv_vsetvl_e16m4(count - idx);
+            const vint16m4_t in_v = __riscv_vle16_v_i16m4(input + idx, vl);
+
+            const vbool4_t mask_le_neg16 =
+                __riscv_vmsle_vx_i16m4_b4(in_v, kNeg16Q, vl);
+            const vbool4_t mask_lt_neg1 =
+                __riscv_vmslt_vx_i16m4_b4(in_v, kNeg1Q, vl);
+            const vbool4_t mask_lt_pos2 =
+                __riscv_vmslt_vx_i16m4_b4(in_v, kPos2Q, vl);
+            const vbool4_t mask_gt_pos8 =
+                __riscv_vmsgt_vx_i16m4_b4(in_v, kPos8Q, vl);
+
+            vint16m4_t a2_v = __riscv_vmv_v_x_i16m4(kSeg2A2, vl);
+            vint16m4_t a1_v = __riscv_vmv_v_x_i16m4(kSeg2A1, vl);
+            vint16m4_t a0_v = __riscv_vmv_v_x_i16m4(kSeg2A0, vl);
+
+            a2_v = __riscv_vmerge_vxm_i16m4(a2_v, kSeg1A2, mask_lt_pos2, vl);
+            a1_v = __riscv_vmerge_vxm_i16m4(a1_v, kSeg1A1, mask_lt_pos2, vl);
+            a0_v = __riscv_vmerge_vxm_i16m4(a0_v, kSeg1A0, mask_lt_pos2, vl);
+
+            a2_v = __riscv_vmerge_vxm_i16m4(a2_v, kSeg0A2, mask_lt_neg1, vl);
+            a1_v = __riscv_vmerge_vxm_i16m4(a1_v, kSeg0A1, mask_lt_neg1, vl);
+            a0_v = __riscv_vmerge_vxm_i16m4(a0_v, kSeg0A0, mask_lt_neg1, vl);
+
+            vint32m8_t t_v = __riscv_vwmul_vv_i32m8(a2_v, in_v, vl);
+            vint16m4_t t_q_v = __riscv_vnsra_wx_i16m4(t_v, kFracBits, vl);
+            t_q_v = __riscv_vadd_vv_i16m4(t_q_v, a1_v, vl);
+
+            vint32m8_t y_v = __riscv_vwmul_vv_i32m8(t_q_v, in_v, vl);
+            vint16m4_t y_q_v = __riscv_vnsra_wx_i16m4(y_v, kFracBits, vl);
+            y_q_v = __riscv_vadd_vv_i16m4(y_q_v, a0_v, vl);
+
+            y_q_v = __riscv_vmerge_vxm_i16m4(y_q_v, 0, mask_le_neg16, vl);
+            y_q_v = __riscv_vmerge_vvm_i16m4(y_q_v, in_v, mask_gt_pos8, vl);
+
+            __riscv_vse16_v_i16m4(output + idx, y_q_v, vl);
+
+            idx += vl;
+        }
+
+        return true;
+    }
+
+    void print_row(size_t idx, int16_t input_value, int16_t output_value)
+    {
+        print_str("x[");
+        print_u32(static_cast<uint32_t>(idx));
+        print_str("] = ");
+        print_q6_10(input_value);
+        print_str(" -> ");
+        print_q6_10(output_value);
+        print_str(" (raw ");
+        print_i32(output_value);
+        print_str(")\n");
+    }
+
+} // namespace
+
+int main()
+{
+    silu_scalar_ref(kInputQ6_10, output_ref, kElementCount);
+    const bool rvv_ok = silu_rvv_q6_10(kInputQ6_10, output_rvv, kElementCount);
+
+    print_str("RVV SiLU demo (piecewise quadratic, int16 Q6.10)\n");
+    if (!rvv_ok)
+    {
+        print_str("FAIL: RVV path setup error\n");
+        return 1;
+    }
+
+    for (size_t i = 0; i < kElementCount; ++i)
+    {
+        print_row(i, kInputQ6_10[i], output_rvv[i]);
+        if (output_rvv[i] != output_ref[i])
+        {
+            print_str("Mismatch at index ");
+            print_u32(static_cast<uint32_t>(i));
+            print_str(": rvv=");
+            print_i32(output_rvv[i]);
+            print_str(", ref=");
+            print_i32(output_ref[i]);
+            print_char('\n');
+            print_str("FAIL\n");
+            return 1;
+        }
+    }
+
+    print_str("PASS\n");
+    return 0;
 }
