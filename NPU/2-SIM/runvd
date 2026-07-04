@@ -1,1 +1,0 @@
-verdi -f ./asic.f -ssf ./MatrixCore_tb.vcd &

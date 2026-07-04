@@ -1,6 +1,0 @@
-#!/bin/bash
-rm ./outputs/* ./rpt/* -rf
-rm ./log/*
-rm ./elab/* -rf
-rm *.log
-rm *.svf

@@ -1,5 +1,0 @@
-#!/bin/bash
-rm ./outputs/* ./rpt/* -rf
-rm ./log/*
-rm *.log
-rm *.svf
