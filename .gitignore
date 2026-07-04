@@ -10,6 +10,7 @@
 .agents/
 .codegraph/
 .bsp/
+.scalafmt.conf
 __pycache__/
 /NPU/
 
