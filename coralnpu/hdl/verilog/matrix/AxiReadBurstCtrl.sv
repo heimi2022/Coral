@@ -3,7 +3,8 @@
 一次ar 握手 发射一个 burst 请求
 支持 outstanding, 暂不支持 乱序 和 交织
 
-由于非对齐传输, 本模块在数据返回时, 同步给出 byte 有效信号 , 上层需重新拼接
+由于非对齐传输，本模块在数据返回时同步给出 burst 起始 offset 和本拍有效字节数，
+上层据此完成跨 beat 拼接。
 
 如果是端到端 是否要支持非对齐传输？？？  后续看实际情况调整
 */
@@ -14,7 +15,7 @@
 module AxiReadBurstCtrl #(
     parameter integer AXI_ID_WIDTH	                    = 1             ,
     parameter integer AXI_ADDR_WIDTH	                = 32            ,
-    parameter integer AXI_DATA_WIDTH	                = 256           ,
+    parameter integer AXI_DATA_WIDTH	                = 512           ,
     parameter integer AXI_ARUSER_WIDTH	                = 0             ,
     parameter integer AXI_RUSER_WIDTH	                = 0             ,
     parameter integer READ_OUTSTANDING_DEPTH            = 4             ,
@@ -32,9 +33,11 @@ module AxiReadBurstCtrl #(
     output  wire                                    r_req_busy_o                ,   // 当前不能再接收新的 burst 请求
     output  reg                                     r_burst_busy_o              ,   // 当前 burst 仍在执行
     output  reg                                     r_beat_valid_o              ,   // 当前返回 beat 有效
-    output  reg     [AXI_DATA_WIDTH/8 - 1 : 0]      r_beat_strb_o               ,   // 当前返回 beat 的字节有效掩码
+    output  reg                                     r_beat_first_o              ,   // 当前返回 beat 是本 burst 首拍
+    output  reg                                     r_beat_last_o               ,   // 当前返回 beat 是本 burst 尾拍
+    output  reg     [$clog2(AXI_DATA_WIDTH/8)-1:0]  r_burst_start_offset_o      ,   // 当前 burst 起始地址在 beat 内的字节偏移
+    output  reg     [$clog2(AXI_DATA_WIDTH/8):0]    r_beat_byte_count_o         ,   // 当前返回 beat 的有效字节数
     output  wire    [AXI_DATA_WIDTH - 1 : 0]        r_beat_data_o               ,   // 当前返回 beat 的数据
-    output  reg                                     r_burst_done_o              ,   // 当前 burst 的最后一个 beat 返回
     output  reg                                     r_burst_done_error_o        ,   // 当前 burst 完成时是否检测到错误
 // AR 信号
     output  wire    [AXI_ID_WIDTH - 1 : 0]          M_AXI_ARID                  ,
@@ -59,22 +62,12 @@ module AxiReadBurstCtrl #(
     output  wire                                    M_AXI_RREADY                
 );
 
-    localparam integer AXI_BEAT_BYTES  = AXI_DATA_WIDTH / 8; // 32
+    localparam integer AXI_BEAT_BYTES  = AXI_DATA_WIDTH / 8; // 64
 
     // 传输一个数据的字节数位宽
-    localparam integer AXI_BEAT_LG2 = $clog2(AXI_BEAT_BYTES);  // 5
-
-    function [AXI_BEAT_BYTES  - 1 : 0] gen_low_strb_mask;
-        input [AXI_BEAT_LG2    - 1 : 0] active_bytes;
-        integer byte_idx;
-        begin
-            gen_low_strb_mask = 'b0;
-            for (byte_idx = 0; byte_idx < AXI_BEAT_BYTES ; byte_idx = byte_idx + 1) begin
-                if (byte_idx < active_bytes)
-                    gen_low_strb_mask[byte_idx] = 1'b1;
-            end
-        end
-    endfunction
+    localparam integer AXI_BEAT_LG2 = $clog2(AXI_BEAT_BYTES);  // 6
+    localparam integer AXI_BEAT_COUNT_W = AXI_BEAT_LG2 + 1;    // 7，可表达 64B
+    localparam integer READ_META_WIDTH = AXI_BEAT_LG2 + AXI_BEAT_COUNT_W;
 
 
 // AXI4LITE signals
@@ -82,10 +75,9 @@ module AxiReadBurstCtrl #(
     reg                                     issue_valid             ;
     reg     [AXI_ADDR_WIDTH - 1 : 0]        issue_addr_aligned      ;
     reg     [7 : 0]                         issue_arlen             ;
-    reg     [AXI_BEAT_BYTES - 1 : 0]        issue_first_beat_strb   ;
-    reg     [AXI_BEAT_BYTES - 1 : 0]        issue_last_beat_strb    ;
-    reg                                     resp_nonfirst_beat      ;
-    reg     [$clog2(READ_OUTSTANDING_DEPTH + 1) - 1 : 0] outstanding_cnt;
+    reg     [AXI_BEAT_LG2 - 1 : 0]          issue_start_offset      ;
+    reg     [AXI_BEAT_COUNT_W - 1 : 0]      issue_end_offset        ;
+    reg                                     resp_nonfirst_beat_n      ;
     reg                                     resp_error_seen         ;
     wire  	                                read_resp_error         ;        // Interface response error flags
     wire  	                                r_fire_w                ;
@@ -95,17 +87,16 @@ module AxiReadBurstCtrl #(
     wire  	                                req_ready_w             ;
     wire    [AXI_BEAT_LG2 - 1 : 0]          start_offset_w          ;
     wire    [BURST_BYTE_NUM_WIDTH : 0]      burst_total_byte_num_w  ;
-    wire    [AXI_BEAT_BYTES - 1 : 0]        first_beat_strb_w       ;
-    wire    [AXI_BEAT_BYTES - 1 : 0]        last_beat_strb_w        ;
+    wire    [AXI_BEAT_COUNT_W - 1 : 0]      end_offset_w            ;
     wire    [7 : 0]                         burst_arlen_w           ;
-    wire    [AXI_BEAT_BYTES * 2 - 1 : 0]    meta_wr_data_w          ;
-    wire    [AXI_BEAT_BYTES * 2 - 1 : 0]    meta_rd_data_w          ;
+    wire    [READ_META_WIDTH - 1 : 0]        meta_wr_data_w          ;
+    wire    [READ_META_WIDTH - 1 : 0]        meta_rd_data_w          ;
     wire                                    meta_fifo_full_w        ;
     wire                                    meta_fifo_empty_w       ;
     wire                                    meta_push_w             ;
     wire                                    meta_pop_w              ;
-    wire    [AXI_BEAT_BYTES - 1 : 0]        resp_first_beat_strb_w  ;
-    wire    [AXI_BEAT_BYTES - 1 : 0]        resp_last_beat_strb_w   ;
+    wire    [AXI_BEAT_LG2 - 1 : 0]          resp_start_offset_w     ;
+    wire    [AXI_BEAT_COUNT_W - 1 : 0]      resp_end_offset_w       ;
 
 // I/O Connections assignments
 
@@ -127,13 +118,16 @@ module AxiReadBurstCtrl #(
 //----------------------------
 //Read Address Channel
 //----------------------------
-    // 当前实现只有一个 issue buffer：
-    // 1. 只要 AR 还没握手成功，就不再接受新的 burst 请求
-    // 2. 已经发出去的 burst metadata 交给 FIFO 跟踪
+
     assign ar_fire_w = M_AXI_ARVALID && M_AXI_ARREADY;
-    assign req_ready_w = !issue_valid && !meta_fifo_full_w && (outstanding_cnt < READ_OUTSTANDING_DEPTH);
-    assign req_accept_w = burst_valid_i && req_ready_w;
+
+    // 可接收下一条burst请求
+    assign req_ready_w =
+        (!issue_valid || ar_fire_w) &&
+        !meta_fifo_full_w;
     assign r_req_busy_o = !req_ready_w;
+    // 接收burst请求成功
+    assign req_accept_w = burst_valid_i && req_ready_w;
 
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
@@ -161,6 +155,20 @@ module AxiReadBurstCtrl #(
     // - burst_arlen_w       : 本次单 burst 对应的 AXI ARLEN
     assign start_offset_w = burst_addr_i[AXI_BEAT_LG2-1:0];
     assign burst_total_byte_num_w = burst_byte_num_i + start_offset_w;
+    // end_offset_w 表示尾拍有效区间的右开边界。值 64 表示整拍有效，
+    // 避免6位余数中的 0 同时承担“0字节”和“64字节”两种语义。
+    assign end_offset_w =
+        (burst_total_byte_num_w[AXI_BEAT_LG2-1:0] == 0) ?
+        AXI_BEAT_BYTES :
+        {1'b0, burst_total_byte_num_w[AXI_BEAT_LG2-1:0]};
+
+    always @(posedge clk) begin
+        if (req_accept_w) begin
+            issue_start_offset <= start_offset_w;
+            issue_end_offset <= end_offset_w;
+        end
+    end
+
     assign burst_arlen_w = (burst_total_byte_num_w - 1'b1) >> AXI_BEAT_LG2;
     always @(posedge clk) begin
         if (req_accept_w)
@@ -168,44 +176,21 @@ module AxiReadBurstCtrl #(
     end
     assign M_AXI_ARLEN = issue_arlen;
 
-    // - first_beat_strb_w   : 首拍有效字节掩码
-    // - last_beat_strb_w    : 尾拍有效字节掩码
-    assign first_beat_strb_w =
-        (start_offset_w == 0) ? {AXI_BEAT_BYTES{1'b1}} :
-                                ({AXI_BEAT_BYTES{1'b1}} << start_offset_w);
-    assign last_beat_strb_w =
-        (burst_total_byte_num_w[AXI_BEAT_LG2-1:0] == 0) ? {AXI_BEAT_BYTES{1'b1}} :
-                                                           gen_low_strb_mask(burst_total_byte_num_w[AXI_BEAT_LG2-1:0]);
-
-    always @(posedge clk) begin
-        if (req_accept_w) begin
-            issue_first_beat_strb <= first_beat_strb_w;
-            issue_last_beat_strb <= last_beat_strb_w;
-        end
-    end
-
-
-    // outstanding 计数只统计“AR 已经握手成功，但最后一个 R beat 还没回来”的事务数。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            outstanding_cnt <= '0;
-        end else begin
-            case ({ar_fire_w, r_last_fire_w})
-                2'b10: outstanding_cnt <= outstanding_cnt + 1'b1;
-                2'b01: outstanding_cnt <= outstanding_cnt - 1'b1;
-                default: outstanding_cnt <= outstanding_cnt;
-            endcase
-        end
-    end
-
-    assign meta_wr_data_w = {issue_first_beat_strb, issue_last_beat_strb};
-    assign meta_push_w = ar_fire_w;
+    // FIFO 记录的是“已经被上层接受的 burst”，而不是仅记录 AR 已握手的 burst。
+    // 这样 issue_valid 中尚未发到 AXI 的那一条也占用 FIFO 空间，避免
+    // issue buffer + metadata FIFO 形成额外的一条隐含 outstanding。
+    assign meta_wr_data_w = {
+        start_offset_w,
+        end_offset_w
+    };
+    assign meta_push_w = req_accept_w;
     assign meta_pop_w = r_last_fire_w;
-    assign resp_first_beat_strb_w = meta_rd_data_w[AXI_BEAT_BYTES * 2 - 1 -: AXI_BEAT_BYTES];
-    assign resp_last_beat_strb_w = meta_rd_data_w[AXI_BEAT_BYTES - 1 : 0];
+    assign resp_start_offset_w =
+        meta_rd_data_w[READ_META_WIDTH - 1 -: AXI_BEAT_LG2];
+    assign resp_end_offset_w = meta_rd_data_w[AXI_BEAT_COUNT_W - 1 : 0];
 
     fifo #(
-        .DATA_WIDTH ( AXI_BEAT_BYTES * 2      ),
+        .DATA_WIDTH ( READ_META_WIDTH          ),
         .DEPTH      ( READ_OUTSTANDING_DEPTH  )
     ) u_read_meta_fifo (
         .clk       ( clk              ),
@@ -224,17 +209,17 @@ module AxiReadBurstCtrl #(
 
     // 当前响应流只需要区分“是不是队头 burst 的第一拍”，
     // 最后一拍直接由 RLAST 给出，所以这里用 1bit 状态位即可。
-    // resp_nonfirst_beat:
+    // resp_nonfirst_beat_n:
     // 0 = 当前拍是首拍
     // 1 = 当前拍不是首拍
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
-            resp_nonfirst_beat <= 1'b0;
+            resp_nonfirst_beat_n <= 1'b0;
         else if (r_fire_w) begin
             if (M_AXI_RLAST)
-                resp_nonfirst_beat <= 1'b0;
+                resp_nonfirst_beat_n <= 1'b0;
             else
-                resp_nonfirst_beat <= 1'b1;
+                resp_nonfirst_beat_n <= 1'b1;
         end
     end
            
@@ -267,41 +252,42 @@ module AxiReadBurstCtrl #(
             axi_rdata <= M_AXI_RDATA;
     end
 
-
-    // 根据当前 beat 在 burst 中的位置，输出这一拍的有效字节掩码。
-    // - 单拍 burst      : 首拍和尾拍同时生效，mask 取交集
-    // - 多拍首拍        : 使用 first_beat_strb
-    // - 多拍尾拍        : 使用 last_beat_strb
-    // - 中间拍          : 整拍有效
     always @(posedge clk) begin
         r_beat_valid_o <= r_fire_w;
-    end
-
-    // TODO 又打了一拍  是否可删   和波形一起调试
-    always @(posedge clk) begin
-        r_burst_done_o <= r_last_fire_w;
     end
 
     always @(posedge clk) begin
         r_burst_done_error_o <= r_last_fire_w && (resp_error_seen || read_resp_error);
     end
 
+    // 根据当前 beat 在 burst 中的位置输出有效字节数：
+    // - 单拍 burst：end_offset - start_offset
+    // - 多拍首拍：AXI_BEAT_BYTES - start_offset
+    // - 多拍尾拍：end_offset
+    // - 中间拍：AXI_BEAT_BYTES
     always @(posedge clk) begin
         if (r_fire_w) begin
-            if (!resp_nonfirst_beat && M_AXI_RLAST)
-                r_beat_strb_o <= resp_first_beat_strb_w & resp_last_beat_strb_w;
-            else if (!resp_nonfirst_beat)
-                r_beat_strb_o <= resp_first_beat_strb_w;
-            else if (M_AXI_RLAST)
-                r_beat_strb_o <= resp_last_beat_strb_w;
+            if (!resp_nonfirst_beat_n && r_last_fire_w)  //第一拍也是最后一拍
+                r_beat_byte_count_o <=
+                    resp_end_offset_w - {1'b0, resp_start_offset_w};
+            else if (!resp_nonfirst_beat_n) //第一拍不是最后一拍
+                r_beat_byte_count_o <= AXI_BEAT_BYTES - {1'b0, resp_start_offset_w};
+            else if (r_last_fire_w)   //最后一拍
+                r_beat_byte_count_o <= resp_end_offset_w;
             else
-                r_beat_strb_o <= {AXI_BEAT_BYTES{1'b1}};
+                r_beat_byte_count_o <= AXI_BEAT_BYTES;
         end
     end
 
-    // “事务侧 busy” 保持原语义：只要还有待发请求或者在途 burst，就视为读事务仍在执行。
-    always @* begin
-        r_burst_busy_o = issue_valid || (outstanding_cnt != '0);
+    always @(posedge clk) begin
+        if (r_fire_w) begin
+            r_beat_first_o <= !resp_nonfirst_beat_n;
+            r_beat_last_o <= r_last_fire_w;
+            r_burst_start_offset_o <= resp_start_offset_w;
+        end
     end
+
+    // 只要还有待发请求或者 metadata FIFO 中仍有在途 burst，就视为读事务仍在执行。
+    assign r_burst_busy_o = issue_valid || !meta_fifo_empty_w;
     
 endmodule

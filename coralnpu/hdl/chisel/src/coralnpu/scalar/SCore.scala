@@ -20,7 +20,7 @@ import chisel3._
 import chisel3.util._
 import common._
 import coralnpu.float.{FloatCore}
-import coralnpu.rvv.{RvvCoreIO}
+import coralnpu.rvv.{RvvCompressedInstruction, RvvCoreIO}
 import _root_.circt.stage.ChiselStage
 import coralnpu.matrix.{MatrixCoreIO, MatrixMemOp}
 
@@ -137,8 +137,25 @@ class SCore(p: Parameters) extends Module {
 
     // ---------------------------------------------------------------------------
     // Decode
-    // Decode/Dispatch
-    dispatch.io.inst <> fetch.io.inst.lanes
+    // Register the fetch-to-dispatch boundary.  The fetch instruction buffer
+    // exposes its dequeue pointer through the complete dispatch/retirement
+    // control path; this buffer contains that path while retaining in-order,
+    // multi-lane dispatch.
+    val decodeBuffer = Module(new InstructionBuffer(
+        new FetchInstruction(p), p.instructionLanes, p.instructionLanes * 2))
+    // Ready depends only on staging-buffer space.  Count valid transfers
+    // separately so fetch valid does not feed back into fetch ready.
+    val fetchReadyCount = decodeBuffer.io.feedIn.nReady
+    for (i <- 0 until p.instructionLanes) {
+        decodeBuffer.io.feedIn.bits(i) := fetch.io.inst.lanes(i).bits
+        fetch.io.inst.lanes(i).ready := i.U < fetchReadyCount
+    }
+    decodeBuffer.io.feedIn.nValid := PopCount(
+        fetch.io.inst.lanes.map(x => x.valid && x.ready))
+    decodeBuffer.io.flush := branchTaken ||
+        (lsu.io.flush.valid && lsu.io.flush.fencei) ||
+        csr.io.dm.debug_pc.valid
+    dispatch.io.inst <> decodeBuffer.io.out
     dispatch.io.halted := csr.io.halted || csr.io.wfi || csr.io.dm.debug_mode
     dispatch.io.mactive := io.matrixcore.map(_.status.busy).getOrElse(false.B)  // matrix
     dispatch.io.lsuActive := lsu.io.active
@@ -158,9 +175,9 @@ class SCore(p: Parameters) extends Module {
         if (p.enableRvv) {
             fault_manager.io.in.fault(i).rvv.get := dispatch.io.rvvFault.get(i)
         }
-        fault_manager.io.in.pc(i).pc := fetch.io.inst.lanes(i).bits.addr
+        fault_manager.io.in.pc(i).pc := dispatch.io.inst(i).bits.addr
         fault_manager.io.in.jalr(i).target := regfile.io.target(i).data
-        fault_manager.io.in.undef(i).inst := fetch.io.inst.lanes(i).bits.inst
+        fault_manager.io.in.undef(i).inst := dispatch.io.inst(i).bits.inst
         fault_manager.io.in.jal(i).target := dispatch.io.bruTarget(i)
     }
     fault_manager.io.in.memory_fault := lsu.io.fault
@@ -434,8 +451,11 @@ class SCore(p: Parameters) extends Module {
     }
 
     val mluDvuOffset = p.instructionLanes
+    // Decouple the RVV backend's asynchronous scalar writeback from the
+    // scalar scoreboard and retirement paths.
+    val rvvAsyncRd = io.rvvcore.map(x => Queue(x.async_rd, 2))
     val mluDvuInputs = Seq(mlu.io.rd, dvu.io.rd) ++
-                        io.rvvcore.map(x => Seq(x.async_rd)).getOrElse(Seq()) ++
+                        rvvAsyncRd.map(x => Seq(x)).getOrElse(Seq()) ++
                         floatCore.map(x => Seq(x.io.scalar_rd)).getOrElse(Seq()) ++
                         Seq(io.dm.scalar_rd)
 
@@ -463,8 +483,29 @@ class SCore(p: Parameters) extends Module {
     // ---------------------------------------------------------------------------
     // Rvv Extension
     if (p.enableRvv) {
-        // Connect dispatch
-        dispatch.io.rvv.get <> io.rvvcore.get.inst
+        // Keep the scalar dispatch ready path out of the RVV frontend.  A
+        // packet preserves the scalar issue-lane order at the RVV boundary.
+        val rvvIssueQueue = Module(new Queue(
+            Vec(p.instructionLanes, Valid(new RvvCompressedInstruction)), 2))
+        val rvvDispatch = dispatch.io.rvv.get
+
+        rvvIssueQueue.io.enq.valid := rvvDispatch.map(_.valid).reduce(_||_)
+        for (i <- 0 until p.instructionLanes) {
+            rvvIssueQueue.io.enq.bits(i).valid := rvvDispatch(i).valid
+            rvvIssueQueue.io.enq.bits(i).bits := rvvDispatch(i).bits
+            rvvDispatch(i).ready := rvvIssueQueue.io.enq.ready
+        }
+
+        val rvvIssueCount = PopCount(rvvIssueQueue.io.deq.bits.map(_.valid))
+        val rvvIssueFits = rvvIssueCount <= io.rvvcore.get.queue_capacity
+        rvvIssueQueue.io.deq.ready := rvvIssueFits
+        for (i <- 0 until p.instructionLanes) {
+            io.rvvcore.get.inst(i).valid :=
+                rvvIssueQueue.io.deq.valid && rvvIssueFits &&
+                rvvIssueQueue.io.deq.bits(i).valid
+            io.rvvcore.get.inst(i).bits := rvvIssueQueue.io.deq.bits(i).bits
+        }
+
         dispatch.io.rvvState.get := io.rvvcore.get.configState
         dispatch.io.rvvIdle.get := io.rvvcore.get.rvv_idle
         dispatch.io.rvvQueueCapacity.get := io.rvvcore.get.queue_capacity
@@ -494,7 +535,9 @@ class SCore(p: Parameters) extends Module {
         csr.io.rvv.get.vxsat := io.rvvcore.get.csr.vxsat
     }
     val isBranching = bru.map(_.io.taken.valid).reduce(_||_)
-    val hasFetchedInstructions = fetch.io.inst.lanes.map(_.valid).reduce(_||_)
+    val hasFetchedInstructions =
+        fetch.io.inst.lanes.map(_.valid).reduce(_||_) ||
+        decodeBuffer.io.out.map(_.valid).reduce(_||_)
     val floatIdle = if (p.enableFloat) {fRegfile.get.io.scoreboard === 0.U} else {true.B}
     val rvvIdle = if (p.enableRvv) {io.rvvcore.get.rvv_idle} else {true.B}
     // Scalar and float arithmetics don't actually trap, we're just trying to be precise here.
@@ -540,11 +583,11 @@ class SCore(p: Parameters) extends Module {
 
     val debugBrch = Cat(bru.map(_.io.taken.valid).scanRight(false.B)(_ || _))
 
-    debugEn := Cat(fetch.io.inst.lanes.map(x => x.valid && x.ready && !branchTaken))
+    debugEn := Cat(dispatch.io.inst.map(x => x.valid && x.ready && !branchTaken))
 
     for (i <- 0 until p.instructionLanes) {
-        debugAddr(i) := Mux(debugEn(i), fetch.io.inst.lanes(i).bits.addr, debugAddr(i))
-        debugInst(i) := Mux(debugEn(i), fetch.io.inst.lanes(i).bits.inst, debugInst(i))
+        debugAddr(i) := Mux(debugEn(i), dispatch.io.inst(i).bits.addr, debugAddr(i))
+        debugInst(i) := Mux(debugEn(i), dispatch.io.inst(i).bits.inst, debugInst(i))
     }
 
     io.debug.en := debugEn & ~debugBrch

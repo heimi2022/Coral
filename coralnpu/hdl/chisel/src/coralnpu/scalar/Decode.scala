@@ -271,11 +271,15 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     def isMul(): Bool = { mul || mulh || mulhsu || mulhu }
     def isDvu(): Bool = { div || divu || rem || remu }
     def isFency(): Bool = { fencei || ebreak || wfi || mpause || flushat || flushall }
+    def isRvvConfig(): Bool = {
+        if (p.enableRvv) { rvv.get.valid && rvv.get.bits.isVset() } else { false.B }
+    }
 
     // Instructions that should dispatch out of slot 0, with no other instructions
     // dispatched on the same cycle.
     def forceSlot0Only(): Bool = {
-        isFency() || isCsr() || isMatrixCfg() || isMatrixMul() || isMatrixLoadStore()
+        isFency() || isCsr() || isRvvConfig() ||
+        isMatrixCfg() || isMatrixMul() || isMatrixLoadStore()
     }
 
     // Checks if an instruction is a jump or changes context switch. Instructions

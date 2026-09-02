@@ -469,7 +469,10 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
                         ShiftVectorRight(resultUpdate, deqReady))
 
     val retiredEcalls = PopCount(VecInit((0 until bufferSize).map(i => (i.U < deqReady) && instBuffer.io.dataOut(i).isEcall)).asUInt)
-    io.nRetired := deqReady - retiredEcalls
+    // Register the retirement count at its producer.  The CSR performance
+    // counter consumes this value in the following cycle, avoiding a long
+    // retirement-control path into the CSR counter clock enable.
+    io.nRetired := RegNext(deqReady - retiredEcalls, 0.U)
     io.trapPending := RegNext(hasTrap && !trapRetired, false.B)
 
     for (i <- 0 until bufferSize) {

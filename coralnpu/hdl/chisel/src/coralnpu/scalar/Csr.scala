@@ -324,8 +324,12 @@ class Csr(p: Parameters) extends Module {
     val mepc = RegInit(0.U(32.W))
     val mhartid = RegInit(p.hartId.U(32.W))
 
-    val mcycle = RegInit(0.U(64.W))
-    val minstret = RegInit(0.U(64.W))
+    // RV32 exposes these counters through separate low/high CSRs.  Keeping
+    // the halves separate avoids a 64-bit incrementer on the core clock path.
+    val mcycleLo = RegInit(0.U(32.W))
+    val mcycleHi = RegInit(0.U(32.W))
+    val minstretLo = RegInit(0.U(32.W))
+    val minstretHi = RegInit(0.U(32.W))
 
     // 32-bit MXLEN, I,M,X extensions
     val misa = RegInit(
@@ -493,10 +497,10 @@ class Csr(p: Parameters) extends Module {
         mcontext7En -> mcontext7,
         mpcEn -> mpc,
         mspEn -> msp,
-        mcycleEn -> mcycle(31, 0),
-        mcyclehEn -> mcycle(63, 32),
-        minstretEn -> minstret(31, 0),
-        minstrethEn -> minstret(63, 32),
+        mcycleEn -> mcycleLo,
+        mcyclehEn -> mcycleHi,
+        minstretEn -> minstretLo,
+        minstrethEn -> minstretHi,
         mvendoridEn -> mvendorid,
         marchidEn -> Cat(0.U(31.W), marchid),
         mimpidEn -> Cat(0.U(31.W), mimpid),
@@ -647,23 +651,38 @@ class Csr(p: Parameters) extends Module {
     val is_csr_write = req.valid && !(req.bits.op
         .isOneOf(CsrOp.CSRRS, CsrOp.CSRRC) && req.bits.rs1 === 0.U)
 
-    // mcycle implementation
-    // If one of the enable signals for
-    // the register are true, overwrite the enabled half
-    // of the register.
-    // Increment the value of mcycle by 1.
-    val mcycle_th = Mux(mcyclehEn, wdata, mcycle(63, 32))
-    val mcycle_tl = Mux(mcycleEn, wdata, mcycle(31, 0))
-    val mcycle_t = Cat(mcycle_th, mcycle_tl)
+    // RV32 counter halves are independently writable.  The high half only
+    // increments when the low half carries, so neither counter needs a
+    // 64-bit adder.
     val mcycle_written = is_csr_write && (mcycleEn || mcyclehEn)
-    mcycle := Mux(mcycle_written, mcycle_t, mcycle + 1.U)
+    when(mcycle_written) {
+        when(mcycleEn) { mcycleLo := wdata }
+        when(mcyclehEn) { mcycleHi := wdata }
+    }.otherwise {
+        mcycleLo := mcycleLo + 1.U
+        when(mcycleLo.andR) { mcycleHi := mcycleHi + 1.U }
+    }
 
-    val minstret_th = Mux(minstrethEn, wdata, minstret(63, 32))
-    val minstret_tl = Mux(minstretEn, wdata, minstret(31, 0))
-    val minstret_t = Cat(minstret_th, minstret_tl)
     val minstret_written = is_csr_write && (minstretEn || minstrethEn)
     val minstretThisCycle = io.counters.nRetired
-    minstret := Mux(minstret_written, minstret_t, minstret + minstretThisCycle)
+    // At most one instruction per scalar issue lane can retire in a cycle.
+    // Build the high-half carry from only the affected low bits instead of
+    // forwarding a 33-bit adder carry into minstretHi's clock enable.
+    val retireCountWidth = log2Ceil(p.instructionLanes + 1)
+    val minstretIncrement = minstretThisCycle(retireCountWidth - 1, 0)
+    val minstretLoNext = minstretLo + minstretIncrement.pad(32)
+    val minstretCarryLowSum =
+        Cat(0.U(1.W), minstretLo(retireCountWidth - 1, 0)) +
+        minstretIncrement.pad(retireCountWidth + 1)
+    val minstretCarry =
+        minstretLo(31, retireCountWidth).andR && minstretCarryLowSum(retireCountWidth)
+    when(minstret_written) {
+        when(minstretEn) { minstretLo := wdata }
+        when(minstrethEn) { minstretHi := wdata }
+    }.otherwise {
+        minstretLo := minstretLoNext
+        when(minstretCarry) { minstretHi := minstretHi + 1.U }
+    }
 
     val trigger_enabled = tdata1.isTrigger6 && tdata1.m
     val trigger_match = trigger_enabled && io.dm.current_pc === tdata2
@@ -755,10 +774,10 @@ class Csr(p: Parameters) extends Module {
     io.csr.out.value(1) := mepc
     io.csr.out.value(2) := mtval
     io.csr.out.value(3) := mcause
-    io.csr.out.value(4) := mcycle(31, 0)
-    io.csr.out.value(5) := mcycle(63, 32)
-    io.csr.out.value(6) := minstret(31, 0)
-    io.csr.out.value(7) := minstret(63, 32)
+    io.csr.out.value(4) := mcycleLo
+    io.csr.out.value(5) := mcycleHi
+    io.csr.out.value(6) := minstretLo
+    io.csr.out.value(7) := minstretHi
     io.csr.out.value(8) := mcontext0
 
     // Write port.

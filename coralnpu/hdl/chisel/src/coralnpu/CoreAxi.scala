@@ -30,6 +30,9 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         // ITCM, DTCM, CSR
         val axi_slave = Flipped(new AxiMasterIO(p.axi2AddrBits, p.axi2DataBits, p.axi2IdBits))
         val axi_master = new AxiMasterIO(p.axi2AddrBits, p.axi2DataBits, p.axi2IdBits)
+        // MatrixDma uses a dedicated 256-bit AXI master because matrix
+        // register beats are wider than the scalar/RVV AXI data path.
+        val matrix_axi_master = Option.when(p.enableMatrix)(new AxiMasterIO(32, 256, 1))
         // Core status interrupts
         val halted = Output(Bool())
         val fault = Output(Bool())
@@ -94,7 +97,13 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         
         val core_reset = Mux(io.te, (!io.aresetn.asBool).asAsyncReset, (csr.io.reset || dm.io.ndmreset).asAsyncReset)
         val core = withClockAndReset(cg.io.clk_o, core_reset) { Core(p, coreModuleName) }
-        cg.io.enable := io.irq || (!csr.io.cg && !core.io.wfi) || dm.io.haltreq(0)
+        if (p.enableMatrix) {
+            io.matrix_axi_master.get <> core.io.matrixAxi.get
+        }
+        // Keep the core clock available for abstract debug commands after
+        // OpenOCD has observed the halt and deasserted haltreq.
+        cg.io.enable := io.irq || (!csr.io.cg && !core.io.wfi) ||
+                        dm.io.haltreq(0) || core.io.dm.debug_mode
         io.halted := core.io.halted
         io.fault := core.io.fault
         io.wfi := core.io.wfi

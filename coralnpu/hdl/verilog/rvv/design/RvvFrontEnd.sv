@@ -148,11 +148,14 @@ module RvvFrontEnd#(parameter N = 4,
       inst_config_state[i+1] = inst_config_state[i];
       avl[i] = 0;
       vlmax[i] = 0;
-      is_setvl[i] = 0;
-
-      if (valid_inst_q[i] &&
+      is_setvl[i] = valid_inst_q[i] &&
           (inst_q[i].opcode == RVV) &&
-          (inst_q[i].bits[7:5] == 3'b111)) begin
+          (inst_q[i].bits[7:5] == 3'b111);
+
+      // Scalar dispatch serializes configuration instructions into lane 0.
+      // Keeping the configuration update in one lane avoids cascading the
+      // VL/VTYPE calculation through every frontend lane.
+      if ((i == 0) && is_setvl[i]) begin
         if (inst_q[i].bits[24] == 0) begin  // vsetvli
           // Set AVL based on encoding (see Section 6.2 of RVV spec)
           unique case (inst_q[i].bits[12:8])
@@ -167,7 +170,6 @@ module RvvFrontEnd#(parameter N = 4,
           inst_config_state[i+1].sew = RVVSEW'(inst_q[i].bits[18:16]);
           inst_config_state[i+1].ta = inst_q[i].bits[19];
           inst_config_state[i+1].ma = inst_q[i].bits[20];
-          is_setvl[i] = 1;
         end else if (inst_q[i].bits[24:23] == 2'b11) begin  // vsetivli
           avl[i] =
               {{(`VL_WIDTH - 5){1'b0}}, inst_q[i].bits[12:8]};
@@ -175,7 +177,6 @@ module RvvFrontEnd#(parameter N = 4,
           inst_config_state[i+1].sew = RVVSEW'(inst_q[i].bits[18:16]);
           inst_config_state[i+1].ta = inst_q[i].bits[19];
           inst_config_state[i+1].ma = inst_q[i].bits[20];
-          is_setvl[i] = 1;
         end else if (inst_q[i].bits[24:23] == 2'b10) begin  // vsetvl
           // Set AVL based on encoding (see Section 6.2 of RVV spec)
           unique case (inst_q[i].bits[12:8])
@@ -191,11 +192,10 @@ module RvvFrontEnd#(parameter N = 4,
               RVVSEW'(reg_read_data_i[(2*i) + 1][5:3]);
           inst_config_state[i+1].ta = reg_read_data_i[(2*i) + 1][6];
           inst_config_state[i+1].ma = reg_read_data_i[(2*i) + 1][7];
-          is_setvl[i] = 1;
         end
       end
 
-      if (is_setvl[i]) begin
+      if ((i == 0) && is_setvl[i]) begin
         // Compute legality of vtype.
         unique case (inst_config_state[i+1].sew)
           SEW8:
@@ -367,11 +367,18 @@ module RvvFrontEnd#(parameter N = 4,
       unaligned_cmd_data[i].rs1 =
           inst_q[i].bits[7] ? reg_read_data_i[2*i] : 0;
 
-      // Write new value of vl into rd for configuration function.
-      reg_write_valid_o[i] = is_setvl[i];
-      reg_write_addr_o[i] = inst_q[i].bits[4:0];
-      reg_write_data_o[i] =
-          {{(`XLEN-`VL_WIDTH){1'b0}}, inst_config_state[i+1].vl};
+      // Only lane 0 can write the scalar destination of a configuration
+      // instruction. Other lanes are constant-zero to keep this path local.
+      if (i == 0) begin
+        reg_write_valid_o[i] = is_setvl[i];
+        reg_write_addr_o[i] = inst_q[i].bits[4:0];
+        reg_write_data_o[i] =
+            {{(`XLEN-`VL_WIDTH){1'b0}}, inst_config_state[i+1].vl};
+      end else begin
+        reg_write_valid_o[i] = 1'b0;
+        reg_write_addr_o[i] = '0;
+        reg_write_data_o[i] = '0;
+      end
     end
   end
 
@@ -406,6 +413,16 @@ module RvvFrontEnd#(parameter N = 4,
 
   // Assertions
 `ifndef SYNTHESIS
+  // Configuration instructions are serialized by scalar dispatch. Suppress
+  // accidental configuration updates from nonzero lanes if this frontend is
+  // integrated with a different producer.
+  always_ff @(posedge clk) begin
+    for (int i = 1; i < N; i++) begin
+      assert (!is_setvl[i])
+          else $error("RVV configuration instruction issued outside lane 0");
+    end
+  end
+
   logic [N-1:0] lsu_requires_rs1_read;
   logic [N-1:0] non_lsu_requires_rs1_read;
   logic [N-1:0] requires_rs1_read;

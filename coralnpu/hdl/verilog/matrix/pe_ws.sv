@@ -4,7 +4,7 @@
     但不同n,k配置下，会出现二缺一的情况，此时传递对应值即可
 */
 module pe_ws #(
-    parameter                               ELEM_WIDTH        = 16  ,
+    parameter                               MAX_ELEM_WIDTH    = 16  ,
     parameter                               PE_ACC_WIDTH      = 48   
 ) (
     input  logic clk                                                ,
@@ -12,35 +12,35 @@ module pe_ws #(
 
     input  logic                            load_weight_ping_i      ,
     input  logic                            load_weight_pong_i      ,
-    input  logic signed [ELEM_WIDTH-1:0]    weight_i                ,
+    input  logic signed [MAX_ELEM_WIDTH-1:0] weight_i               ,
 
     input  logic                            act_valid_i             ,
     input  logic                            psum_valid_i            ,
     input  logic                            weight_bank_sel_i       ,
-    input  logic signed [ELEM_WIDTH-1:0]    act_i                   ,
+    input  logic signed [MAX_ELEM_WIDTH-1:0] act_i                  ,
     input  logic signed [PE_ACC_WIDTH-1:0]  psum_i                  ,
 
     output logic                            act_valid_o             ,
     output logic                            psum_valid_o            ,
     output logic                            weight_bank_sel_o       ,
-    output logic signed [ELEM_WIDTH-1:0]    weight_o                ,
-    output logic signed [ELEM_WIDTH-1:0]    act_o                   ,
+    output logic signed [MAX_ELEM_WIDTH-1:0] weight_o               ,
+    output logic signed [MAX_ELEM_WIDTH-1:0] act_o                  ,
     output logic signed [PE_ACC_WIDTH-1:0]  psum_o                   
 );
 
-    localparam integer PRODUCT_WIDTH = 2 * ELEM_WIDTH; 
+    localparam integer PRODUCT_WIDTH = 2 * MAX_ELEM_WIDTH;
 
     // Ping-pong weight banks for WS dataflow.
     // weight_bank_sel_i = 1'b0 selects ping, 1'b1 selects pong.
-    logic signed [ELEM_WIDTH-1:0] weight_ping;
-    logic signed [ELEM_WIDTH-1:0] weight_pong;
-    logic signed [ELEM_WIDTH-1:0] weight_sel;
-    logic signed [ELEM_WIDTH-1:0] act_masked;
+    logic signed [MAX_ELEM_WIDTH-1:0] weight_ping;
+    logic signed [MAX_ELEM_WIDTH-1:0] weight_pong;
+    logic signed [MAX_ELEM_WIDTH-1:0] weight_sel;
+    logic signed [MAX_ELEM_WIDTH-1:0] act_masked;
     logic signed [PRODUCT_WIDTH-1:0] product;
     logic signed [PE_ACC_WIDTH-1:0] product_ext;
 
     assign weight_sel = weight_bank_sel_i ? weight_pong : weight_ping;
-    assign act_masked = act_i & {ELEM_WIDTH{act_valid_i}};
+    assign act_masked = act_i & {MAX_ELEM_WIDTH{act_valid_i}};
     assign product = act_masked * weight_sel;
     assign product_ext = {{(PE_ACC_WIDTH - PRODUCT_WIDTH){product[PRODUCT_WIDTH-1]}}, product};
 

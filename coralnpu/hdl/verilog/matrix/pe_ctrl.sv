@@ -26,8 +26,8 @@ PE 控制模块
 */
 
 module pe_ctrl #(
-    parameter int ELEM_WIDTH = 16,
-    parameter int ACC_WIDTH  = 48,
+    parameter int MAX_ELEM_WIDTH = 8,
+    parameter int ACC_WIDTH  = 32,
     parameter int TILE_COLS  = 32,
     parameter int TILE_ROWS  = 32
 ) (
@@ -42,30 +42,30 @@ module pe_ctrl #(
     input  logic [2:0]                              rd_i            ,
     input  logic                                    start_i         ,
 
-    input  logic [TILE_COLS * ELEM_WIDTH - 1 : 0]   rs1_data_i      ,
-    input  logic                                    rs1_data_valid_i,
-    output logic [2:0]                              rs1_o           ,
-    output logic [5:0]                              rs1_addr_o      ,
-    output logic                                    rs1_read_valid_o,
+    input  logic [TILE_COLS * MAX_ELEM_WIDTH - 1 : 0]   rs1_data_i   ,
+    input  logic                                        rs1_data_valid_i,
+    output logic [2:0]                                  rs1_o           ,
+    output logic [5:0]                                  rs1_addr_o      ,
+    output logic                                        rs1_read_valid_o,
 
-    input  logic [TILE_COLS * ELEM_WIDTH - 1 : 0]   rs2_data_i      ,
-    input  logic                                    rs2_data_valid_i,
-    output logic [2:0]                              rs2_o           ,
-    output logic [5:0]                              rs2_addr_o      ,
-    output logic                                    rs2_read_valid_o,
+    input  logic [TILE_ROWS * MAX_ELEM_WIDTH - 1 : 0]   rs2_data_i   ,
+    input  logic                                        rs2_data_valid_i,
+    output logic [2:0]                                  rs2_o           ,
+    output logic [5:0]                                  rs2_addr_o      ,
+    output logic                                        rs2_read_valid_o,
 
-    input  logic [TILE_COLS * ACC_WIDTH - 1 : 0]    rd_data_i       ,
-    input  logic                                    rd_data_valid_i ,
-    output logic [2:0]                              rd_read_o       ,
-    output logic [2:0]                              rd_write_o      ,
-    output logic [4:0]                              rd_read_addr_o  ,
-    output logic [4:0]                              rd_write_addr_o ,
-    output logic                                    rd_write_valid_o,
-    output logic                                    rd_read_valid_o ,
+    input  logic [TILE_COLS * ACC_WIDTH - 1 : 0]        rd_data_i       ,
+    input  logic                                        rd_data_valid_i ,
+    output logic [2:0]                                  rd_read_o       ,
+    output logic [2:0]                                  rd_write_o      ,
+    output logic [4:0]                                  rd_read_addr_o  ,
+    output logic [4:0]                                  rd_write_addr_o ,
+    output logic                                        rd_write_valid_o,
+    output logic                                        rd_read_valid_o ,
 
-    output logic                                    cmd_busy_o      ,
-    output logic                                    matmul_finish_o ,
-    output logic [TILE_COLS * ACC_WIDTH - 1 : 0]    pe_array_o                 
+    output logic                                        cmd_busy_o      ,
+    output logic                                        matmul_finish_o ,
+    output logic [TILE_COLS * ACC_WIDTH - 1 : 0]        pe_array_o                 
 );
 
     localparam int ACT_ADDR_WIDTH         = $clog2(2 * TILE_ROWS);
@@ -73,7 +73,7 @@ module pe_ctrl #(
     localparam int M_CNT_WIDTH            = (TILE_ROWS <= 1) ? 1 : $clog2(TILE_ROWS + 1);
     localparam int COL_CNT_WIDTH          = (TILE_COLS <= 1) ? 1 : $clog2(TILE_COLS + 1);
     localparam int OUTPUT_META_WIDTH      = 32 + 32 + 3 + 1;
-    localparam int PE_ACC_WIDTH           = 2 * ELEM_WIDTH + $clog2(TILE_ROWS);  // PE 内部累加位宽，容纳 TILE_ROWS 个乘积的和即可
+    localparam int PE_ACC_WIDTH           = 2 * MAX_ELEM_WIDTH + $clog2(TILE_ROWS);  // PE 内部累加位宽，容纳 TILE_ROWS 个乘积的和即可
 
     typedef enum logic [2:0] {
         Idle,
@@ -100,10 +100,10 @@ module pe_ctrl #(
     logic                                   load_weight_ping;
     logic                                   load_weight_pong;
     logic                                   weight_bank_sel;
-    logic [TILE_COLS * ELEM_WIDTH - 1 : 0] weight_tile;
+    logic [TILE_ROWS * MAX_ELEM_WIDTH - 1 : 0] weight_tile;
     logic [TILE_COLS-1:0]                   psum_top_valid;
     logic [TILE_COLS-1:0]                   act_top_valid;
-    logic [TILE_COLS * ELEM_WIDTH - 1 : 0] act_top;
+    logic [TILE_COLS * MAX_ELEM_WIDTH - 1 : 0] act_top;
     logic [TILE_COLS-1:0]                       col_valid_mask;
     logic [TILE_ROWS-1:0]                       row_valid_mask;
     logic [TILE_COLS-1:0]                       output_col_valid_mask;
@@ -171,16 +171,20 @@ module pe_ctrl #(
     logic                     cmd_decode_busy;
     logic [ACT_ADDR_WIDTH-1:0] tiling_psum_base_row;
 
-    // 开始一个新 weight block 时，先把队头描述锁存下来，后面整块都使用本地寄存器。
+
+    assign cmd_accept = start_i && (cmd_pending_count != 2'd2);
+    // 命令余额计数：记录当前模块内部还有几条命令没有完全走完。
+    // 这里按“命令被接受 +1，act/psum 队列弹出当前命令最后一块 -1”来统计，最多挂两条。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            weight_rs2       <= '0;
-            weight_base_addr <= '0;
-            weight_k_rows    <= '0;
-        end else if (weight_pop) begin
-            weight_rs2       <= tiling_rs2;
-            weight_base_addr <= tiling_weight_base_addr;
-            weight_k_rows    <= tiling_weight_k_rows;
+            cmd_pending_count <= 2'd0;
+        end else begin
+            case ({cmd_accept, cmd_retire})
+                2'b10: cmd_pending_count <= cmd_pending_count + 2'd1;
+                2'b01: cmd_pending_count <= cmd_pending_count - 2'd1;
+                default: begin
+                end
+            endcase
         end
     end
 
@@ -236,6 +240,19 @@ module pe_ctrl #(
         .fill_busy_o       ( cmd_decode_busy            )
     );
 
+    // 开始一个新 weight block 时，先把队头描述锁存下来，后面整块都使用本地寄存器。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            weight_rs2       <= '0;
+            weight_base_addr <= '0;
+            weight_k_rows    <= '0;
+        end else if (weight_pop) begin
+            weight_rs2       <= tiling_rs2;
+            weight_base_addr <= tiling_weight_base_addr;
+            weight_k_rows    <= tiling_weight_k_rows;
+        end
+    end
+
     // `StreamPreloadWeight` 表示当前块计算和下一块装权同时进行。
     // 这两个子过程不一定同拍结束，因此这里分别记住谁已经先完成。
 
@@ -278,23 +295,7 @@ module pe_ctrl #(
                            tiling_weight_empty);
 
     assign stream_pop = enter_stream || start_stream_preload;
-    assign cmd_accept = start_i && (cmd_pending_count != 2'd2);
     assign cmd_retire = stream_pop && tiling_act_psum_last;
-
-    // 命令余额计数：记录当前模块内部还有几条命令没有完全走完。
-    // 这里按“命令被接受 +1，act/psum 队列弹出当前命令最后一块 -1”来统计，最多挂两条。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            cmd_pending_count <= 2'd0;
-        end else begin
-            case ({cmd_accept, cmd_retire})
-                2'b10: cmd_pending_count <= cmd_pending_count + 2'd1;
-                2'b01: cmd_pending_count <= cmd_pending_count - 2'd1;
-                default: begin
-                end
-            endcase
-        end
-    end
 
     assign cmd_busy_o = (cmd_pending_count == 2'd2) || cmd_decode_busy;
 
@@ -426,7 +427,7 @@ module pe_ctrl #(
     end
 
     pe_array #(
-        .ELEM_WIDTH     ( ELEM_WIDTH ),
+        .MAX_ELEM_WIDTH ( MAX_ELEM_WIDTH ),
         .PE_ACC_WIDTH   ( PE_ACC_WIDTH  ),   // 32个32bit数据累加。保留37位结果即可不溢出
         .TILE_COLS      ( TILE_COLS  ),
         .TILE_ROWS      ( TILE_ROWS  )

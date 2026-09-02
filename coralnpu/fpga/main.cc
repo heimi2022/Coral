@@ -14,6 +14,7 @@
 
 #include <iostream>
 
+#include "verilated.h"
 #include "verilated_toplevel.h"
 #include "verilator_memutil.h"
 #include "verilator_sim_ctrl.h"
@@ -25,6 +26,8 @@ constexpr bool highmem = false;
 #endif
 
 int main(int argc, char **argv) {
+  // Match the Verilated model to the host's available hardware threads.
+  Verilated::threadContextp()->threads(12);
   chip_verilator top;
   VerilatorMemUtil memutil;
   VerilatorSimCtrl &simctrl = VerilatorSimCtrl::GetInstance();

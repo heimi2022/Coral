@@ -1,0 +1,11 @@
+{
+  "flags": "-I NPU/1-RTL -DVLEN_128",
+  "build": "NPU/1-RTL/RvvCoreMiniAxiJtagTop.sv",
+  "index": [
+    {
+      "dirs": [
+        "NPU/1-RTL"
+      ]
+    }
+  ]
+}

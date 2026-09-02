@@ -4,6 +4,7 @@ import chisel3._
 import chisel3.util._
 import chisel3.util.HasBlackBoxResource
 import coralnpu.Parameters
+import bus.AxiMasterIO
 class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResource {
   override def desiredName: String = "MatrixCore"
 
@@ -50,6 +51,37 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val dmem_rvalid_i = Input(Bool())
     val dmem_rdata_i = Input(UInt(p.axi2DataBits.W))
 
+    // Dedicated 256-bit AXI master used by MatrixDma for DDR accesses.
+    val m_axi_arvalid_o = Output(Bool())
+    val m_axi_arready_i = Input(Bool())
+    val m_axi_arid_o = Output(UInt(1.W))
+    val m_axi_araddr_o = Output(UInt(32.W))
+    val m_axi_arlen_o = Output(UInt(8.W))
+    val m_axi_arsize_o = Output(UInt(3.W))
+    val m_axi_arburst_o = Output(UInt(2.W))
+    val m_axi_rvalid_i = Input(Bool())
+    val m_axi_rready_o = Output(Bool())
+    val m_axi_rid_i = Input(UInt(1.W))
+    val m_axi_rdata_i = Input(UInt(256.W))
+    val m_axi_rresp_i = Input(UInt(2.W))
+    val m_axi_rlast_i = Input(Bool())
+    val m_axi_awvalid_o = Output(Bool())
+    val m_axi_awready_i = Input(Bool())
+    val m_axi_awid_o = Output(UInt(1.W))
+    val m_axi_awaddr_o = Output(UInt(32.W))
+    val m_axi_awlen_o = Output(UInt(8.W))
+    val m_axi_awsize_o = Output(UInt(3.W))
+    val m_axi_awburst_o = Output(UInt(2.W))
+    val m_axi_wvalid_o = Output(Bool())
+    val m_axi_wready_i = Input(Bool())
+    val m_axi_wdata_o = Output(UInt(256.W))
+    val m_axi_wstrb_o = Output(UInt(32.W))
+    val m_axi_wlast_o = Output(Bool())
+    val m_axi_bvalid_i = Input(Bool())
+    val m_axi_bready_o = Output(Bool())
+    val m_axi_bid_i = Input(UInt(1.W))
+    val m_axi_bresp_i = Input(UInt(2.W))
+
     val tile_dbg_wr_en_i = Input(Bool())
     val tile_dbg_wr_reg_i = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
     val tile_dbg_wr_data_i = Input(UInt(p.matrixTlen.W))
@@ -81,6 +113,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   val io = IO(new Bundle {
     val core = new MatrixCoreIO(p)
     val dmem = new MatrixMemDirectIO(p)
+    val axi = new AxiMasterIO(32, 256, 1)
   })
 
   val matrixCore = Module(new MatrixCoreBlackBox(p))
@@ -144,4 +177,50 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.dmem_busy_i := io.dmem.busy
   matrixCore.io.dmem_rvalid_i := io.dmem.rvalid
   matrixCore.io.dmem_rdata_i := io.dmem.rdata
+
+  // Keep the matrix DMA as a separate 256-bit AXI master.  The scalar/RVV
+  // master may use a different width and is arbitrated elsewhere.
+  io.axi.write.addr.valid := matrixCore.io.m_axi_awvalid_o
+  io.axi.write.addr.bits.addr := matrixCore.io.m_axi_awaddr_o
+  io.axi.write.addr.bits.prot := 0.U
+  io.axi.write.addr.bits.id := matrixCore.io.m_axi_awid_o
+  io.axi.write.addr.bits.len := matrixCore.io.m_axi_awlen_o
+  io.axi.write.addr.bits.size := matrixCore.io.m_axi_awsize_o
+  io.axi.write.addr.bits.burst := matrixCore.io.m_axi_awburst_o
+  io.axi.write.addr.bits.lock := 0.U
+  io.axi.write.addr.bits.cache := 0.U
+  io.axi.write.addr.bits.qos := 0.U
+  io.axi.write.addr.bits.region := 0.U
+  matrixCore.io.m_axi_awready_i := io.axi.write.addr.ready
+
+  io.axi.write.data.valid := matrixCore.io.m_axi_wvalid_o
+  io.axi.write.data.bits.data := matrixCore.io.m_axi_wdata_o
+  io.axi.write.data.bits.strb := matrixCore.io.m_axi_wstrb_o
+  io.axi.write.data.bits.last := matrixCore.io.m_axi_wlast_o
+  matrixCore.io.m_axi_wready_i := io.axi.write.data.ready
+
+  io.axi.write.resp.valid := matrixCore.io.m_axi_bvalid_i
+  io.axi.write.resp.bits.id := matrixCore.io.m_axi_bid_i
+  io.axi.write.resp.bits.resp := matrixCore.io.m_axi_bresp_i
+  matrixCore.io.m_axi_bready_o := io.axi.write.resp.ready
+
+  io.axi.read.addr.valid := matrixCore.io.m_axi_arvalid_o
+  io.axi.read.addr.bits.addr := matrixCore.io.m_axi_araddr_o
+  io.axi.read.addr.bits.prot := 0.U
+  io.axi.read.addr.bits.id := matrixCore.io.m_axi_arid_o
+  io.axi.read.addr.bits.len := matrixCore.io.m_axi_arlen_o
+  io.axi.read.addr.bits.size := matrixCore.io.m_axi_arsize_o
+  io.axi.read.addr.bits.burst := matrixCore.io.m_axi_arburst_o
+  io.axi.read.addr.bits.lock := 0.U
+  io.axi.read.addr.bits.cache := 0.U
+  io.axi.read.addr.bits.qos := 0.U
+  io.axi.read.addr.bits.region := 0.U
+  matrixCore.io.m_axi_arready_i := io.axi.read.addr.ready
+
+  io.axi.read.data.valid := matrixCore.io.m_axi_rvalid_i
+  io.axi.read.data.bits.data := matrixCore.io.m_axi_rdata_i
+  io.axi.read.data.bits.id := matrixCore.io.m_axi_rid_i
+  io.axi.read.data.bits.resp := matrixCore.io.m_axi_rresp_i
+  io.axi.read.data.bits.last := matrixCore.io.m_axi_rlast_i
+  matrixCore.io.m_axi_rready_o := io.axi.read.data.ready
 }

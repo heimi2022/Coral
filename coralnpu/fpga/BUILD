@@ -103,6 +103,13 @@ coralnpu_v2_binary(
 )
 
 coralnpu_v2_binary(
+    name = "jtag_uart_hello",
+    srcs = ["sw/jtag_uart_hello.cc"],
+    copts = ["-DCLOCK_FREQUENCY_MHZ=" + _CLOCK_FREQUENCY_MHZ],
+    deps = [":uart"],
+)
+
+coralnpu_v2_binary(
     name = "spi_test",
     srcs = ["sw/spi_test.cc"],
     copts = ["-DCLOCK_FREQUENCY_MHZ=" + _CLOCK_FREQUENCY_MHZ],
@@ -224,6 +231,42 @@ fusesoc_build(
     systems = ["com.google.coralnpu:fpga:chip_verilator:0.1"],
     target = "sim",
     verilator_options = ":verilator_options_default",
+)
+
+fusesoc_build(
+    name = "build_chip_verilator_autojtagboot",
+    srcs = CORALNPU_SOC_SRCS + [
+        "//fpga/ip/spi_dpi_master:dpi_files",
+        "//fpga/ip/display_dpi:dpi_files",
+        "//fpga/ip/gpio_dpi:dpi_files",
+        "//fpga/ip/s25fl512s_dpi:dpi_files",
+        "@lowrisc_opentitan_gh//hw:dpi_files",
+    ],
+    cores = CORALNPU_SOC_CORES + [
+        ":chip_verilator.core",
+        "//fpga/ip/i2c_master:i2c_master.core",
+        "//fpga/ip/coralnpu_chisel_subsystem_default:coralnpu_chisel_subsystem_default.core",
+        "//fpga/ip/spi_dpi_master:spi_dpi_master.core",
+        "//fpga/ip/display_dpi:display_dpi.core",
+        "//fpga/ip/gpio_dpi:gpio_dpi.core",
+        "//fpga/ip/s25fl512s_dpi:s25fl512s_dpi.core",
+        "@lowrisc_opentitan_gh//hw/dv:dpi/uartdpi/uartdpi.core",
+        "@lowrisc_opentitan_gh//hw/dv:dpi/uartdpi/uartdpi_sv.core",
+        "@lowrisc_opentitan_gh//hw/dv:dpi/jtagdpi/jtagdpi.core",
+        "@lowrisc_opentitan_gh//hw/dv:dpi/jtagdpi/jtagdpi_sv.core",
+    ],
+    flags = [
+        "--ClockFrequencyMhz=" + _CLOCK_FREQUENCY_MHZ,
+        "--AutoJtagBoot=1",
+    ],
+    make_options = ":make_options",
+    output_groups = {
+        "binary": ["com.google.coralnpu_fpga_chip_verilator_0.1/sim-verilator/Vchip_verilator"],
+    },
+    systems = ["com.google.coralnpu:fpga:chip_verilator:0.1"],
+    target = "sim",
+    verilator_options = ":verilator_options_default",
+    tags = ["manual"],
 )
 
 fusesoc_build(

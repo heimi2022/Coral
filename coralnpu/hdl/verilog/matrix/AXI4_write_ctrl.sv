@@ -3,7 +3,7 @@
 module AXI4_write_ctrl #(
     parameter integer AXI_ID_WIDTH	                    = 1             ,
     parameter integer AXI_ADDR_WIDTH	                = 32            ,
-    parameter integer AXI_DATA_WIDTH	                = 32            ,
+    parameter integer AXI_DATA_WIDTH	                = 512           ,
     parameter integer AXI_AWUSER_WIDTH	                = 0             ,
     parameter integer AXI_WUSER_WIDTH	                = 0             ,
     parameter integer AXI_BUSER_WIDTH	                = 0             ,
@@ -132,8 +132,6 @@ module AXI4_write_ctrl #(
 //Write Response (B)
     assign M_AXI_BREADY	= axi_bready;
 
-
-
 // 地址对齐
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n)
@@ -207,9 +205,9 @@ module AXI4_write_ctrl #(
     end
 
 // 数据字节数预处理
-    // 计算 剩余待传输字节数
+    
     assign w_total_byte_num = w_total_byte_num_i + w_target_slave_base_addr_i[STRB_LOG2 - 1 : 0];
-
+    // 计算 剩余待传输字节数
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n)
             byte_remain_num <= 1'b0;
@@ -320,15 +318,15 @@ module AXI4_write_ctrl #(
            
            
     // 写地址生成
-    always @(posedge clk or negedge rst_n)begin   
-        if (!rst_n)  
-            axi_awaddr <= 1'b0;  
+    always @(posedge clk or negedge rst_n)begin
+        if (!rst_n)
+            axi_awaddr <= 1'b0;
         else begin
             if(w_start_i)
-                axi_awaddr <= 1'b0;  
+                axi_awaddr <= 1'b0;
             else if (M_AXI_AWREADY && axi_awvalid)
                 axi_awaddr <= axi_awaddr + MAX_TRANSACTIONS_BYTE_NUM;    
-            else  
+            else
                 axi_awaddr <= axi_awaddr;
         end
     end
@@ -363,12 +361,14 @@ module AXI4_write_ctrl #(
 //--------------------
     assign wnext = M_AXI_WREADY & axi_wvalid;
     
-    // WVALID logic, similar to the axi_awvalid always block above
+    // AW and W are independent AXI channels.  Launch the first W beat with
+    // AWVALID; waiting for AWREADY here deadlocks frontends that only accept
+    // an address after write data is already available.
     always @(posedge clk or negedge rst_n) begin 
         if (!rst_n)
             axi_wvalid <= 1'b0;
         else begin
-            if (~axi_wvalid && M_AXI_AWREADY && axi_awvalid)
+            if (~axi_wvalid && start_single_burst_write)
                 axi_wvalid <= 1'b1;
             else if (wnext && axi_wlast)
                 axi_wvalid <= 1'b0;   
@@ -376,8 +376,7 @@ module AXI4_write_ctrl #(
                 axi_wvalid <= axi_wvalid;
         end
     end
-        
-        
+
     //WLAST generation on the MSB of a counter underflow    
     // WVALID logic, similar to the axi_awvalid always block above
     always @(posedge clk or negedge rst_n) begin 
@@ -387,7 +386,9 @@ module AXI4_write_ctrl #(
         else begin
             if(w_start_i == 1'b1)
                 axi_wlast <= 1'b0;
-            else if (((write_index == axi_awlen-1 && axi_awlen >= 1) && wnext) || (axi_awlen == 0 && M_AXI_AWREADY && axi_awvalid))
+            else if (start_single_burst_write)
+                axi_wlast <= (byte_remain_num <= AXI_STRB_WIDTH);
+            else if ((write_index == axi_awlen-1 && axi_awlen >= 1) && wnext)
                 axi_wlast <= 1'b1;
             else if (wnext)
                 axi_wlast <= 1'b0;

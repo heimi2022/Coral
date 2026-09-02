@@ -31,6 +31,7 @@ filesets:
       - com.google.coralnpu:fpga:s25fl512s_dpi:0.1
     files:
       - rtl/chip_verilator.sv
+      - rtl/CoralSpiBootMaster.sv
     file_type: systemVerilogSource
   sim_src:
     depend:
@@ -56,6 +57,11 @@ parameters:
     description: "PC reset value. 0 for ITCM, 0x10000000 for ROM boot."
     default: 0
     paramtype: vlogparam
+  AutoJtagBoot:
+    datatype: bool
+    description: Use the built-in SPI boot master instead of the SPI DPI host.
+    default: false
+    paramtype: vlogparam
 
 targets:
   default: &default_target
@@ -72,6 +78,7 @@ targets:
       - ClockFrequencyMhz
       - MemInitFile
       - BootAddr
+      - AutoJtagBoot
     tools:
       verilator:
         mode: cc
@@ -81,5 +88,5 @@ targets:
           - '-CFLAGS "-DTOPLEVEL_NAME=chip_verilator -std=c++17 -Wall -DVM_TRACE_FMT_FST"'
           - '-LDFLAGS "-lelf -lutil"'
           - '-Wall'
-          - '--threads 16'
+          - '--threads 12'
           - '-Wno-fatal'

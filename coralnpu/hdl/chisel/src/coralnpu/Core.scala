@@ -15,6 +15,7 @@
 package coralnpu
 
 import chisel3._
+import bus.AxiMasterIO
 
 import java.io.{File, FileOutputStream}
 import java.util.zip._
@@ -55,6 +56,8 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
 
         // matrix direct memory path
         val matrixMem = Option.when(p.enableMatrix)(new MatrixMemDirectIO(p))
+        // Dedicated 256-bit AXI master for direct matrix-register DMA.
+        val matrixAxi = Option.when(p.enableMatrix)(new AxiMasterIO(32, 256, 1))
 
         val iflush = new IFlushIO(p)
         val dflush = new DFlushIO(p)
@@ -76,6 +79,7 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
         matrixCore.get.io.dmem.busy := io.matrixMem.get.busy
         matrixCore.get.io.dmem.rvalid := io.matrixMem.get.rvalid
         matrixCore.get.io.dmem.rdata := io.matrixMem.get.rdata
+        io.matrixAxi.get <> matrixCore.get.io.axi
     }
 
     // ---------------------------------------------------------------------------

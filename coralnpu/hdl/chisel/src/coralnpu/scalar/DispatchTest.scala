@@ -6,6 +6,7 @@ import org.scalatest.freespec.AnyFreeSpec
 
 class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
   val p = new Parameters
+  p.enableMatrix = true
 
   class Tester extends Module {
     val io = IO(new Bundle {
@@ -48,6 +49,8 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.retirement_buffer_trap_pending := false.B
     dispatch.io.single_step := false.B
     dispatch.io.debug_mode := false.B
+    dispatch.io.matrix.get.ready := true.B
+    dispatch.io.matrixMem.get.ready := true.B
 
     for (i <- 0 until p.instructionLanes) {
       dispatch.io.inst(i).valid := false.B

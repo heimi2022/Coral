@@ -15,7 +15,8 @@
 module chip_verilator
     #(parameter MemInitFile = "",
       parameter int ClockFrequencyMhz = 80,
-      parameter int BootAddr = 0)
+      parameter int BootAddr = 0,
+      parameter bit AutoJtagBoot = 1'b0)
     (input clk_i,
      input rst_ni,
      input prim_mubi_pkg::mubi4_t scanmode_i,
@@ -23,15 +24,76 @@ module chip_verilator
      output top_pkg::uart_sideband_o_t[1 : 0] uart_sideband_o);
 
   logic sck, csb, mosi, miso;
+  logic auto_boot_active, auto_boot_done, auto_boot_error;
+  logic [7:0] auto_boot_status, auto_boot_status_seen;
+  logic [3:0] auto_boot_state, auto_boot_state_seen;
+  logic [2:0] auto_boot_operation, auto_boot_operation_seen;
+  logic auto_boot_error_seen;
 
-  spi_dpi_master i_spi_dpi_master (
-    .clk_i(clk_i),
-    .rst_ni(rst_ni),
-    .sck_o(sck),
-    .csb_o(csb),
-    .mosi_o(mosi),
-    .miso_i(miso)
-  );
+  generate
+    if (AutoJtagBoot) begin : g_auto_jtag_boot
+      CoralSpiBootMaster #(
+        .BOOT_STUB_ADDR(BootAddr)
+      ) i_spi_boot_master (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .spi_miso_i(miso),
+        .spi_clk_o(sck),
+        .spi_csb_o(csb),
+        .spi_mosi_o(mosi),
+        .boot_active_o(auto_boot_active),
+        .boot_done_o(auto_boot_done),
+        .boot_error_o(auto_boot_error),
+        .boot_status_o(auto_boot_status),
+        .boot_state_o(auto_boot_state),
+        .boot_operation_o(auto_boot_operation)
+      );
+    end else begin : g_spi_dpi_master
+      spi_dpi_master i_spi_dpi_master (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .sck_o(sck),
+        .csb_o(csb),
+        .mosi_o(mosi),
+        .miso_i(miso)
+      );
+    end
+  endgenerate
+
+  always @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      auto_boot_error_seen <= 1'b0;
+      auto_boot_status_seen <= 8'hff;
+      auto_boot_state_seen <= 4'hf;
+      auto_boot_operation_seen <= 3'h7;
+    end else begin
+      if (auto_boot_error && !auto_boot_error_seen) begin
+        $display("SPI auto boot failed");
+        $fflush;
+        auto_boot_error_seen <= 1'b1;
+      end
+      if (auto_boot_status != auto_boot_status_seen) begin
+        $display("SPI auto boot write status: 0x%02x", auto_boot_status);
+        $fflush;
+        auto_boot_status_seen <= auto_boot_status;
+      end
+      if ((auto_boot_state != auto_boot_state_seen) ||
+          (auto_boot_operation != auto_boot_operation_seen)) begin
+        $display("SPI auto boot state=%0d operation=%0d", auto_boot_state,
+                 auto_boot_operation);
+        $fflush;
+        auto_boot_state_seen <= auto_boot_state;
+        auto_boot_operation_seen <= auto_boot_operation;
+      end
+    end
+  end
+
+  // Event-based logging does not require another SoC clock edge after the
+  // release command, which is important while the core enters its WFI stub.
+  always @(posedge auto_boot_done) begin
+    $display("SPI auto boot completed");
+    $fflush;
+  end
 
   logic spim_sclk, spim_csb, spim_mosi, spim_miso;
 
