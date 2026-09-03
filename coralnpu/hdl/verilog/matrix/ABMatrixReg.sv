@@ -9,8 +9,8 @@
 // SRAM 行地址等于逻辑行号除以 2，即 row[5:1]。
 //
 // 两个读口均为一拍延迟；单端口冲突的优先级为：DMA 写 > rd0 > rd1。
-// rd0 固定读取指定的一个 bank 的一行，输出低 32B 有效。
-// rd1 支持两种模式：单 bank 32B 读，或同列双 bank 64B 读。
+// rd0 读取指定逻辑行的一个 32B 半行，col=0 选择低 32B，col=1 选择高 32B。
+// rd1 支持两种模式：单逻辑行 32B 读，或同一列的相邻两行 64B 读。
 module ABMatrixReg (
     input  logic         clk,
     input  logic         rst_n,
@@ -22,90 +22,71 @@ module ABMatrixReg (
     input  logic [5:0]   dma_wr_row_i,
     input  logic [511:0] dma_wr_data_i,
 
-    // rd0：固定单 bank 读，rd0_bank_i 选择 bank0~3。
+    // rd0：读取一个逻辑行的 32B 半行。
+    // rd0_addr_i[0] 决定偶数/奇数逻辑行，rd0_addr_i[5:1] 是 SRAM 地址。
     input  logic         rd0_en_i,
     input  logic [1:0]   rd0_reg_i,
-    input  logic [1:0]   rd0_bank_i,
-    input  logic [4:0]   rd0_addr_i,
+    input  logic         rd0_col_i,
+    input  logic [5:0]   rd0_addr_i,
     output logic         rd0_valid_o,
     output logic [255:0] rd0_data_o,
 
-    // rd1：mode=0 时 rd1_bank_i 选择 bank0~3；mode=1 时 rd1_col_i 选择：
-    // 0=bank0+bank2，1=bank1+bank3。
+    // rd1_col_i 选择半行：0=bank0/2，1=bank1/3。
+    // mode=0 读一个逻辑行；mode=1 同时读输入地址对应的偶数行和奇数行。
     input  logic         rd1_en_i,
     input  logic [1:0]   rd1_reg_i,
     input  logic         rd1_mode_i,
-    input  logic [1:0]   rd1_bank_i,
     input  logic         rd1_col_i,
-    input  logic [4:0]   rd1_addr_i,
+    input  logic [5:0]   rd1_addr_i,
     output logic         rd1_valid_o,
-    output logic [511:0] rd1_data_o
+    output logic [255:0] rd1_data1_o,
+    output logic [255:0] rd1_data2_o
 );
 
-    localparam int AB_REG_COUNT = 4;
     localparam int BANK_COUNT   = 4;
 
     // bank_* 的第一维选择 4 个 AB 寄存器，第二维选择该寄存器中的 4 个 bank。
-    logic [255:0] bank_q    [0:AB_REG_COUNT-1][0:BANK_COUNT-1];
-    logic         bank_cen  [0:AB_REG_COUNT-1][0:BANK_COUNT-1];
-    logic         bank_wen  [0:AB_REG_COUNT-1][0:BANK_COUNT-1];
-    logic [4:0]   bank_addr [0:AB_REG_COUNT-1][0:BANK_COUNT-1];
-    logic [255:0] bank_d    [0:AB_REG_COUNT-1][0:BANK_COUNT-1];
+    logic [255:0] bank_q    [0:3][0:BANK_COUNT-1];
+    logic         bank_cen  [0:3][0:BANK_COUNT-1];
+    logic         bank_wen  [0:3][0:BANK_COUNT-1];
+    logic [4:0]   bank_addr [0:3][0:BANK_COUNT-1];
+    logic [255:0] bank_d    [0:3][0:BANK_COUNT-1];
 
     logic         rd0_accept_w;
     logic         rd1_accept_w;
     logic         rd0_dma_conflict_w;
     logic         rd1_dma_conflict_w;
     logic         rd01_conflict_w;
-    logic [3:0]   dma_bank_mask_w;
-    logic [3:0]   rd0_bank_mask_w;
-    logic [3:0]   rd1_bank_mask_w;
+    logic [1:0]   rd0_bank_w;
+    logic [1:0]   rd1_data1_bank_w;
+    logic [1:0]   rd1_data2_bank_w;
     logic [1:0]   rd0_reg_q;
     logic [1:0]   rd0_bank_q;
     logic [1:0]   rd1_reg_q;
     logic         rd1_mode_q;
-    logic [1:0]   rd1_bank_q;
-    logic         rd1_col_q;
+    logic [1:0]   rd1_data1_bank_q;
+    logic [1:0]   rd1_data2_bank_q;
 
     integer reg_idx;
     integer bank_idx;
 
-    // 将读模式转换为物理 bank 使能掩码。mode=1 选择同一列的两个 bank。
-    function automatic [3:0] read_bank_mask;
-        input       mode;
-        input [1:0] bank;
-        input       col;
-        begin
-            if (mode) begin
-                read_bank_mask = col ? 4'b1010 : 4'b0101;
-            end else begin
-                read_bank_mask = 4'b0000;
-                read_bank_mask[bank] = 1'b1;
-            end
-        end
-    endfunction
-
-    // DMA 根据逻辑行的奇偶一次占用一个 bank 对。
-    assign dma_bank_mask_w = dma_wr_row_i[0] ? 4'b1100 : 4'b0011;
-    assign rd0_bank_mask_w = read_bank_mask(1'b0, rd0_bank_i, 1'b0);
-    assign rd1_bank_mask_w = read_bank_mask(rd1_mode_i, rd1_bank_i, rd1_col_i);
+    // bank[1] 选择逻辑行奇偶，bank[0] 选择该行的低/高 32B。
+    assign rd0_bank_w       = {rd0_addr_i[0], rd0_col_i};
+    assign rd1_data1_bank_w = rd1_mode_i ? {1'b0, rd1_col_i} :
+                                           {rd1_addr_i[0], rd1_col_i};
+    assign rd1_data2_bank_w = {1'b1, rd1_col_i};
 
     // 同一个物理 bank 是单端口，任何地址上的读写都不能同拍发生。
-    assign rd0_dma_conflict_w = dma_wr_en_i &&
-                                (dma_wr_reg_i == rd0_reg_i) &&
-                                (|(dma_bank_mask_w & rd0_bank_mask_w));
-    assign rd1_dma_conflict_w = dma_wr_en_i &&
-                                (dma_wr_reg_i == rd1_reg_i) &&
-                                (|(dma_bank_mask_w & rd1_bank_mask_w));
-    assign rd01_conflict_w = rd0_en_i && rd1_en_i &&
-                             (rd0_reg_i == rd1_reg_i) &&
-                             (|(rd0_bank_mask_w & rd1_bank_mask_w));
+    assign rd0_dma_conflict_w = dma_wr_en_i && (dma_wr_reg_i == rd0_reg_i);
+    assign rd1_dma_conflict_w = dma_wr_en_i && (dma_wr_reg_i == rd1_reg_i);
+    assign rd01_conflict_w = rd0_en_i && (rd0_reg_i == rd1_reg_i);
+    
     assign rd0_accept_w = rd0_en_i && !rd0_dma_conflict_w;
     assign rd1_accept_w = rd1_en_i && !rd1_dma_conflict_w && !rd01_conflict_w;
 
     always @* begin
         // 默认关闭全部 bank。CEN/WEN 均为低有效，CEN=1 表示 SRAM 空闲。
-        for (reg_idx = 0; reg_idx < AB_REG_COUNT; reg_idx = reg_idx + 1) begin
+        for (reg_idx = 0; reg_idx < 4; reg_idx = reg_idx + 1) begin
             for (bank_idx = 0; bank_idx < BANK_COUNT; bank_idx = bank_idx + 1) begin
                 bank_cen[reg_idx][bank_idx]  = 1'b1;
                 bank_wen[reg_idx][bank_idx]  = 1'b1;
@@ -128,25 +109,23 @@ module ABMatrixReg (
             bank_d[dma_wr_reg_i][dma_wr_row_i[0] ? 3 : 1]    = dma_wr_data_i[511:256];
         end
 
-        // rd0 根据模式打开一个或两个 bank，地址均为 rd0_addr_i。
+        // rd0 按逻辑地址打开一个 bank。SRAM 只接收去掉奇偶位后的地址。
         if (rd0_accept_w) begin
-            for (bank_idx = 0; bank_idx < BANK_COUNT; bank_idx = bank_idx + 1) begin
-                if (rd0_bank_mask_w[bank_idx]) begin
-                    bank_cen[rd0_reg_i][bank_idx]  = 1'b0;
-                    bank_wen[rd0_reg_i][bank_idx]  = 1'b1;
-                    bank_addr[rd0_reg_i][bank_idx] = rd0_addr_i;
-                end
-            end
+            bank_cen[rd0_reg_i][rd0_bank_w]  = 1'b0;
+            bank_wen[rd0_reg_i][rd0_bank_w]  = 1'b1;
+            bank_addr[rd0_reg_i][rd0_bank_w] = rd0_addr_i[5:1];
         end
 
-        // rd1 可使用未被 DMA 和 rd0 占用的 bank 并行读取。
+        // rd1 mode=0 读取一个逻辑行，mode=1 同时读取同一 SRAM 地址下的偶数/奇数行。
         if (rd1_accept_w) begin
-            for (bank_idx = 0; bank_idx < BANK_COUNT; bank_idx = bank_idx + 1) begin
-                if (rd1_bank_mask_w[bank_idx]) begin
-                    bank_cen[rd1_reg_i][bank_idx]  = 1'b0;
-                    bank_wen[rd1_reg_i][bank_idx]  = 1'b1;
-                    bank_addr[rd1_reg_i][bank_idx] = rd1_addr_i;
-                end
+            bank_cen[rd1_reg_i][rd1_data1_bank_w]  = 1'b0;
+            bank_wen[rd1_reg_i][rd1_data1_bank_w]  = 1'b1;
+            bank_addr[rd1_reg_i][rd1_data1_bank_w] = rd1_addr_i[5:1];
+
+            if (rd1_mode_i) begin
+                bank_cen[rd1_reg_i][rd1_data2_bank_w]  = 1'b0;
+                bank_wen[rd1_reg_i][rd1_data2_bank_w]  = 1'b1;
+                bank_addr[rd1_reg_i][rd1_data2_bank_w] = rd1_addr_i[5:1];
             end
         end
     end
@@ -154,7 +133,7 @@ module ABMatrixReg (
     genvar gen_reg_idx;
     genvar gen_bank_idx;
     generate
-        for (gen_reg_idx = 0; gen_reg_idx < AB_REG_COUNT; gen_reg_idx = gen_reg_idx + 1) begin : g_ab_reg
+        for (gen_reg_idx = 0; gen_reg_idx < 4; gen_reg_idx = gen_reg_idx + 1) begin : g_ab_reg
             for (gen_bank_idx = 0; gen_bank_idx < BANK_COUNT; gen_bank_idx = gen_bank_idx + 1) begin : g_bank
                 // 4 个寄存器 x 每个寄存器 4 个 bank，共 16 个 SRAM 宏实例。
                 sram_sp_32x32B u_sram (
@@ -177,21 +156,21 @@ module ABMatrixReg (
             rd1_valid_o      <= 1'b0;
             rd1_reg_q        <= '0;
             rd1_mode_q       <= 1'b0;
-            rd1_bank_q       <= '0;
-            rd1_col_q        <= 1'b0;
+            rd1_data1_bank_q <= '0;
+            rd1_data2_bank_q <= '0;
         end else begin
             // SRAM 为同步读，寄存器保存本次的读模式和 bank 选择，供下一拍取数。
             rd0_valid_o <= rd0_accept_w;
             rd1_valid_o <= rd1_accept_w;
             if (rd0_accept_w) begin
                 rd0_reg_q  <= rd0_reg_i;
-                rd0_bank_q <= rd0_bank_i;
+                rd0_bank_q <= rd0_bank_w;
             end
             if (rd1_accept_w) begin
-                rd1_reg_q  <= rd1_reg_i;
-                rd1_mode_q <= rd1_mode_i;
-                rd1_bank_q <= rd1_bank_i;
-                rd1_col_q  <= rd1_col_i;
+                rd1_reg_q        <= rd1_reg_i;
+                rd1_mode_q       <= rd1_mode_i;
+                rd1_data1_bank_q <= rd1_data1_bank_w;
+                rd1_data2_bank_q <= rd1_data2_bank_w;
             end
         end
     end
@@ -203,16 +182,14 @@ module ABMatrixReg (
             rd0_data_o = bank_q[rd0_reg_q][rd0_bank_q];
         end
 
-        // rd1：mode=0 的 32B 放在低位；mode=1 拼接同一列的两个 bank。
-        rd1_data_o = '0;
+        // rd1 mode=1 时，data1 输出较小的偶数逻辑行，data2 输出较大的奇数逻辑行。
+        // mode=0 时只有 data1 有效，并输出输入地址指定的逻辑行。
+        rd1_data1_o = '0;
+        rd1_data2_o = '0;
         if (rd1_valid_o) begin
-            if (rd1_mode_q) begin
-                rd1_data_o = rd1_col_q ?
-                    {bank_q[rd1_reg_q][3], bank_q[rd1_reg_q][1]} :
-                    {bank_q[rd1_reg_q][2], bank_q[rd1_reg_q][0]};
-            end else begin
-                rd1_data_o[255:0] = bank_q[rd1_reg_q][rd1_bank_q];
-            end
+            rd1_data1_o = bank_q[rd1_reg_q][rd1_data1_bank_q];
+            if (rd1_mode_q)
+                rd1_data2_o = bank_q[rd1_reg_q][rd1_data2_bank_q];
         end
     end
 

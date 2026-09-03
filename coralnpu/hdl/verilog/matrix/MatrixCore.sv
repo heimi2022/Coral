@@ -98,8 +98,8 @@ localparam [1:0] STATE_IDLE     = 2'd0;
 localparam [1:0] STATE_EXEC     = 2'd1;
 localparam [1:0] STATE_DONE     = 2'd2;
 
-localparam int MAX_M = 32;
-localparam int MAX_N = 32;
+localparam int MAX_M = 64;
+localparam int MAX_N = 64;
 localparam int MAX_K = 64;
 localparam int PE_MAX_ELEM_WIDTH = 8;
 localparam int PE_ACC_WIDTH  = 32;
@@ -130,7 +130,8 @@ localparam logic [3:0] MEM_ST_CT     = 4'd13;
 logic [1:0] state_q;
 logic [31:0] pc_q;
 logic       illegal_q;
-logic [1:0] pe_output_blocks_left_q;
+// N/K 各最多拆成两个 block，因此一条 matmul 最多产生四个输出 block。
+logic [2:0] pe_output_blocks_left_q;
 logic [2:0] pe_rs1_q;
 logic [2:0] pe_rs2_q;
 logic [2:0] pe_rd_q;
@@ -149,8 +150,8 @@ logic         dma_ab_scale_wr_en_w;
 logic         ab_rd0_valid_w;
 logic [PE_ACT_INPUT_W-1:0] ab_rd0_data_w;
 logic         ab_rd1_valid_w;
-logic [511:0] ab_rd1_data_w;
-logic [PE_WEIGHT_INPUT_W-1:0] pe_rs2_data_w;
+logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data1_w;
+logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data2_unused;
 logic         ab_scale_rd0_valid_unused;
 logic [7:0]   ab_scale_rd0_data_unused;
 logic         ab_scale_rd1_valid_unused;
@@ -169,17 +170,15 @@ logic [5:0]   pe_rs2_addr_w;
 logic         pe_rs2_read_valid_w;
 logic [2:0]   pe_rd_read_reg_w;
 logic [2:0]   pe_rd_write_reg_w;
-logic [4:0]   pe_rd_read_addr_w;
-logic [4:0]   pe_rd_write_addr_w;
+logic [5:0]   pe_rd_read_addr_w;
+logic [5:0]   pe_rd_write_addr_w;
 logic         pe_rd_read_valid_w;
 logic         pe_rd_write_valid_w;
 logic [PE_ACC_ROW_W-1:0] pe_rd_data_w;
 logic [PE_ACC_ROW_W-1:0] pe_result_data_w;
 
-logic [1:0]   pe_rs1_bank_w;
-logic [4:0]   pe_rs1_bank_addr_w;
-logic [1:0]   pe_rs2_bank_w;
-logic [4:0]   pe_rs2_bank_addr_w;
+logic         pe_rs1_col_w;
+logic         pe_rs2_col_w;
 
 logic         mem_dir_w;
 logic         mem_dst_sel_w;
@@ -233,8 +232,8 @@ end
 // pe_ctrl 对每个 K block 都会把 M 行结果写回一次。Core 在最后一个 K block
 // 的最后一行写回后结束命令，不依赖 pe_ctrl 内部保持型的 finish 信号。
 assign pe_cmd_complete_w = pe_rd_write_valid_w &&
-                           (pe_rd_write_addr_w == (pe_cfg_m_q[4:0] - 1'b1)) &&
-                           (pe_output_blocks_left_q == 2'd1);
+                           (pe_rd_write_addr_w == (pe_cfg_m_q[5:0] - 1'b1)) &&
+                           (pe_output_blocks_left_q == 3'd1);
 
 // MatrixDma 当前只实现 load，store 命令不送入 DMA。
 assign dma_mem_valid_w = mem_valid_i && !mem_dir_w &&
@@ -348,14 +347,9 @@ assign pe_rd_data_w       = '0;
 assign dbg_tile_rd_data_o = '0;
 assign dbg_acc_rd_data_o  = '0;
 
-// pe_ctrl 按 int8 数据流每拍消费 32 个元素，即每个 rs1/rs2 请求读取 32B。
-// rs1 地址的 bit5 选择 K 的前/后 32B，bit0 选择逻辑行奇偶；
-// rs2 的地址本身是 B 的逻辑行号，当前只读取每行低 32B。
-assign pe_rs1_bank_w      = {pe_rs1_addr_w[0], pe_rs1_addr_w[5]};
-assign pe_rs1_bank_addr_w = {1'b0, pe_rs1_addr_w[4:1]};
-assign pe_rs2_bank_w      = {pe_rs2_addr_w[0], 1'b0};
-assign pe_rs2_bank_addr_w = pe_rs2_addr_w[5:1];
-assign pe_rs2_data_w      = ab_rd1_data_w[PE_WEIGHT_INPUT_W-1:0];
+// pe_ctrl 根据当前 K block 直接产生 col：
+// col=0 读取逻辑行低 32B，col=1 读取逻辑行高 32B。
+// 这两个信号不能再从地址位推导，因为 ABMatrixReg 的逻辑地址和半行选择已分离。
 
 // DMA 写回目的由命令中随数据返回的 dst_sel 决定。两个寄存器文件的写使能
 // 严格互斥，避免 scale 数据同时覆盖 ABMatrixReg 中的矩阵数据。
@@ -371,18 +365,18 @@ ABMatrixReg ab_regfile (
     .dma_wr_data_i( dma_ab_wr_data_w          ),
     .rd0_en_i     ( pe_rs1_read_valid_w       ),
     .rd0_reg_i    ( pe_rs1_reg_w[1:0]         ),
-    .rd0_bank_i   ( pe_rs1_bank_w             ),
-    .rd0_addr_i   ( pe_rs1_bank_addr_w        ),
+    .rd0_col_i    ( pe_rs1_col_w              ),
+    .rd0_addr_i   ( pe_rs1_addr_w             ),
     .rd0_valid_o  ( ab_rd0_valid_w            ),
     .rd0_data_o   ( ab_rd0_data_w             ),
     .rd1_en_i     ( pe_rs2_read_valid_w       ),
     .rd1_reg_i    ( pe_rs2_reg_w[1:0]         ),
     .rd1_mode_i   ( 1'b0                      ),
-    .rd1_bank_i   ( pe_rs2_bank_w             ),
-    .rd1_col_i    ( 1'b0                      ),
-    .rd1_addr_i   ( pe_rs2_bank_addr_w        ),
+    .rd1_col_i    ( pe_rs2_col_w              ),
+    .rd1_addr_i   ( pe_rs2_addr_w             ),
     .rd1_valid_o  ( ab_rd1_valid_w            ),
-    .rd1_data_o   ( ab_rd1_data_w             )
+    .rd1_data1_o  ( ab_rd1_data1_w            ),
+    .rd1_data2_o  ( ab_rd1_data2_unused       )
 );
 
 // scale 计算通路尚未接入 PE；当前先完成 LD_AT/LD_BT 经 DMA 写入 scale SRAM。
@@ -489,11 +483,13 @@ pe_ctrl #(
     .rs1_o              ( pe_rs1_reg_w              ),
     .rs1_addr_o         ( pe_rs1_addr_w             ),
     .rs1_read_valid_o   ( pe_rs1_read_valid_w       ),
-    .rs2_data_i         ( pe_rs2_data_w             ),
+    .rs1_col_o          ( pe_rs1_col_w              ),
+    .rs2_data_i         ( ab_rd1_data1_w            ),
     .rs2_data_valid_i   ( ab_rd1_valid_w            ),
     .rs2_o              ( pe_rs2_reg_w              ),
     .rs2_addr_o         ( pe_rs2_addr_w             ),
     .rs2_read_valid_o   ( pe_rs2_read_valid_w       ),
+    .rs2_col_o          ( pe_rs2_col_w              ),
     .rd_data_i          ( pe_rd_data_w              ),
     .rd_data_valid_i    ( pe_rd_read_valid_w        ),
     .rd_read_o          ( pe_rd_read_reg_w          ),
@@ -537,7 +533,12 @@ always @(posedge clk or negedge rst_n) begin
                         state_q <= STATE_DONE;
                     end else begin
                         illegal_q <= 1'b0;
-                        pe_output_blocks_left_q <= (cfg_k_i > PE_TILE_ROWS) ? 2'd2 : 2'd1;
+                        if ((cfg_k_i > PE_TILE_ROWS) && (cfg_n_i > PE_TILE_COLS))
+                            pe_output_blocks_left_q <= 3'd4;
+                        else if ((cfg_k_i > PE_TILE_ROWS) || (cfg_n_i > PE_TILE_COLS))
+                            pe_output_blocks_left_q <= 3'd2;
+                        else
+                            pe_output_blocks_left_q <= 3'd1;
                         state_q <= STATE_EXEC;
                     end
                 end
@@ -546,12 +547,12 @@ always @(posedge clk or negedge rst_n) begin
                 // 每个 K block 都会写回 M 行；前面的 block 只递减计数，
                 // 最后一个 block 的最后一行写回后才结束整条命令。
                 if (pe_rd_write_valid_w &&
-                    (pe_rd_write_addr_w == (pe_cfg_m_q[4:0] - 1'b1))) begin
+                    (pe_rd_write_addr_w == (pe_cfg_m_q[5:0] - 1'b1))) begin
                     if (pe_cmd_complete_w) begin
                         pe_output_blocks_left_q <= '0;
                         state_q <= STATE_DONE;
                     end else begin
-                        pe_output_blocks_left_q <= pe_output_blocks_left_q - 1'b1;
+                        pe_output_blocks_left_q <= pe_output_blocks_left_q - 3'd1;
                     end
                 end
             end

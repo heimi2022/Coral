@@ -1,19 +1,12 @@
 /*
-矩阵乘法分块前端
+矩阵乘法分块前端。
 
-作用：
-1. 接收 matmul 命令，并锁存当前命令的 m / n / k 配置。
-2. 根据 m / n / k 生成 weight / act 两类任务队列。
-3. weight 队列按“块”存，每块记录 rs2、倒序读取基地址和 k 大小。
-4. act 队列按“块”存，每块记录 rs1、rd、act 起始行、m 大小、n 大小，以及是否为当前命令最后一块。
-5. psum 不再单独建 FIFO，相关输出直接由 act 队头信息组合得到。
+M 沿时间方向展开，N/K 沿阵列的列/行方向分块。当前支持 M、N、K <= 64，
+每个维度最多切成两个 tile，因此最多生成四个 block：
 
-当前约束：
-1. 暂时只支持 n <= 32，因此当前只处理单个 n tile。
-2. k 最大按 64 处理，因此最多拆成两段，每段最多 32。
-3. act 地址空间按两段处理：第一段从 0 开始，第二段从 TILE_ROWS 开始。
-4. 当 k 需要拆成两段时，会压入两块 act 描述。
-5. 是否允许接收新命令由外部控制，这里默认 `start_i` 已经是合法接收脉冲。
+    N0-K0, N0-K1, N1-K0, N1-K1
+
+weight FIFO 和 act/psum FIFO 使用相同的 block 编号，保证两类描述一一对应。
 */
 
 module matmul_tiling #(
@@ -23,200 +16,227 @@ module matmul_tiling #(
     input  logic        clk,
     input  logic        rst_n,
 
-    input  logic                                start_i,
-    input  logic [31:0]                         cfg_m_i,
-    input  logic [31:0]                         cfg_n_i,
-    input  logic [31:0]                         cfg_k_i,
-    input  logic [2:0]                          rs1_i,
-    input  logic [2:0]                          rs2_i,
-    input  logic [2:0]                          rd_i,
+    input  logic        start_i,
+    input  logic [31:0] cfg_m_i,
+    input  logic [31:0] cfg_n_i,
+    input  logic [31:0] cfg_k_i,
+    input  logic [2:0]  rs1_i,
+    input  logic [2:0]  rs2_i,
+    input  logic [2:0]  rd_i,
 
-    input  logic                                weight_pop_i,
-    output logic [2:0]                          rs2_o,
-    output logic [5:0]                          weight_base_addr_o,
-    output logic [$clog2(TILE_ROWS + 1)-1:0]    weight_k_rows_o,
-    output logic                                weight_empty_o,
+    input  logic        weight_pop_i,
+    output logic [2:0]  rs2_o,
+    output logic [5:0]  weight_base_addr_o,
+    output logic [$clog2(TILE_COLS + 1)-1:0] weight_n_rows_o,
+    output logic [$clog2(TILE_ROWS + 1)-1:0] weight_k_rows_o,
+    output logic        weight_col_o,
+    output logic        weight_empty_o,
 
-    input  logic                                stream_pop_i,
-    output logic [2:0]                          rs1_o,
-    output logic [2:0]                          rd_o,
-    output logic [$clog2(2 * TILE_ROWS)-1:0]    act_base_row_o,
-    output logic [$clog2(TILE_ROWS + 1)-1:0]    act_psum_m_rows_o,
-    output logic [$clog2(TILE_COLS + 1)-1:0]    act_psum_n_cols_o,
-    output logic                                act_psum_last_o,
-    output logic                                act_psum_empty_o,
-    output logic [$clog2(2 * TILE_ROWS)-1:0]    psum_base_row_o,
+    input  logic        stream_pop_i,
+    output logic [2:0]  rs1_o,
+    output logic [2:0]  rd_o,
+    output logic [$clog2(2 * TILE_ROWS)-1:0] act_base_row_o,
+    output logic [$clog2(2 * TILE_ROWS + 1)-1:0] act_psum_m_rows_o,
+    output logic        act_col_o,
+    output logic        act_psum_last_o,
+    output logic        act_psum_empty_o,
+    output logic [$clog2(2 * TILE_ROWS)-1:0] psum_base_row_o,
 
-    output logic                                fill_busy_o
+    output logic        fill_busy_o
 );
 
-    localparam int ACT_PSUM_ADDR_WIDTH     = $clog2(2 * TILE_ROWS);
-    localparam int ROW_CNT_WIDTH          = (TILE_ROWS <= 1) ? 1 : $clog2(TILE_ROWS + 1);
-    localparam int COL_CNT_WIDTH          = (TILE_COLS <= 1) ? 1 : $clog2(TILE_COLS + 1);
-    localparam int WEIGHT_DESC_WIDTH      = 3 + 6 + ROW_CNT_WIDTH;
-    localparam int ACT_PSUM_DESC_WIDTH    = 3 + 3 + ACT_PSUM_ADDR_WIDTH + ROW_CNT_WIDTH + COL_CNT_WIDTH + 1;
-    typedef enum logic {
-        StateIdle,
-        StateFill
-    } state_e;
+    localparam int ACT_PSUM_ADDR_WIDTH = $clog2(2 * TILE_ROWS);
+    localparam int ROW_CNT_WIDTH = (TILE_ROWS <= 1) ? 1 : $clog2(TILE_ROWS + 1);
+    localparam int COL_CNT_WIDTH = (TILE_COLS <= 1) ? 1 : $clog2(TILE_COLS + 1);
+    localparam int M_CNT_WIDTH = $clog2(2 * TILE_ROWS + 1);
 
+    // weight descriptor 固定为 22 bit：
+    // [21:19] rs2：B 矩阵寄存器号。
+    // [18:13] base_addr：当前 N block 的最后一行地址，pe_ctrl 从后向前读取。
+    // [12:7]  n_rows：当前 N block 的有效行数。
+    // [6:1]   k_rows：当前 K block 的有效行数。
+    // [0]     col：ABMatrixReg 的半行选择，0=低 32B，1=高 32B。
+    localparam int WEIGHT_DESC_WIDTH = 22;
+
+    // act/psum descriptor 固定为 15 bit：
+    // [14:12] rs1：A 矩阵寄存器号。
+    // [11:9]  rd：C/累加寄存器号。
+    // [8:2]   m_rows：M 方向的有效行数，7 bit 可表示 1~64。
+    // [1]     col：ABMatrixReg 的半行选择，0=低 32B，1=高 32B。
+    // [0]     last：是否为当前 matmul 命令的最后一个 block。
+    // 当前 N block 的有效列数已经保存在 weight descriptor 的 n_rows 字段中，
+    // 因此 act/psum descriptor 不再重复保存 n_cols。
+    localparam int ACT_PSUM_DESC_WIDTH = 15;
+
+    typedef enum logic {StateIdle, StateFill} state_e;
     state_e state, next_state;
 
-    logic                         fill_has_two_k_chunks;
-    logic [ROW_CNT_WIDTH-1:0]     fill_first_k_chunk_rows;
-    logic [ROW_CNT_WIDTH-1:0]     fill_second_k_chunk_rows;
-    logic [2:0]                   weight_queue_fill_total;
-    logic [2:0]                   act_psum_queue_fill_total;
-    logic [2:0]                   weight_queue_fill_count;
-    logic [2:0]                   act_psum_queue_fill_count;
-    logic                         weight_queue_fill_done;
-    logic                         act_psum_queue_fill_done;
-    logic                         all_queue_fill_done;
-    logic                         weight_queue_wr_en;
-    logic                         act_psum_queue_wr_en;
+    logic cfg_k_gt32;
+    logic cfg_n_gt32;
+    // block 总数减一：0 表示 1 个 block，1 表示 2 个 block，3 表示 4 个 block。
+    logic [1:0] fill_block_total;
+    // 当前正在生成的 block 索引，范围为 0~3。
+    logic [1:0] block_fill_count;
+    logic block_queue_wr_en;
+
+    logic fill_n_block_idx;
+    logic fill_k_block_idx;
+    logic [COL_CNT_WIDTH-1:0] fill_n_block_cols;
+    logic [ROW_CNT_WIDTH-1:0] fill_k_block_rows;
+    logic [ROW_CNT_WIDTH-1:0] fill_k_block_rows_first;
+    logic [ROW_CNT_WIDTH-1:0] fill_k_block_rows_second;
+    logic [COL_CNT_WIDTH-1:0] fill_n_block_cols_first;
+    logic [COL_CNT_WIDTH-1:0] fill_n_block_cols_second;
+    logic [4:0] fill_n_block_cols_m1; // 未参数化，此位宽需要 N = 32
+    logic [M_CNT_WIDTH-1:0] fill_m_rows;
+    logic [5:0] fill_weight_base_addr;
+    logic fill_weight_col;
+    logic fill_act_col;
+    logic fill_block_last;
+
     logic [WEIGHT_DESC_WIDTH-1:0] weight_queue_wr_data;
     logic [WEIGHT_DESC_WIDTH-1:0] weight_queue_rd_data;
     logic [ACT_PSUM_DESC_WIDTH-1:0] act_psum_queue_wr_data;
     logic [ACT_PSUM_DESC_WIDTH-1:0] act_psum_queue_rd_data;
-    logic [5:0]                   fill_first_weight_base_addr;
-    logic [5:0]                   fill_second_weight_base_addr;
 
-    assign fill_busy_o    = (state == StateFill);
+    assign cfg_k_gt32 = (cfg_k_i[5] && (|cfg_k_i[4:0])) || cfg_k_i[6];
+    assign cfg_n_gt32 = (cfg_n_i[5] && (|cfg_n_i[4:0])) || cfg_n_i[6];
 
-// 当前填充命令的 K 是否需要拆成两段。
-    assign fill_has_two_k_chunks = (cfg_k_i[5] && (|cfg_k_i[4:0])) || cfg_k_i[6];
+    // N 和 K 各自最多分成两个 block，因此编码后的总数减一为 0、1 或 3。
+    assign fill_block_total = (cfg_k_gt32 && cfg_n_gt32) ? 2'd3 :
+                              (cfg_k_gt32 || cfg_n_gt32) ? 2'd1 : 2'd0;
 
-    always @* begin
-        if (cfg_k_i[5] | cfg_k_i[6])
-            fill_first_k_chunk_rows = ROW_CNT_WIDTH'(TILE_ROWS);
-        else
-            fill_first_k_chunk_rows = ROW_CNT_WIDTH'(cfg_k_i[4:0]);
-    end
-
-    always @* begin
-        if (cfg_k_i[6])
-            fill_second_k_chunk_rows = ROW_CNT_WIDTH'(TILE_ROWS);
-        else
-            fill_second_k_chunk_rows = ROW_CNT_WIDTH'(cfg_k_i[4:0]);
-    end
-
-    assign all_queue_fill_done = weight_queue_fill_done && act_psum_queue_fill_done;
-
-
-
-/* 权重解码 */
-    // 当前正在填充的命令最多只需要两个 weight block。
-    assign weight_queue_fill_total = fill_has_two_k_chunks ? 3'(2) : 3'(1);
-    assign weight_queue_fill_done  = (weight_queue_fill_count == weight_queue_fill_total);
-    assign weight_queue_wr_en      = (state == StateFill) && !weight_queue_fill_done;
-
-    // weight 队列写入计数。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            weight_queue_fill_count <= '0;
+            block_fill_count <= '0;
         end else if (start_i) begin
-            weight_queue_fill_count <= '0;
-        end else if (weight_queue_wr_en) begin
-            weight_queue_fill_count <= weight_queue_fill_count + 3'(1);
+            block_fill_count <= '0;
+        end else begin
+            if (block_queue_wr_en)
+                block_fill_count <= block_fill_count + 2'd1;
         end
     end
 
-    // weight 块的地址字段按倒序读取语义保存：
-    // 1. 第 0 块保存 first_k_chunk_rows-1，表示从该块最后一行开始往回读
-    // 2. 第 1 块保存 TILE_ROWS+second_k_chunk_rows-1，表示第二块最后一行地址
-    assign fill_first_weight_base_addr  = 6'(fill_first_k_chunk_rows - ROW_CNT_WIDTH'(1));
-    assign fill_second_weight_base_addr = 6'(TILE_ROWS) + 6'(fill_second_k_chunk_rows - ROW_CNT_WIDTH'(1));
+    // 第一个 block 取低 32 个元素；第二个 block 取剩余元素。
+    // 软件需要保证 N/K 不超过 64 ！！！  否则下面逻辑有错
+    assign fill_k_block_rows_first = cfg_k_gt32 ? ROW_CNT_WIDTH'(TILE_ROWS) :
+                                                   ROW_CNT_WIDTH'(cfg_k_i);
+    assign fill_k_block_rows_second = cfg_k_i[6] ? ROW_CNT_WIDTH'(TILE_ROWS) : cfg_k_i[4:0];
+    assign fill_n_block_cols_first = cfg_n_gt32 ? COL_CNT_WIDTH'(TILE_COLS) :
+                                                   COL_CNT_WIDTH'(cfg_n_i);
+    assign fill_n_block_cols_second = cfg_n_i[6] ? COL_CNT_WIDTH'(TILE_COLS) : cfg_n_i[4:0];
+
+    // 根据已经写入 FIFO 的 block 数决定当前 block 属于 N0/N1 和 K0/K1。
+    // 四个 block 的固定顺序是：N0-K0、N0-K1、N1-K0、N1-K1。
+    always @* begin
+        fill_n_block_idx = 1'b0;
+        fill_k_block_idx = 1'b0;
+        if (cfg_k_gt32 && cfg_n_gt32) begin
+            case (block_fill_count)
+                2'd0: begin
+                    fill_k_block_idx = 1'b0;
+                    fill_n_block_idx = 1'b0;
+                end
+                2'd1: begin
+                    fill_k_block_idx = 1'b1;
+                    fill_n_block_idx = 1'b0;
+                end
+                2'd2: begin
+                    fill_k_block_idx = 1'b0;
+                    fill_n_block_idx = 1'b1;
+                end
+                2'd3: begin
+                    fill_k_block_idx = 1'b1;
+                    fill_n_block_idx = 1'b1;
+                end
+            endcase
+        end else if (cfg_n_gt32) begin
+            fill_n_block_idx = block_fill_count[0];
+        end else if (cfg_k_gt32) begin
+            fill_k_block_idx = block_fill_count[0];
+        end
+    end
+
+    assign block_queue_wr_en = (state == StateFill);
+
+// 右矩阵分块逻辑
+    // A 和 B 的 K block 使用同一个 col：低 32B 对应 K0，高 32B 对应 K1。
+    assign fill_weight_col = fill_k_block_idx;
+    // 当前 block 在 N/K 方向的有效尺寸。
+    assign fill_k_block_rows = fill_k_block_idx ? fill_k_block_rows_second : fill_k_block_rows_first;
+    assign fill_n_block_cols = fill_n_block_idx ? fill_n_block_cols_second : fill_n_block_cols_first;
+
+    // 从 AB Matrix 读数据的地址 0/32 + n 行数 - 1
+    assign fill_n_block_cols_m1 = fill_n_block_cols - 6'd1;
+    assign fill_weight_base_addr = {fill_n_block_idx, fill_n_block_cols_m1};
 
     always @* begin
-        if (weight_queue_fill_count == '0)
-            weight_queue_wr_data = {rs2_i, fill_first_weight_base_addr, fill_first_k_chunk_rows};
-        else
-            weight_queue_wr_data = {rs2_i, fill_second_weight_base_addr, fill_second_k_chunk_rows};
+        weight_queue_wr_data = '0;
+        weight_queue_wr_data[0]    = fill_weight_col;
+        weight_queue_wr_data[6:1]  = fill_k_block_rows;
+        weight_queue_wr_data[12:7] = fill_n_block_cols;
+        weight_queue_wr_data[18:13] = fill_weight_base_addr;
+        weight_queue_wr_data[21:19] = rs2_i;
     end
 
     fifo #(
-        .DATA_WIDTH ( WEIGHT_DESC_WIDTH  ),
-        .DEPTH      ( 4                  )
+        .DATA_WIDTH (WEIGHT_DESC_WIDTH),
+        .DEPTH (4)
     ) u_weight_block_fifo (
-        .clk       ( clk                  ),
-        .rst_n     ( rst_n                ),
-        .wr_en_i   ( weight_queue_wr_en   ),
-        .wr_data_i ( weight_queue_wr_data ),
-        .full_o    (                      ),
-        .rd_en_i   ( weight_pop_i         ),
-        .rd_data_o ( weight_queue_rd_data ),
-        .empty_o   ( weight_empty_o       )
+        .clk (clk),
+        .rst_n (rst_n),
+        .wr_en_i (block_queue_wr_en),
+        .wr_data_i (weight_queue_wr_data),
+        .full_o (),
+        .rd_en_i (weight_pop_i),
+        .rd_data_o (weight_queue_rd_data),
+        .empty_o (weight_empty_o)
     );
 
-    assign rs2_o              = weight_queue_rd_data[WEIGHT_DESC_WIDTH-1 -: 3];
-    assign weight_base_addr_o = weight_queue_rd_data[ROW_CNT_WIDTH+5:ROW_CNT_WIDTH];
-    assign weight_k_rows_o    = weight_queue_rd_data[ROW_CNT_WIDTH-1:0];
+    assign rs2_o = weight_queue_rd_data[21:19];
+    assign weight_base_addr_o = weight_queue_rd_data[18:13];
+    assign weight_n_rows_o = weight_queue_rd_data[12:7];
+    assign weight_k_rows_o = weight_queue_rd_data[6:1];
+    assign weight_col_o = weight_queue_rd_data[0];
 
-/* 激活/psum 解码 */
-    // act_psum 队列按块存：
-    // 1. 第 0 块从地址 0 开始
-    // 2. 第 1 块从地址 TILE_ROWS 开始
-    // 3. 每块都额外带上当前 tile 的 n 大小
-    // 4. 最低位标记这是不是当前命令最后一块
-    assign act_psum_queue_fill_total = fill_has_two_k_chunks ? 3'(2) : 3'(1);
-    assign act_psum_queue_fill_done  = (act_psum_queue_fill_count == act_psum_queue_fill_total);
-    assign act_psum_queue_wr_en      = (state == StateFill) && !act_psum_queue_fill_done;
-
+// 左矩阵分块逻辑
+    // 最后一个 block 用于通知输出侧和 MatrixCore 当前命令已经结束。
+    // 当前计数等于“总数减一”时，当前写入的就是最后一个 block。
+    assign fill_block_last = (block_fill_count == fill_block_total);
+    assign fill_act_col = fill_k_block_idx;
+    assign fill_m_rows = M_CNT_WIDTH'(cfg_m_i);
+    // 当前阶段 psum 起始地址仍固定为 0，后续接入 C 分块写回时再扩展。
     always @* begin
-        if (act_psum_queue_fill_count == '0)
-            act_psum_queue_wr_data = {rs1_i,
-                                      rd_i,
-                                      ACT_PSUM_ADDR_WIDTH'(0),
-                                      ROW_CNT_WIDTH'(cfg_m_i),
-                                      COL_CNT_WIDTH'(cfg_n_i),
-                                      !fill_has_two_k_chunks};
-        else
-            act_psum_queue_wr_data = {rs1_i,
-                                      rd_i,
-                                      ACT_PSUM_ADDR_WIDTH'(TILE_ROWS),
-                                      ROW_CNT_WIDTH'(cfg_m_i),
-                                      COL_CNT_WIDTH'(cfg_n_i),
-                                      1'b1};
-    end
-
-    // act_psum 队列写入计数。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            act_psum_queue_fill_count <= '0;
-        end else if (start_i) begin
-            act_psum_queue_fill_count <= '0;
-        end else if (act_psum_queue_wr_en) begin
-            act_psum_queue_fill_count <= act_psum_queue_fill_count + 3'(1);
-        end
+        act_psum_queue_wr_data = '0;
+        act_psum_queue_wr_data[0]     = fill_block_last;
+        act_psum_queue_wr_data[1]     = fill_act_col;
+        act_psum_queue_wr_data[8:2]   = fill_m_rows;
+        act_psum_queue_wr_data[11:9]  = rd_i;
+        act_psum_queue_wr_data[14:12] = rs1_i;
     end
 
     fifo #(
-        .DATA_WIDTH ( ACT_PSUM_DESC_WIDTH  ),
-        .DEPTH      ( 4                    )
+        .DATA_WIDTH (ACT_PSUM_DESC_WIDTH),
+        .DEPTH (4)
     ) u_act_psum_block_fifo (
-        .clk       ( clk                  ),
-        .rst_n     ( rst_n                ),
-        .wr_en_i   ( act_psum_queue_wr_en ),
-        .wr_data_i ( act_psum_queue_wr_data ),
-        .full_o    (),
-        .rd_en_i   ( stream_pop_i         ),
-        .rd_data_o ( act_psum_queue_rd_data ),
-        .empty_o   ( act_psum_empty_o     )
+        .clk (clk),
+        .rst_n (rst_n),
+        .wr_en_i (block_queue_wr_en),
+        .wr_data_i (act_psum_queue_wr_data),
+        .full_o (),
+        .rd_en_i (stream_pop_i),
+        .rd_data_o (act_psum_queue_rd_data),
+        .empty_o (act_psum_empty_o)
     );
 
-    assign rs1_o              = act_psum_queue_rd_data[ACT_PSUM_DESC_WIDTH-1 -: 3];
-    assign rd_o               = act_psum_queue_rd_data[ACT_PSUM_DESC_WIDTH-4 -: 3];
-    assign act_base_row_o     = act_psum_queue_rd_data[ACT_PSUM_ADDR_WIDTH+ROW_CNT_WIDTH+COL_CNT_WIDTH :
-                                                        ROW_CNT_WIDTH+COL_CNT_WIDTH+1];
-    assign act_psum_m_rows_o  = act_psum_queue_rd_data[ROW_CNT_WIDTH+COL_CNT_WIDTH:COL_CNT_WIDTH+1];
-    assign act_psum_n_cols_o  = act_psum_queue_rd_data[COL_CNT_WIDTH:1];
-    assign act_psum_last_o    = act_psum_queue_rd_data[0];
+    assign rs1_o = act_psum_queue_rd_data[14:12];
+    assign rd_o = act_psum_queue_rd_data[11:9];
+    assign act_base_row_o = '0;
+    assign act_psum_m_rows_o = act_psum_queue_rd_data[8:2];
+    assign act_col_o = act_psum_queue_rd_data[1];
+    assign act_psum_last_o = act_psum_queue_rd_data[0];
+    assign psum_base_row_o = '0;
 
-    // psum 不再单独缓存，直接复用 act 队头对应的 tile 信息。
-    assign psum_base_row_o   = ACT_PSUM_ADDR_WIDTH'(0);
-
-// 状态机
-    // 状态寄存器。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             state <= StateIdle;
@@ -224,25 +244,15 @@ module matmul_tiling #(
             state <= next_state;
     end
 
-    // 次态逻辑。
     always @* begin
         next_state = state;
-
         case (state)
-            StateIdle: begin
-                if (start_i)
-                    next_state = StateFill;
-            end
-
-            StateFill: begin
-                if (all_queue_fill_done)
-                    next_state = StateIdle;
-            end
-
-            default: begin
-                next_state = StateIdle;
-            end
+            StateIdle: if (start_i) next_state = StateFill;
+            StateFill: if (fill_block_last) next_state = StateIdle;
+            default: next_state = StateIdle;
         endcase
     end
+
+    assign fill_busy_o = (state == StateFill);
 
 endmodule
