@@ -19,6 +19,10 @@ __pycache__/
 !/riscv-matrix-extension-spec/spec/**
 !/riscv-matrix-extension-spec/doc/
 !/riscv-matrix-extension-spec/doc/**
+
+# External reference repository; keep it local and do not add it to this repo.
+/riscv-attached-matrix-extension/
+
 .codex
 
 /coralnpu/hdl/verilog/SIM/*

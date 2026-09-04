@@ -23,6 +23,10 @@ PE 控制模块
 1. rs1/rs2/rd 的 ready/valid 协议
 2. 输出写回和外部 SRAM / buffer 的握手
 3. n > 32、多 tile 串行等更完整的尾块处理
+
+
+只在脉动阵列最底部做了 MX 量化逻辑，由于目前MX量化分组为32个元素一组，脉动阵列大小刚好为32*32，因此这是正确的。
+后续若分组数改变，或者脉动阵列一次能容纳的K变大了(量化位宽导致等),这里逻辑需要修改
 */
 
 module pe_ctrl #(
@@ -63,6 +67,8 @@ module pe_ctrl #(
     output logic [2:0]                                  rd_write_o      ,
     output logic [5:0]                                  rd_read_addr_o  ,
     output logic [5:0]                                  rd_write_addr_o ,
+    output logic                                        rd_read_kblock_o,
+    output logic                                        rd_write_kblock_o,
     output logic                                        rd_write_valid_o,
     output logic                                        rd_read_valid_o ,
 
@@ -75,7 +81,8 @@ module pe_ctrl #(
     localparam int ROW_CNT_WIDTH          = (TILE_ROWS <= 1) ? 1 : $clog2(TILE_ROWS + 1);
     localparam int M_CNT_WIDTH            = $clog2(2 * TILE_ROWS + 1);
     localparam int COL_CNT_WIDTH          = (TILE_COLS <= 1) ? 1 : $clog2(TILE_COLS + 1);
-    localparam int OUTPUT_META_WIDTH      = 32 + 32 + 3 + 1;
+    // 输出 metadata 只保存实际需要的位宽：M、N、K block、rd 和 last。
+    localparam int OUTPUT_META_WIDTH      = M_CNT_WIDTH + COL_CNT_WIDTH + 1 + 3 + 1;
     localparam int PE_ACC_WIDTH           = 2 * MAX_ELEM_WIDTH + $clog2(TILE_ROWS);  // PE 内部累加位宽，容纳 TILE_ROWS 个乘积的和即可
 
     typedef enum logic [2:0] {
@@ -98,7 +105,6 @@ module pe_ctrl #(
     logic [2:0]                                 stream_rd;
     logic [ACT_ADDR_WIDTH-1:0]                  stream_act_base_row;
     logic                                       stream_act_col;
-    logic [ACT_ADDR_WIDTH-1:0]                  stream_psum_base_row;
     // M 可以取到 64，需要 7 位保存 64 这个计数终值。
     logic [M_CNT_WIDTH-1:0]                     stream_m_rows;
 
@@ -143,15 +149,18 @@ module pe_ctrl #(
     logic                                       output_meta_pop;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_wr_data;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_rd_data;
-    logic [31:0]                                output_cfg_m;
-    logic [31:0]                                output_cfg_n;
+    logic [M_CNT_WIDTH-1:0]                     output_cfg_m;
+    logic [COL_CNT_WIDTH-1:0]                   output_cfg_n;
+    logic                                       output_kblock;
     logic [2:0]                                 output_rd;
     logic                                       output_last;
     logic [M_CNT_WIDTH-1:0]                     rd_read_m_rows;
     logic [COL_CNT_WIDTH-1:0]                   rd_read_n_cols;
+    logic                                       rd_read_kblock;
     logic [2:0]                                 rd_read_sel;
     logic [M_CNT_WIDTH-1:0]                     rd_write_m_rows;
     logic [COL_CNT_WIDTH-1:0]                   rd_write_n_cols;
+    logic                                       rd_write_kblock;
     logic [2:0]                                 rd_write_sel;
     logic                                       matmul_finish;
     logic [M_CNT_WIDTH-1:0]                     rd_read_count;
@@ -160,11 +169,9 @@ module pe_ctrl #(
     logic [M_CNT_WIDTH-1:0]                     rd_write_count_p1;
     logic                                       output_block_head_in;
     logic [TILE_ROWS-1:0]                       output_block_head_shift;
-    logic                                       output_block_head_pre;
     logic [1:0]                                 cmd_pending_count;
     logic [COL_CNT_WIDTH-1:0]                   weight_count_p1;
     logic [M_CNT_WIDTH-1:0]                     stream_count_p1;
-    logic [COL_CNT_WIDTH-1:0]                   stream_n_cols;
     logic [2:0]                                 tiling_rs1;
     logic [2:0]                                 tiling_rs2;
     logic [2:0]                                 tiling_rd;
@@ -175,48 +182,14 @@ module pe_ctrl #(
     logic                                       tiling_weight_empty;
     logic [ACT_ADDR_WIDTH-1:0]                  tiling_act_base_row;
     logic                                       tiling_act_col;
+    logic [COL_CNT_WIDTH-1:0]                   tiling_act_psum_n_cols;
+    logic [ROW_CNT_WIDTH-1:0]                   tiling_act_psum_k_rows;
     logic [M_CNT_WIDTH-1:0]                     tiling_act_psum_m_rows;
     logic                                       tiling_act_psum_last;
     logic                                       tiling_act_psum_empty;
     logic                                       cmd_decode_busy;
-    logic [ACT_ADDR_WIDTH-1:0]                  tiling_psum_base_row;
-
 
     assign cmd_accept = start_i && (cmd_pending_count != 2'd2);
-
-    // 用分块前端生成 weight / act_psum 两类块描述。
-    matmul_tiling #(
-        .TILE_COLS ( TILE_COLS ),
-        .TILE_ROWS ( TILE_ROWS )
-    ) u_matmul_tiling (
-        .clk               ( clk                         ),
-        .rst_n             ( rst_n                       ),
-        .start_i           ( cmd_accept                  ),
-        .cfg_m_i           ( cfg_m_i                     ),
-        .cfg_n_i           ( cfg_n_i                     ),
-        .cfg_k_i           ( cfg_k_i                     ),
-        .rs1_i             ( rs1_i                       ),
-        .rs2_i             ( rs2_i                       ),
-        .rd_i              ( rd_i                        ),
-        .weight_pop_i      ( weight_pop                   ),
-        .rs2_o             ( tiling_rs2                  ),
-        .weight_base_addr_o( tiling_weight_base_addr     ),
-        .weight_n_rows_o   ( tiling_weight_n_rows         ),
-        .weight_k_rows_o   ( tiling_weight_k_rows        ),
-        .weight_col_o      ( tiling_weight_col            ),
-        .weight_empty_o    ( tiling_weight_empty         ),
-        .stream_pop_i      ( stream_pop                  ),
-        .rs1_o             ( tiling_rs1                  ),
-        .rd_o              ( tiling_rd                   ),
-        .act_base_row_o    ( tiling_act_base_row         ),
-        .act_psum_m_rows_o ( tiling_act_psum_m_rows      ),
-        .act_col_o         ( tiling_act_col               ),
-        .act_psum_last_o   ( tiling_act_psum_last        ),
-        .act_psum_empty_o  ( tiling_act_psum_empty       ),
-        .psum_base_row_o   (),
-        .fill_busy_o       ( cmd_decode_busy            )
-    );
-    
     assign cmd_retire = stream_pop && tiling_act_psum_last;
     // 命令余额计数：记录当前模块内部还有几条命令没有完全走完。
     // 这里按“命令被接受 +1，act/psum 队列弹出当前命令最后一块 -1”来统计，最多挂两条。
@@ -233,14 +206,47 @@ module pe_ctrl #(
         end
     end
 
+    // 用分块前端生成 weight / act_psum 两类块描述。
+    matmul_tiling #(
+        .TILE_COLS ( TILE_COLS ),
+        .TILE_ROWS ( TILE_ROWS )
+    ) u_matmul_tiling (
+        .clk               ( clk                         ),
+        .rst_n             ( rst_n                       ),
+        .start_i           ( cmd_accept                  ),
+        .cfg_m_i           ( cfg_m_i                     ),
+        .cfg_n_i           ( cfg_n_i                     ),
+        .cfg_k_i           ( cfg_k_i                     ),
+        .rs1_i             ( rs1_i                       ),
+        .rs2_i             ( rs2_i                       ),
+        .rd_i              ( rd_i                        ),
+        .weight_pop_i      ( weight_pop                  ),
+        .rs2_o             ( tiling_rs2                  ),
+        .weight_base_addr_o( tiling_weight_base_addr     ),
+        .weight_n_rows_o   ( tiling_weight_n_rows        ),
+        .weight_k_rows_o   ( tiling_weight_k_rows        ),
+        .weight_col_o      ( tiling_weight_col           ),
+        .weight_empty_o    ( tiling_weight_empty         ),
+        .stream_pop_i      ( stream_pop                  ),
+        .rs1_o             ( tiling_rs1                  ),
+        .rd_o              ( tiling_rd                   ),
+        .act_base_row_o    ( tiling_act_base_row         ),
+        .act_psum_m_rows_o ( tiling_act_psum_m_rows      ),
+        .act_psum_k_rows_o ( tiling_act_psum_k_rows      ),
+        .act_psum_n_cols_o ( tiling_act_psum_n_cols      ),
+        .act_col_o         ( tiling_act_col              ),
+        .act_psum_last_o   ( tiling_act_psum_last        ),
+        .act_psum_empty_o  ( tiling_act_psum_empty       ),
+        .fill_busy_o       ( cmd_decode_busy             )
+    );
+
     // 开始一个新 act/psum block 时，同样先锁存队头描述。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stream_rs1          <= '0;
             stream_rd           <= '0;
             stream_act_base_row <= '0;
-            stream_act_col      <= 1'b0;
-            stream_psum_base_row<= '0;
+            stream_act_col      <= '0;
             stream_m_rows       <= '0;
             active_n_cols       <= '0;
             active_k_rows       <= '0;
@@ -248,27 +254,19 @@ module pe_ctrl #(
             stream_rs1          <= tiling_rs1;
             stream_rd           <= tiling_rd;
             stream_act_base_row <= tiling_act_base_row;
-            stream_act_col      <= tiling_act_col;
-            stream_psum_base_row<= tiling_psum_base_row;
             stream_m_rows       <= tiling_act_psum_m_rows;
-            // N block 的有效列数只在 weight descriptor 中保存一次。
-            // 预装下一块时，weight_pop 与 stream_pop 同拍发生，
-            // 因此直接使用 FIFO 当前队头的 tiling_weight_n_rows。
-            active_n_cols       <= weight_pop ? tiling_weight_n_rows : weight_n_rows;
-            // 进入下一个 stream block 的同一拍可能也会 pop 下一块权重。
-            // 此时应使用 FIFO 中的下一块描述，而不是上一块已锁存的值。
-            active_k_rows       <= weight_pop ? tiling_weight_k_rows : weight_k_rows;
+            stream_act_col      <= tiling_act_col;
+            active_n_cols       <= tiling_act_psum_n_cols;
+            active_k_rows       <= tiling_act_psum_k_rows;
         end
     end
-
-
 
     // 开始一个新 weight block 时，先把队头描述锁存下来，后面整块都使用本地寄存器。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             weight_rs2       <= '0;
             weight_base_addr <= '0;
-            weight_col       <= 1'b0;
+            weight_col       <= '0;
             weight_n_rows    <= '0;
             weight_k_rows    <= '0;
         end else if (weight_pop) begin
@@ -281,10 +279,8 @@ module pe_ctrl #(
     end
 
     // `StreamPreloadWeight` 表示当前块计算和下一块装权同时进行。
-    // 这两个子过程不一定同拍结束，因此这里分别记住谁已经先完成。
-
-    assign start_stream_preload = ((state == LoadWeight) && weight_read_last &&
-                                   !tiling_weight_empty) ||
+    // 开始计算当前 block，同时预装载下一个 weight block
+    assign start_stream_preload = ((state == LoadWeight) && weight_read_last && !tiling_weight_empty) ||
                                   ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
                                    !tiling_weight_empty);
 
@@ -303,13 +299,11 @@ module pe_ctrl #(
         end
     end
 
-    assign weight_done_now      = weight_overlap_done || (weight_read_last);
-    assign stream_done_now      = (stream_overlap_done) || (stream_last);
+    assign weight_done_now      = weight_overlap_done || weight_read_last;
+    assign stream_done_now      = stream_overlap_done || stream_last;
 
     assign weight_load_active   = (state == LoadWeight) ||
                                   ((state == StreamPreloadWeight) && !weight_overlap_done);
-    
-
 
     assign enter_load_weight = ((state == Idle) && !tiling_weight_empty) ||
                                ((state == Stream) && stream_last && !tiling_weight_empty);
@@ -322,11 +316,6 @@ module pe_ctrl #(
                            tiling_weight_empty);
 
     assign stream_pop = enter_stream || start_stream_preload;
-
-    // 当前被弹出的 stream block 对应的 N 有效列数。
-    // 若同拍弹出了新的 weight block，使用 FIFO 当前队头的描述；
-    // 否则使用已经锁存的 weight_n_rows。
-    assign stream_n_cols = weight_pop ? tiling_weight_n_rows : weight_n_rows;
 
     assign cmd_busy_o = (cmd_pending_count == 2'd2) || cmd_decode_busy;
 
@@ -358,7 +347,7 @@ module pe_ctrl #(
 
     always @* begin
         rs2_o            = weight_rs2;
-        rs2_addr_o       = weight_base_addr - 6'(weight_count);
+        rs2_addr_o       = weight_base_addr - 6'(weight_count);   // 后续一次读出多行右矩阵，需对此做修改
         rs2_col_o        = weight_col;
         rs2_read_valid_o = weight_load_active;
     end
@@ -417,9 +406,7 @@ module pe_ctrl #(
         rs1_read_valid_o = stream_active;
     end
 
-
 /* 激活输入 & 输出累加预取触发 */
-
     assign act_top_valid  = {TILE_COLS{rs1_data_valid_i}} & row_valid_mask;
     assign psum_top_valid = {TILE_COLS{rs1_data_valid_i}} & col_valid_mask;
 
@@ -481,15 +468,15 @@ module pe_ctrl #(
     );
 
 /* 输出侧 metadata */
-    // 这里按输出 block 粒度缓存一份 m / n / rd / last。
+    // 这里按输出 block 粒度缓存一份 m / n / kblock / rd / last。
     // act_psum 队列每弹出一块，就向输出侧 FIFO 压一条记录；
     // 输入侧第一个请求 beat 会打一发 block-head token，
     // 经过 TILE_ROWS 级移位后与输出 pre-valid 对齐，再把队头 metadata 读出来。
     assign output_meta_push    = stream_pop;
-    assign output_meta_pop     = output_block_head_pre;
-    // n_cols 从同一个 block 的 weight descriptor 获取，避免在两个 FIFO 中重复存储。
-    assign output_meta_wr_data = {32'(tiling_act_psum_m_rows),
-                                  32'(stream_n_cols),
+    assign output_meta_pop     = output_block_head_shift[TILE_ROWS-2];
+    assign output_meta_wr_data = {tiling_act_psum_m_rows,
+                                  tiling_act_psum_n_cols,
+                                  tiling_act_col,
                                   tiling_rd,
                                   tiling_act_psum_last};
 
@@ -502,7 +489,25 @@ module pe_ctrl #(
         end
     end
 
-    assign output_block_head_pre = output_block_head_shift[TILE_ROWS-2];
+    fifo #(
+        .DATA_WIDTH ( OUTPUT_META_WIDTH ),
+        .DEPTH      ( 4                 )
+    ) u_output_meta_fifo (
+        .clk       ( clk                ),
+        .rst_n     ( rst_n              ),
+        .wr_en_i   ( output_meta_push   ),
+        .wr_data_i ( output_meta_wr_data ),
+        .full_o    (),
+        .rd_en_i   ( output_meta_pop    ),
+        .rd_data_o ( output_meta_rd_data ),
+        .empty_o   ()
+    );
+
+    assign output_cfg_m = output_meta_rd_data[OUTPUT_META_WIDTH-1 -: M_CNT_WIDTH];
+    assign output_cfg_n = output_meta_rd_data[4 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
+    assign output_kblock = output_meta_rd_data[4];
+    assign output_rd    = output_meta_rd_data[3:1];
+    assign output_last  = output_meta_rd_data[0];
 
     // wjj : 后面可以 把输出队列中 n 抽出来单独维护，读rd时，不需要知道n 。  优化一个 n 的寄存器 
     // 检测到新输出 block 的第一个 pre-valid beat 时，读取 FIFO 队头并锁存本次写回需要的 m / n / rd / last。
@@ -510,10 +515,12 @@ module pe_ctrl #(
         if (!rst_n) begin
             rd_read_m_rows  <= '0;
             rd_read_n_cols  <= '0;
+            rd_read_kblock  <= 1'b0;
             rd_read_sel  <= '0;
         end else if (output_meta_pop) begin
-            rd_read_m_rows  <= M_CNT_WIDTH'(output_cfg_m);
-            rd_read_n_cols  <= COL_CNT_WIDTH'(output_cfg_n);
+            rd_read_m_rows  <= output_cfg_m;
+            rd_read_n_cols  <= output_cfg_n;
+            rd_read_kblock  <= output_kblock;
             rd_read_sel  <= output_rd;
         end
     end
@@ -522,12 +529,14 @@ module pe_ctrl #(
         if (!rst_n) begin
             rd_write_m_rows  <= '0;
             rd_write_n_cols  <= '0;
+            rd_write_kblock  <= 1'b0;
             rd_write_sel  <= '0;
         end
         else begin
             if(output_block_head_shift[TILE_ROWS-1]) begin
                 rd_write_m_rows     <= rd_read_m_rows;
                 rd_write_n_cols     <= rd_read_n_cols;
+                rd_write_kblock     <= rd_read_kblock;
                 rd_write_sel        <= rd_read_sel;
             end
         end  
@@ -584,11 +593,13 @@ module pe_ctrl #(
     // 1. `psum_pre_valid` 拉起时，提前读取历史 psum / C；
     // 2. `psum_valid` 拉起时，用读回数据和阵列底部结果做累加，再写回外部。
     always @* begin
-        rd_read_o       = rd_read_sel;
-        rd_read_addr_o  = rd_read_count;
+        rd_read_o        = rd_read_sel;
+        rd_read_addr_o   = rd_read_count;
+        rd_read_kblock_o = rd_read_kblock;
         rd_read_valid_o  = psum_pre_valid;
-        rd_write_o      = rd_write_sel; 
-        rd_write_addr_o = rd_write_count;
+        rd_write_o       = rd_write_sel;
+        rd_write_addr_o  = rd_write_count;
+        rd_write_kblock_o = rd_write_kblock;
         rd_write_valid_o = psum_valid;
     end
     
@@ -613,26 +624,6 @@ module pe_ctrl #(
         .sum_o    ( accum_sum_o      ),
         .carry_o  (  )
     );
-
-
-    fifo #(
-        .DATA_WIDTH ( OUTPUT_META_WIDTH ),
-        .DEPTH      ( 4                 )
-    ) u_output_meta_fifo (
-        .clk       ( clk                ),
-        .rst_n     ( rst_n              ),
-        .wr_en_i   ( output_meta_push   ),
-        .wr_data_i ( output_meta_wr_data ),
-        .full_o    (),
-        .rd_en_i   ( output_meta_pop    ),
-        .rd_data_o ( output_meta_rd_data ),
-        .empty_o   ()
-    );
-
-    assign output_cfg_m = output_meta_rd_data[OUTPUT_META_WIDTH-1 -: 32];
-    assign output_cfg_n = output_meta_rd_data[35:4];
-    assign output_rd    = output_meta_rd_data[3:1];
-    assign output_last  = output_meta_rd_data[0];
 
     // 输出侧列掩码：按输出 metadata FIFO 锁存下来的历史 n 生成，
     // 避免和当前正送入阵列的新 block 混掉。
@@ -694,6 +685,7 @@ module pe_ctrl #(
                 end
             end
 
+            // Stream 状态下如果来了右矩阵应该也支持预装载右矩阵,现在该逻辑未实现
             Stream: begin
                 if (stream_last) begin
                     if (enter_load_weight)

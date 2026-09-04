@@ -37,10 +37,11 @@ module matmul_tiling #(
     output logic [2:0]  rd_o,
     output logic [$clog2(2 * TILE_ROWS)-1:0] act_base_row_o,
     output logic [$clog2(2 * TILE_ROWS + 1)-1:0] act_psum_m_rows_o,
+    output logic [$clog2(TILE_ROWS + 1)-1:0] act_psum_k_rows_o,
+    output logic [$clog2(TILE_COLS + 1)-1:0] act_psum_n_cols_o,
     output logic        act_col_o,
     output logic        act_psum_last_o,
     output logic        act_psum_empty_o,
-    output logic [$clog2(2 * TILE_ROWS)-1:0] psum_base_row_o,
 
     output logic        fill_busy_o
 );
@@ -58,15 +59,15 @@ module matmul_tiling #(
     // [0]     col：ABMatrixReg 的半行选择，0=低 32B，1=高 32B。
     localparam int WEIGHT_DESC_WIDTH = 22;
 
-    // act/psum descriptor 固定为 15 bit：
-    // [14:12] rs1：A 矩阵寄存器号。
-    // [11:9]  rd：C/累加寄存器号。
-    // [8:2]   m_rows：M 方向的有效行数，7 bit 可表示 1~64。
+    // act/psum descriptor 固定为 27 bit：
+    // [26:24] rs1：A 矩阵寄存器号。
+    // [23:21] rd：C/累加寄存器号。
+    // [20:15] k_rows：当前 K block 的有效行数。
+    // [14:8]  m_rows：M 方向的有效行数，7 bit 可表示 1~64。
+    // [7:2]   n_cols：当前 N block 的有效列数。
     // [1]     col：ABMatrixReg 的半行选择，0=低 32B，1=高 32B。
     // [0]     last：是否为当前 matmul 命令的最后一个 block。
-    // 当前 N block 的有效列数已经保存在 weight descriptor 的 n_rows 字段中，
-    // 因此 act/psum descriptor 不再重复保存 n_cols。
-    localparam int ACT_PSUM_DESC_WIDTH = 15;
+    localparam int ACT_PSUM_DESC_WIDTH = 27;
 
     typedef enum logic {StateIdle, StateFill} state_e;
     state_e state, next_state;
@@ -208,11 +209,13 @@ module matmul_tiling #(
     // 当前阶段 psum 起始地址仍固定为 0，后续接入 C 分块写回时再扩展。
     always @* begin
         act_psum_queue_wr_data = '0;
-        act_psum_queue_wr_data[0]     = fill_block_last;
+        act_psum_queue_wr_data[20:15] = fill_k_block_rows;
+        act_psum_queue_wr_data[14:8]  = fill_m_rows;
+        act_psum_queue_wr_data[7:2]   = fill_n_block_cols;
         act_psum_queue_wr_data[1]     = fill_act_col;
-        act_psum_queue_wr_data[8:2]   = fill_m_rows;
-        act_psum_queue_wr_data[11:9]  = rd_i;
-        act_psum_queue_wr_data[14:12] = rs1_i;
+        act_psum_queue_wr_data[0]     = fill_block_last;
+        act_psum_queue_wr_data[23:21] = rd_i;
+        act_psum_queue_wr_data[26:24] = rs1_i;
     end
 
     fifo #(
@@ -229,13 +232,14 @@ module matmul_tiling #(
         .empty_o (act_psum_empty_o)
     );
 
-    assign rs1_o = act_psum_queue_rd_data[14:12];
-    assign rd_o = act_psum_queue_rd_data[11:9];
+    assign rs1_o = act_psum_queue_rd_data[26:24];
+    assign rd_o = act_psum_queue_rd_data[23:21];
     assign act_base_row_o = '0;
-    assign act_psum_m_rows_o = act_psum_queue_rd_data[8:2];
+    assign act_psum_k_rows_o = act_psum_queue_rd_data[20:15];
+    assign act_psum_m_rows_o = act_psum_queue_rd_data[14:8];
+    assign act_psum_n_cols_o = act_psum_queue_rd_data[7:2];
     assign act_col_o = act_psum_queue_rd_data[1];
     assign act_psum_last_o = act_psum_queue_rd_data[0];
-    assign psum_base_row_o = '0;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
