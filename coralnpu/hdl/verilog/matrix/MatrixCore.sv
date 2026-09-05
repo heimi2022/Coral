@@ -153,9 +153,18 @@ logic         ab_rd1_valid_w;
 logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data1_w;
 logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data2_unused;
 logic         ab_scale_rd0_valid_unused;
-logic [7:0]   ab_scale_rd0_data_unused;
+logic [255:0] ab_scale_rd0_unused;
 logic         ab_scale_rd1_valid_unused;
-logic [7:0]   ab_scale_rd1_data_unused;
+logic [255:0] ab_scale_rd1_unused;
+
+logic [2:0]   pe_rs1_scale_reg_w;
+logic [5:0]   pe_rs1_scale_addr_w;
+logic         pe_rs1_scale_kblock_w;
+logic         pe_rs1_scale_read_valid_w;
+logic [2:0]   pe_rs2_scale_reg_w;
+logic [5:0]   pe_rs2_scale_addr_w;
+logic         pe_rs2_scale_kblock_w;
+logic         pe_rs2_scale_read_valid_w;
 
 logic         pe_start_w;
 logic         pe_start_q;
@@ -292,14 +301,16 @@ always @* begin
         MEM_LD_AT: begin
             mem_dst_sel_w = 1'b1;
             mem_elem_bytes_w = 2'b00;
-            mem_rows_w    = cfg_m_i[7:0];
-            mem_cols_w    = cfg_k_i >> 5;
+            // scale 在内存中按 K block 转置存放，每行包含全部 M scale。
+            mem_rows_w    = cfg_k_i >> 5;
+            mem_cols_w    = cfg_m_i[7:0];
         end
         MEM_LD_BT: begin
             mem_dst_sel_w = 1'b1;
             mem_elem_bytes_w = 2'b00;
-            mem_rows_w    = cfg_n_i[7:0];
-            mem_cols_w    = cfg_k_i >> 5;
+            // scale 在内存中按 K block 转置存放，每行包含全部 N scale。
+            mem_rows_w    = cfg_k_i >> 5;
+            mem_cols_w    = cfg_n_i[7:0];
         end
         MEM_ST_AT: begin
             mem_dir_w  = 1'b1;
@@ -385,20 +396,22 @@ ABScaleReg ab_scale_regfile (
     .rst_n        ( rst_n                     ),
     .dma_wr_en_i  ( dma_ab_scale_wr_en_w      ),
     .dma_wr_reg_i ( dma_ab_wr_reg_w           ),
-    .dma_wr_row_i ( dma_ab_wr_row_w           ),
-    .dma_wr_data_i( dma_ab_wr_data_w[15:0]    ),
-    .rd0_en_i     ( 1'b0                      ),
-    .rd0_reg_i    ( 2'b0                      ),
-    .rd0_row_i    ( 6'b0                      ),
-    .rd0_kblock_i ( 1'b0                      ),
+    .dma_wr_kblock_i ( dma_ab_wr_row_w[0]     ),
+    .dma_wr_data_i( dma_ab_wr_data_w          ),
+    // rd0：A scale，按当前激活行读取。
+    .rd0_en_i     ( pe_rs1_scale_read_valid_w ),
+    .rd0_reg_i    ( pe_rs1_scale_reg_w[1:0]   ),
+    .rd0_row_i    ( pe_rs1_scale_addr_w[5]    ),
+    .rd0_kblock_i ( pe_rs1_scale_kblock_w     ),
     .rd0_valid_o  ( ab_scale_rd0_valid_unused ),
-    .rd0_scale_o  ( ab_scale_rd0_data_unused  ),
-    .rd1_en_i     ( 1'b0                      ),
-    .rd1_reg_i    ( 2'b0                      ),
-    .rd1_row_i    ( 6'b0                      ),
-    .rd1_kblock_i ( 1'b0                      ),
+    .rd0_scale_o  ( ab_scale_rd0_unused       ),
+    // rd1：B scale，按当前权重行读取。
+    .rd1_en_i     ( pe_rs2_scale_read_valid_w ),
+    .rd1_reg_i    ( pe_rs2_scale_reg_w[1:0]   ),
+    .rd1_row_i    ( pe_rs2_scale_addr_w[5]    ),
+    .rd1_kblock_i ( pe_rs2_scale_kblock_w     ),
     .rd1_valid_o  ( ab_scale_rd1_valid_unused ),
-    .rd1_scale_o  ( ab_scale_rd1_data_unused  )
+    .rd1_scale_o  ( ab_scale_rd1_unused       )
 );
 
 // 旧 direct-dmem 通路已被专用 AXI master 取代，暂时保留顶层端口兼容 Chisel。
@@ -484,12 +497,20 @@ pe_ctrl #(
     .rs1_addr_o         ( pe_rs1_addr_w             ),
     .rs1_read_valid_o   ( pe_rs1_read_valid_w       ),
     .rs1_col_o          ( pe_rs1_col_w              ),
+    .rs1_scale_o        ( pe_rs1_scale_reg_w        ),
+    .rs1_scale_addr_o   ( pe_rs1_scale_addr_w       ),
+    .rs1_scale_kblock_o ( pe_rs1_scale_kblock_w     ),
+    .rs1_scale_read_valid_o ( pe_rs1_scale_read_valid_w ),
     .rs2_data_i         ( ab_rd1_data1_w            ),
     .rs2_data_valid_i   ( ab_rd1_valid_w            ),
     .rs2_o              ( pe_rs2_reg_w              ),
     .rs2_addr_o         ( pe_rs2_addr_w             ),
     .rs2_read_valid_o   ( pe_rs2_read_valid_w       ),
     .rs2_col_o          ( pe_rs2_col_w              ),
+    .rs2_scale_o        ( pe_rs2_scale_reg_w        ),
+    .rs2_scale_addr_o   ( pe_rs2_scale_addr_w       ),
+    .rs2_scale_kblock_o ( pe_rs2_scale_kblock_w     ),
+    .rs2_scale_read_valid_o ( pe_rs2_scale_read_valid_w ),
     .rd_data_i          ( pe_rd_data_w              ),
     .rd_data_valid_i    ( pe_rd_read_valid_w        ),
     .rd_read_o          ( pe_rd_read_reg_w          ),

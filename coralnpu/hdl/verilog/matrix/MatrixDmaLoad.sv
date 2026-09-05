@@ -65,7 +65,7 @@ module MatrixDmaLoad #(
 
     // ------------------------------------------------------------------------
     // AB 数据/scale 寄存器写口。一次写入一个逻辑行，数据宽度固定为一个
-    // AXI beat（当前64B）；scale 接收端只使用低16bit。
+    // AXI beat（当前64B）；ABScaleReg 将 scale 数据拆成两个 256-bit bank 行。
     // ------------------------------------------------------------------------
     output logic                     ab_wr_en_o,
     output logic [REG_IDX-1:0]       ab_wr_reg_o,

@@ -53,6 +53,10 @@ module pe_ctrl #(
     output logic [5:0]                                  rs1_addr_o      ,
     output logic                                        rs1_col_o       ,
     output logic                                        rs1_read_valid_o,
+    output logic [2:0]                                  rs1_scale_o     ,
+    output logic [5:0]                                  rs1_scale_addr_o,
+    output logic                                        rs1_scale_kblock_o,
+    output logic                                        rs1_scale_read_valid_o,
 
     input  logic [TILE_ROWS * MAX_ELEM_WIDTH - 1 : 0]   rs2_data_i   ,
     input  logic                                        rs2_data_valid_i,
@@ -60,21 +64,27 @@ module pe_ctrl #(
     output logic [5:0]                                  rs2_addr_o      ,
     output logic                                        rs2_col_o       ,
     output logic                                        rs2_read_valid_o,
+    output logic [2:0]                                  rs2_scale_o     ,
+    output logic [5:0]                                  rs2_scale_addr_o,
+    output logic                                        rs2_scale_kblock_o,
+    output logic                                        rs2_scale_read_valid_o,
 
     input  logic [TILE_COLS * ACC_WIDTH - 1 : 0]        rd_data_i       ,
     input  logic                                        rd_data_valid_i ,
     output logic [2:0]                                  rd_read_o       ,
-    output logic [2:0]                                  rd_write_o      ,
     output logic [5:0]                                  rd_read_addr_o  ,
-    output logic [5:0]                                  rd_write_addr_o ,
     output logic                                        rd_read_kblock_o,
-    output logic                                        rd_write_kblock_o,
-    output logic                                        rd_write_valid_o,
     output logic                                        rd_read_valid_o ,
 
+    output logic [2:0]                                  rd_write_o      ,
+    output logic [5:0]                                  rd_write_addr_o ,
+    output logic                                        rd_write_kblock_o,
+    output logic                                        rd_write_valid_o,
+    output logic [TILE_COLS * ACC_WIDTH - 1 : 0]        pe_array_o      ,
+
     output logic                                        cmd_busy_o      ,
-    output logic                                        matmul_finish_o ,
-    output logic [TILE_COLS * ACC_WIDTH - 1 : 0]        pe_array_o                 
+    output logic                                        matmul_finish_o
+
 );
 
     localparam int ACT_ADDR_WIDTH         = $clog2(2 * TILE_ROWS);
@@ -493,12 +503,12 @@ module pe_ctrl #(
         .DATA_WIDTH ( OUTPUT_META_WIDTH ),
         .DEPTH      ( 4                 )
     ) u_output_meta_fifo (
-        .clk       ( clk                ),
-        .rst_n     ( rst_n              ),
-        .wr_en_i   ( output_meta_push   ),
+        .clk       ( clk                 ),
+        .rst_n     ( rst_n               ),
+        .wr_en_i   ( output_meta_push    ),
         .wr_data_i ( output_meta_wr_data ),
         .full_o    (),
-        .rd_en_i   ( output_meta_pop    ),
+        .rd_en_i   ( output_meta_pop     ),
         .rd_data_o ( output_meta_rd_data ),
         .empty_o   ()
     );
@@ -521,7 +531,7 @@ module pe_ctrl #(
             rd_read_m_rows  <= output_cfg_m;
             rd_read_n_cols  <= output_cfg_n;
             rd_read_kblock  <= output_kblock;
-            rd_read_sel  <= output_rd;
+            rd_read_sel     <= output_rd;
         end
     end
 
@@ -597,12 +607,30 @@ module pe_ctrl #(
         rd_read_addr_o   = rd_read_count;
         rd_read_kblock_o = rd_read_kblock;
         rd_read_valid_o  = psum_pre_valid;
+
         rd_write_o       = rd_write_sel;
         rd_write_addr_o  = rd_write_count;
         rd_write_kblock_o = rd_write_kblock;
         rd_write_valid_o = psum_valid;
     end
     
+    // A scale 与 A 数据使用完全相同的寄存器、行地址和 K block。
+    // ABScaleReg 为同步读，因此请求有效周期与 ABMatrixReg 保持一致。
+    always @* begin
+        rs1_scale_o            = stream_rs1;
+        rs1_scale_addr_o       = stream_act_base_row + ACT_ADDR_WIDTH'(stream_count);
+        rs1_scale_kblock_o     = stream_act_col;
+        rs1_scale_read_valid_o = stream_active;
+    end
+
+    // B scale 与 B 权重使用完全相同的寄存器、行地址和 K block。
+    // weight_count 的地址方向仍由权重读取逻辑统一产生。
+    always @* begin
+        rs2_scale_o            = weight_rs2;
+        rs2_scale_addr_o       = weight_base_addr - 6'(weight_count);
+        rs2_scale_kblock_o     = weight_col;
+        rs2_scale_read_valid_o = weight_load_active;
+    end
 
     // 阵列内部只保留 PE_ACC_WIDTH 位，送入尾部 48bit 累加器前再做一次符号位扩展。
     always @* begin : gen_psum_bottom_ext
