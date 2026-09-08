@@ -53,8 +53,10 @@ module pe_ctrl #(
     output logic [5:0]                                  rs1_addr_o      ,
     output logic                                        rs1_col_o       ,
     output logic                                        rs1_read_valid_o,
-    output logic [2:0]                                  rs1_scale_o     ,
-    output logic [5:0]                                  rs1_scale_addr_o,
+    input  logic [255:0]                                rs1_scale_data_i,
+    input  logic                                        rs1_scale_data_valid_i,
+    output logic [1:0]                                  rs1_scale_reg_o ,
+    output logic                                        rs1_scale_bank_o,
     output logic                                        rs1_scale_kblock_o,
     output logic                                        rs1_scale_read_valid_o,
 
@@ -64,8 +66,10 @@ module pe_ctrl #(
     output logic [5:0]                                  rs2_addr_o      ,
     output logic                                        rs2_col_o       ,
     output logic                                        rs2_read_valid_o,
-    output logic [2:0]                                  rs2_scale_o     ,
-    output logic [5:0]                                  rs2_scale_addr_o,
+    input  logic [255:0]                                rs2_scale_data_i,
+    input  logic                                        rs2_scale_data_valid_i,
+    output logic [1:0]                                  rs2_scale_reg_o ,
+    output logic                                        rs2_scale_bank_o,
     output logic                                        rs2_scale_kblock_o,
     output logic                                        rs2_scale_read_valid_o,
 
@@ -91,8 +95,10 @@ module pe_ctrl #(
     localparam int ROW_CNT_WIDTH          = (TILE_ROWS <= 1) ? 1 : $clog2(TILE_ROWS + 1);
     localparam int M_CNT_WIDTH            = $clog2(2 * TILE_ROWS + 1);
     localparam int COL_CNT_WIDTH          = (TILE_COLS <= 1) ? 1 : $clog2(TILE_COLS + 1);
-    // 输出 metadata 只保存实际需要的位宽：M、N、K block、rd 和 last。
-    localparam int OUTPUT_META_WIDTH      = M_CNT_WIDTH + COL_CNT_WIDTH + 1 + 3 + 1;
+    // 输出 metadata 保存 M、N、A scale reg、K block、rd 和 last。
+    localparam int OUTPUT_META_WIDTH      = M_CNT_WIDTH + COL_CNT_WIDTH + 2 + 1 + 3 + 1;
+    // B scale metadata 只保存 reg、N bank 和 K block。
+    localparam int B_SCALE_META_WIDTH     = 4;
     localparam int PE_ACC_WIDTH           = 2 * MAX_ELEM_WIDTH + $clog2(TILE_ROWS);  // PE 内部累加位宽，容纳 TILE_ROWS 个乘积的和即可
 
     typedef enum logic [2:0] {
@@ -140,6 +146,8 @@ module pe_ctrl #(
     logic                                       weight_load_bank_sel;
     logic                                       weight_load_active;
     logic                                       stream_active;
+    logic                                       stream_issue_active;
+    logic                                       stream_boundary_bubble_q;
     logic                                       weight_read_last;
     logic                                       weight_write_last;
     logic                                       stream_last;
@@ -159,6 +167,17 @@ module pe_ctrl #(
     logic                                       output_meta_pop;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_wr_data;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_rd_data;
+    logic [B_SCALE_META_WIDTH-1:0]              b_scale_meta_wr_data;
+    logic [B_SCALE_META_WIDTH-1:0]              b_scale_meta_rd_data;
+    logic                                       b_scale_meta_empty;
+    logic                                       b_scale_meta_pop;
+    logic [1:0]                                 output_rs1;
+    logic [1:0]                                 rd_read_rs1;
+    logic                                       a_scale_bank0_req;
+    logic                                       a_scale_bank1_req;
+    logic [255:0]                               a_scale_buffer_q;
+    logic [7:0]                                 a_scale_current_q;
+    logic [255:0]                               b_scale_data_q;
     logic [M_CNT_WIDTH-1:0]                     output_cfg_m;
     logic [COL_CNT_WIDTH-1:0]                   output_cfg_n;
     logic                                       output_kblock;
@@ -390,14 +409,32 @@ module pe_ctrl #(
     end
 
 /* 激活读取 */
+    // C Reg 为单端口 SRAM 时，m 为奇数会导致相邻 tile 的边界出现
+    // “上一 tile 写偶数行、下一 tile 读偶数行”的冲突。
+    // 在下一 tile 的首个激活读请求前插入一个周期的 bubble，
+    // 只暂停新的 rs1 读取，不影响前一个 tile 已经进入阵列的数据。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            stream_boundary_bubble_q <= 1'b0;
+        end else begin
+            if (stream_pop && stream_last && stream_m_rows[0]) begin
+                stream_boundary_bubble_q <= 1'b1;
+            end else if (stream_boundary_bubble_q) begin
+                stream_boundary_bubble_q <= 1'b0;
+            end
+        end
+    end
+
     assign stream_count_p1      = stream_count + 1'd1;
-    assign stream_last          = (stream_count_p1 == stream_m_rows);
+    assign stream_issue_active  = stream_active && !stream_boundary_bubble_q;
+    assign stream_last          = stream_issue_active &&
+                                   (stream_count_p1 == stream_m_rows);
 
     // act/psum 行计数：一块计算里每消费一行加一，到最后一行自动回零。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stream_count <= '0;
-        end else if (stream_active) begin
+        end else if (stream_issue_active) begin
             if (stream_last)
                 stream_count <= '0;
             else
@@ -413,7 +450,7 @@ module pe_ctrl #(
         rs1_o            = stream_rs1;
         rs1_addr_o       = stream_act_base_row + ACT_ADDR_WIDTH'(stream_count);
         rs1_col_o        = stream_act_col;
-        rs1_read_valid_o = stream_active;
+        rs1_read_valid_o = stream_issue_active;
     end
 
 /* 激活输入 & 输出累加预取触发 */
@@ -483,9 +520,10 @@ module pe_ctrl #(
     // 输入侧第一个请求 beat 会打一发 block-head token，
     // 经过 TILE_ROWS 级移位后与输出 pre-valid 对齐，再把队头 metadata 读出来。
     assign output_meta_push    = stream_pop;
-    assign output_meta_pop     = output_block_head_shift[TILE_ROWS-2];
+    assign output_meta_pop     = output_block_head_shift[TILE_ROWS-2];  // pre2_valid
     assign output_meta_wr_data = {tiling_act_psum_m_rows,
                                   tiling_act_psum_n_cols,
+                                  tiling_rs1[1:0],
                                   tiling_act_col,
                                   tiling_rd,
                                   tiling_act_psum_last};
@@ -513,8 +551,30 @@ module pe_ctrl #(
         .empty_o   ()
     );
 
+    // B scale 地址来自 weight descriptor。weight block 被取出时按执行顺序
+    // 保存，等对应输出 block 到达阵列底部前再读取一次完整的 32B scale。
+    assign b_scale_meta_wr_data = {tiling_rs2[1:0],
+                                   tiling_weight_base_addr[5],
+                                   tiling_weight_col};
+    assign b_scale_meta_pop = output_meta_pop;
+
+    fifo #(
+        .DATA_WIDTH ( B_SCALE_META_WIDTH ),
+        .DEPTH      ( 4                  )
+    ) u_b_scale_meta_fifo (
+        .clk       ( clk                  ),
+        .rst_n     ( rst_n                ),
+        .wr_en_i   ( weight_pop           ),
+        .wr_data_i ( b_scale_meta_wr_data ),
+        .full_o    (),
+        .rd_en_i   ( b_scale_meta_pop      ),
+        .rd_data_o ( b_scale_meta_rd_data ),
+        .empty_o   ( b_scale_meta_empty    )
+    );
+
     assign output_cfg_m = output_meta_rd_data[OUTPUT_META_WIDTH-1 -: M_CNT_WIDTH];
-    assign output_cfg_n = output_meta_rd_data[4 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
+    assign output_cfg_n = output_meta_rd_data[6 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
+    assign output_rs1   = output_meta_rd_data[6:5];
     assign output_kblock = output_meta_rd_data[4];
     assign output_rd    = output_meta_rd_data[3:1];
     assign output_last  = output_meta_rd_data[0];
@@ -525,11 +585,13 @@ module pe_ctrl #(
         if (!rst_n) begin
             rd_read_m_rows  <= '0;
             rd_read_n_cols  <= '0;
+            rd_read_rs1     <= '0;
             rd_read_kblock  <= 1'b0;
             rd_read_sel  <= '0;
         end else if (output_meta_pop) begin
             rd_read_m_rows  <= output_cfg_m;
             rd_read_n_cols  <= output_cfg_n;
+            rd_read_rs1     <= output_rs1;
             rd_read_kblock  <= output_kblock;
             rd_read_sel     <= output_rd;
         end
@@ -614,22 +676,59 @@ module pe_ctrl #(
         rd_write_valid_o = psum_valid;
     end
     
-    // A scale 与 A 数据使用完全相同的寄存器、行地址和 K block。
-    // ABScaleReg 为同步读，因此请求有效周期与 ABMatrixReg 保持一致。
+    // output_meta_pop 比第一个 psum_valid 提前两拍。先读取 M[0:31]
+    // 的 scale；如果 M>32，则在准备第31行时预取 M[32:63]。
+    assign a_scale_bank0_req = output_meta_pop;
+    assign a_scale_bank1_req = psum_pre_valid &&
+                               (rd_read_count == M_CNT_WIDTH'(31)) &&
+                               (rd_read_m_rows > M_CNT_WIDTH'(32));
+
     always @* begin
-        rs1_scale_o            = stream_rs1;
-        rs1_scale_addr_o       = stream_act_base_row + ACT_ADDR_WIDTH'(stream_count);
-        rs1_scale_kblock_o     = stream_act_col;
-        rs1_scale_read_valid_o = stream_active;
+        if (a_scale_bank0_req) begin
+            rs1_scale_reg_o        = output_rs1;
+            rs1_scale_bank_o       = 1'b0;
+            rs1_scale_kblock_o     = output_kblock;
+            rs1_scale_read_valid_o = 1'b1;
+        end
+        else begin
+            rs1_scale_reg_o        = rd_read_rs1;
+            rs1_scale_bank_o       = 1'b1;
+            rs1_scale_kblock_o     = rd_read_kblock;
+            rs1_scale_read_valid_o = a_scale_bank1_req;
+        end
     end
 
-    // B scale 与 B 权重使用完全相同的寄存器、行地址和 K block。
-    // weight_count 的地址方向仍由权重读取逻辑统一产生。
+    // scale SRAM 返回时直接取出当前32个 scale 中的第一个；其余数据每个
+    // psum_pre_valid 消费一个，从而提前一拍对齐对应的 psum_valid。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            a_scale_buffer_q  <= '0;
+            a_scale_current_q <= '0;
+        end else if (rs1_scale_data_valid_i) begin
+            a_scale_buffer_q  <= {8'b0, rs1_scale_data_i[255:8]};
+            a_scale_current_q <= rs1_scale_data_i[7:0];
+        end else if (psum_pre_valid) begin
+            a_scale_buffer_q  <= {8'b0, a_scale_buffer_q[255:8]};
+            a_scale_current_q <= a_scale_buffer_q[7:0];
+        end
+    end
+
+    // output_meta_pop 比第一个 psum_valid 提前两拍。在这里发出同步 SRAM
+    // 读请求，下一拍锁存 B scale，再下一拍与 psum_valid 对齐。
     always @* begin
-        rs2_scale_o            = weight_rs2;
-        rs2_scale_addr_o       = weight_base_addr - 6'(weight_count);
-        rs2_scale_kblock_o     = weight_col;
-        rs2_scale_read_valid_o = weight_load_active;
+        rs2_scale_reg_o        = b_scale_meta_rd_data[3:2];
+        rs2_scale_bank_o       = b_scale_meta_rd_data[1];
+        rs2_scale_kblock_o     = b_scale_meta_rd_data[0];
+        rs2_scale_read_valid_o = b_scale_meta_pop;
+    end
+
+    // B scale 在一个输出 block 内保持不变，后续 MXINT8 缩放逻辑直接
+    // 使用该寄存器中的 32 个逐列 scale。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            b_scale_data_q <= '0;
+        else if (rs2_scale_data_valid_i)
+            b_scale_data_q <= rs2_scale_data_i;
     end
 
     // 阵列内部只保留 PE_ACC_WIDTH 位，送入尾部 48bit 累加器前再做一次符号位扩展。
