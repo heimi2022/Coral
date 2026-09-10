@@ -99,7 +99,12 @@ module pe_ctrl #(
     localparam int OUTPUT_META_WIDTH      = M_CNT_WIDTH + COL_CNT_WIDTH + 2 + 1 + 3 + 1;
     // B scale metadata 只保存 reg、N bank 和 K block。
     localparam int B_SCALE_META_WIDTH     = 4;
+    // 写回 metadata 按 block 保存 M、N、C reg 和 K block。
+    localparam int WRITEBACK_META_WIDTH   = M_CNT_WIDTH + COL_CNT_WIDTH + 3 + 1;
     localparam int PE_ACC_WIDTH           = 2 * MAX_ELEM_WIDTH + $clog2(TILE_ROWS);  // PE 内部累加位宽，容纳 TILE_ROWS 个乘积的和即可
+    localparam int ACCUM_PIPE_STAGES      = 3;
+    // block-head 在该位置有效时，下一拍将出现该 block 的首个累加结果。
+    localparam int WRITEBACK_META_POP_INDEX = TILE_ROWS + ACCUM_PIPE_STAGES - 1;
 
     typedef enum logic [2:0] {
         Idle,
@@ -140,8 +145,8 @@ module pe_ctrl #(
     logic                                       psum_pre_valid;
     logic                                       psum_pre2_valid;
     logic [TILE_COLS * PE_ACC_WIDTH - 1 : 0]    psum_bottom;
-    logic [TILE_COLS * ACC_WIDTH - 1 : 0]       psum_bottom_ext;
     logic [TILE_COLS * ACC_WIDTH - 1 : 0]       accum_sum_o;
+    logic                                       accum_valid;
 
     logic                                       weight_load_bank_sel;
     logic                                       weight_load_active;
@@ -167,6 +172,15 @@ module pe_ctrl #(
     logic                                       output_meta_pop;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_wr_data;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_rd_data;
+    logic                                       writeback_meta_push;
+    logic                                       writeback_meta_pop;
+    logic [WRITEBACK_META_WIDTH-1:0]            writeback_meta_wr_data;
+    logic [WRITEBACK_META_WIDTH-1:0]            writeback_meta_rd_data;
+    logic                                       writeback_meta_empty;
+    logic [M_CNT_WIDTH-1:0]                     writeback_head_m_rows;
+    logic [COL_CNT_WIDTH-1:0]                   writeback_head_n_cols;
+    logic [2:0]                                 writeback_head_rd;
+    logic                                       writeback_head_kblock;
     logic [B_SCALE_META_WIDTH-1:0]              b_scale_meta_wr_data;
     logic [B_SCALE_META_WIDTH-1:0]              b_scale_meta_rd_data;
     logic                                       b_scale_meta_empty;
@@ -175,9 +189,6 @@ module pe_ctrl #(
     logic [1:0]                                 rd_read_rs1;
     logic                                       a_scale_bank0_req;
     logic                                       a_scale_bank1_req;
-    logic [255:0]                               a_scale_buffer_q;
-    logic [7:0]                                 a_scale_current_q;
-    logic [255:0]                               b_scale_data_q;
     logic [M_CNT_WIDTH-1:0]                     output_cfg_m;
     logic [COL_CNT_WIDTH-1:0]                   output_cfg_n;
     logic                                       output_kblock;
@@ -197,7 +208,7 @@ module pe_ctrl #(
     logic [M_CNT_WIDTH-1:0]                     rd_write_count;
     logic [M_CNT_WIDTH-1:0]                     rd_write_count_p1;
     logic                                       output_block_head_in;
-    logic [TILE_ROWS-1:0]                       output_block_head_shift;
+    logic [TILE_ROWS + ACCUM_PIPE_STAGES - 1:0] output_block_head_shift;
     logic [1:0]                                 cmd_pending_count;
     logic [COL_CNT_WIDTH-1:0]                   weight_count_p1;
     logic [M_CNT_WIDTH-1:0]                     stream_count_p1;
@@ -533,7 +544,9 @@ module pe_ctrl #(
         if (!rst_n) begin
             output_block_head_shift <= '0;
         end else begin
-            output_block_head_shift <= {output_block_head_shift[TILE_ROWS-2:0], output_block_head_in};
+            output_block_head_shift <=
+                {output_block_head_shift[TILE_ROWS + ACCUM_PIPE_STAGES - 2:0],
+                 output_block_head_in};
         end
     end
 
@@ -579,8 +592,58 @@ module pe_ctrl #(
     assign output_rd    = output_meta_rd_data[3:1];
     assign output_last  = output_meta_rd_data[0];
 
-    // wjj : 后面可以 把输出队列中 n 抽出来单独维护，读rd时，不需要知道n 。  优化一个 n 的寄存器 
-    // 检测到新输出 block 的第一个 pre-valid beat 时，读取 FIFO 队头并锁存本次写回需要的 m / n / rd / last。
+    // output metadata 到达阵列尾部前，将写回所需的 block 信息压入独立
+    // FIFO。队头保持到该 block 的最后一行真正完成累加写回。
+    assign writeback_meta_push = output_meta_pop;
+    assign writeback_meta_wr_data = {output_cfg_m,
+                                     output_cfg_n,
+                                     output_rd,
+                                     output_kblock};
+
+    fifo #(
+        .DATA_WIDTH ( WRITEBACK_META_WIDTH ),
+        .DEPTH      ( 4                    )
+    ) u_writeback_meta_fifo (
+        .clk       ( clk                    ),
+        .rst_n     ( rst_n                  ),
+        .wr_en_i   ( writeback_meta_push    ),
+        .wr_data_i ( writeback_meta_wr_data ),
+        .full_o    (                        ),
+        .rd_en_i   ( writeback_meta_pop     ),
+        .rd_data_o ( writeback_meta_rd_data ),
+        .empty_o   ( writeback_meta_empty   )
+    );
+
+    assign writeback_head_m_rows =
+        writeback_meta_rd_data[WRITEBACK_META_WIDTH-1 -: M_CNT_WIDTH];
+    assign writeback_head_n_cols =
+        writeback_meta_rd_data[4 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
+    assign writeback_head_rd = writeback_meta_rd_data[3:1];
+    assign writeback_head_kblock = writeback_meta_rd_data[0];
+
+    // block-head 到达累加器输出前一拍时弹出 FIFO，并锁存整块保持不变
+    // 的写回信息。相邻 block 连续写回时，旧信息仍服务于当前最后一行，
+    // 时钟沿后再切换为下一块信息。
+    assign writeback_meta_pop =
+        output_block_head_shift[WRITEBACK_META_POP_INDEX] &&
+        !writeback_meta_empty;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            rd_write_m_rows  <= '0;
+            rd_write_n_cols  <= '0;
+            rd_write_sel     <= '0;
+            rd_write_kblock  <= 1'b0;
+        end else if (writeback_meta_pop) begin
+            rd_write_m_rows  <= writeback_head_m_rows;
+            rd_write_n_cols  <= writeback_head_n_cols;
+            rd_write_sel     <= writeback_head_rd;
+            rd_write_kblock  <= writeback_head_kblock;
+        end
+    end
+
+    // 检测到新输出 block 的第一个 pre-valid beat 时，读取 FIFO 队头并
+    // 锁存本次 C 读取和 A scale 读取需要的信息。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_read_m_rows  <= '0;
@@ -595,23 +658,6 @@ module pe_ctrl #(
             rd_read_kblock  <= output_kblock;
             rd_read_sel     <= output_rd;
         end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            rd_write_m_rows  <= '0;
-            rd_write_n_cols  <= '0;
-            rd_write_kblock  <= 1'b0;
-            rd_write_sel  <= '0;
-        end
-        else begin
-            if(output_block_head_shift[TILE_ROWS-1]) begin
-                rd_write_m_rows     <= rd_read_m_rows;
-                rd_write_n_cols     <= rd_read_n_cols;
-                rd_write_kblock     <= rd_read_kblock;
-                rd_write_sel        <= rd_read_sel;
-            end
-        end  
     end
 
     always @(posedge clk or negedge rst_n) begin
@@ -648,13 +694,14 @@ module pe_ctrl #(
         end
     end
 
-    // 输出写rd地址计数：尾部累加完成一行后，地址再加一。
+    // 输出写 C 地址计数：只有融合累加器真正产生结果时才推进。
+    // 当前 block 最后一行写回后，下一拍从地址 0 开始写下一个 block。
     assign rd_write_count_p1 = rd_write_count + 1'd1;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_write_count <= '0;
         end
-        else if (psum_valid) begin
+        else if (accum_valid) begin
             if (rd_write_count_p1 == rd_write_m_rows)
                 rd_write_count <= '0;
             else
@@ -670,10 +717,10 @@ module pe_ctrl #(
         rd_read_kblock_o = rd_read_kblock;
         rd_read_valid_o  = psum_pre_valid;
 
-        rd_write_o       = rd_write_sel;
-        rd_write_addr_o  = rd_write_count;
+        rd_write_o        = rd_write_sel;
+        rd_write_addr_o   = rd_write_count[5:0];
         rd_write_kblock_o = rd_write_kblock;
-        rd_write_valid_o = psum_valid;
+        rd_write_valid_o  = accum_valid;
     end
     
     // output_meta_pop 比第一个 psum_valid 提前两拍。先读取 M[0:31]
@@ -698,21 +745,6 @@ module pe_ctrl #(
         end
     end
 
-    // scale SRAM 返回时直接取出当前32个 scale 中的第一个；其余数据每个
-    // psum_pre_valid 消费一个，从而提前一拍对齐对应的 psum_valid。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            a_scale_buffer_q  <= '0;
-            a_scale_current_q <= '0;
-        end else if (rs1_scale_data_valid_i) begin
-            a_scale_buffer_q  <= {8'b0, rs1_scale_data_i[255:8]};
-            a_scale_current_q <= rs1_scale_data_i[7:0];
-        end else if (psum_pre_valid) begin
-            a_scale_buffer_q  <= {8'b0, a_scale_buffer_q[255:8]};
-            a_scale_current_q <= a_scale_buffer_q[7:0];
-        end
-    end
-
     // output_meta_pop 比第一个 psum_valid 提前两拍。在这里发出同步 SRAM
     // 读请求，下一拍锁存 B scale，再下一拍与 psum_valid 对齐。
     always @* begin
@@ -722,38 +754,24 @@ module pe_ctrl #(
         rs2_scale_read_valid_o = b_scale_meta_pop;
     end
 
-    // B scale 在一个输出 block 内保持不变，后续 MXINT8 缩放逻辑直接
-    // 使用该寄存器中的 32 个逐列 scale。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n)
-            b_scale_data_q <= '0;
-        else if (rs2_scale_data_valid_i)
-            b_scale_data_q <= rs2_scale_data_i;
-    end
-
-    // 阵列内部只保留 PE_ACC_WIDTH 位，送入尾部 48bit 累加器前再做一次符号位扩展。
-    always @* begin : gen_psum_bottom_ext
-        integer col_idx;
-        for (col_idx = 0; col_idx < TILE_COLS; col_idx = col_idx + 1) begin
-            psum_bottom_ext[col_idx*ACC_WIDTH +: ACC_WIDTH] = {
-                {(ACC_WIDTH - PE_ACC_WIDTH){psum_bottom[col_idx*PE_ACC_WIDTH + PE_ACC_WIDTH - 1]}},
-                psum_bottom[col_idx*PE_ACC_WIDTH +: PE_ACC_WIDTH]
-            };
-        end
-    end
-
     accumulaters #(
-        .TILE_COLS ( TILE_COLS ),
-        .ACC_WIDTH ( ACC_WIDTH )
+        .TILE_COLS    ( TILE_COLS    ),
+        .PE_ACC_WIDTH ( PE_ACC_WIDTH )
     ) u_accumulaters (
-        .add_pe_i ( psum_bottom_ext ),
-        .add_rd_i ( rd_data_i        ),
-        .sum_o    ( accum_sum_o      ),
-        .carry_o  (  )
+        .clk                      ( clk                       ),
+        .rst_n                    ( rst_n                     ),
+        .a_scale_data_i           ( rs1_scale_data_i          ),
+        .a_scale_data_valid_i     ( rs1_scale_data_valid_i    ),
+        .b_scale_data_i           ( rs2_scale_data_i          ),
+        .b_scale_data_valid_i     ( rs2_scale_data_valid_i    ),
+        .valid_i                  ( psum_valid                ),
+        .add_pe_i                 ( psum_bottom               ),
+        .add_rd_i                 ( rd_data_i                 ),
+        .valid_o                  ( accum_valid               ),
+        .sum_o                    ( accum_sum_o               )
     );
 
-    // 输出侧列掩码：按输出 metadata FIFO 锁存下来的历史 n 生成，
-    // 避免和当前正送入阵列的新 block 混掉。
+    // 输出侧列掩码使用当前已锁存写回 block 的 N。
     always @* begin : gen_output_col_mask
         integer col_mask_idx;
         output_col_valid_mask = '0;

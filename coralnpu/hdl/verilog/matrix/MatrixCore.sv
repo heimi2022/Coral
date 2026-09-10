@@ -181,8 +181,11 @@ logic [2:0]   pe_rd_read_reg_w;
 logic [2:0]   pe_rd_write_reg_w;
 logic [5:0]   pe_rd_read_addr_w;
 logic [5:0]   pe_rd_write_addr_w;
+logic         pe_rd_read_kblock_w;
+logic         pe_rd_write_kblock_w;
 logic         pe_rd_read_valid_w;
 logic         pe_rd_write_valid_w;
+logic         c_rd_data_valid_w;
 logic [PE_ACC_ROW_W-1:0] pe_rd_data_w;
 logic [PE_ACC_ROW_W-1:0] pe_result_data_w;
 
@@ -352,9 +355,7 @@ assign done_pc_o = dma_done_valid_w ? dma_done_pc_w : pc_q;
 assign xmsat_set_valid_o = 1'b0;
 assign xmsat_set_bits_o = 1'b0;
 
-// C/acc 寄存器后续单独实现。当前阶段只验证 DMA load 到 ABMatrixReg，
-// 因此保持原有顶层接口，但不接入旧 MatrixRegFile。
-assign pe_rd_data_w       = '0;
+// 当前调试端口尚未接入新的分 bank 矩阵寄存器。
 assign dbg_tile_rd_data_o = '0;
 assign dbg_acc_rd_data_o  = '0;
 
@@ -412,6 +413,24 @@ ABScaleReg ab_scale_regfile (
     .rd1_kblock_i ( pe_rs2_scale_kblock_w     ),
     .rd1_valid_o  ( ab_scale_rd1_valid_w      ),
     .rd1_scale_o  ( ab_scale_rd1_data_w       )
+);
+
+// C 矩阵寄存器按 128B 行读写。读请求和同步 SRAM 返回使用独立
+// valid 信号；累加器输出携带延迟后的 reg、row 和 K block 写回原位置。
+CMatrixReg c_regfile (
+    .clk          ( clk                       ),
+    .rst_n        ( rst_n                     ),
+    .wr_en_i      ( pe_rd_write_valid_w       ),
+    .wr_reg_i     ( pe_rd_write_reg_w[1:0]    ),
+    .wr_addr_i    ( pe_rd_write_addr_w        ),
+    .wr_kblock_i  ( pe_rd_write_kblock_w      ),
+    .wr_data_i    ( pe_result_data_w          ),
+    .rd_en_i      ( pe_rd_read_valid_w        ),
+    .rd_reg_i     ( pe_rd_read_reg_w[1:0]     ),
+    .rd_addr_i    ( pe_rd_read_addr_w         ),
+    .rd_kblock_i  ( pe_rd_read_kblock_w       ),
+    .rd_valid_o   ( c_rd_data_valid_w         ),
+    .rd_data_o    ( pe_rd_data_w              )
 );
 
 // 旧 direct-dmem 通路已被专用 AXI master 取代，暂时保留顶层端口兼容 Chisel。
@@ -516,11 +535,13 @@ pe_ctrl #(
     .rs2_scale_kblock_o ( pe_rs2_scale_kblock_w     ),
     .rs2_scale_read_valid_o ( pe_rs2_scale_read_valid_w ),
     .rd_data_i          ( pe_rd_data_w              ),
-    .rd_data_valid_i    ( pe_rd_read_valid_w        ),
+    .rd_data_valid_i    ( c_rd_data_valid_w         ),
     .rd_read_o          ( pe_rd_read_reg_w          ),
     .rd_write_o         ( pe_rd_write_reg_w         ),
     .rd_read_addr_o     ( pe_rd_read_addr_w         ),
     .rd_write_addr_o    ( pe_rd_write_addr_w        ),
+    .rd_read_kblock_o   ( pe_rd_read_kblock_w       ),
+    .rd_write_kblock_o  ( pe_rd_write_kblock_w      ),
     .rd_write_valid_o   ( pe_rd_write_valid_w       ),
     .rd_read_valid_o    ( pe_rd_read_valid_w        ),
     .cmd_busy_o         ( pe_cmd_busy_w             ),

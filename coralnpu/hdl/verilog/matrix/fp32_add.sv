@@ -103,7 +103,9 @@ module fp32_add (
     input  logic        clk,
     input  logic        rst_n,
     input  logic        valid_i,
-    input  logic [31:0] a_i,
+    input  logic        a_sign_i,
+    input  logic [8:0]  a_eff_exp_i,
+    input  logic [23:0] a_sig_i,
     input  logic [31:0] b_i,
     output logic        valid_o,
     output logic [31:0] sum_o,
@@ -177,17 +179,21 @@ module fp32_add (
     logic [23:0] s1_large_sig, s1_small_sig;
     logic [5:0]  s1_align_dist;
 
-    assign a_sign_w = a_i[31];
+    // A 端直接接收已解码结果：有效阶码 1 对应 FP32 原始阶码 0/1，
+    // 此时由隐藏位区分次正规数和正规数；有效阶码 255 保留 Inf/NaN 语义。
+    assign a_sign_w = a_sign_i;
     assign b_sign_w = b_i[31];
-    assign a_exp_w  = a_i[30:23];
+    assign a_exp_w  = (a_sig_i == '0) ? 8'd0 :
+                      ((a_eff_exp_i == 9'd1) && !a_sig_i[23]) ? 8'd0 :
+                      a_eff_exp_i[7:0];
     assign b_exp_w  = b_i[30:23];
-    assign a_frac_w = a_i[22:0];
+    assign a_frac_w = a_sig_i[22:0];
     assign b_frac_w = b_i[22:0];
 
     // 次正规数使用有效阶码 1，但不补隐藏位。
-    assign a_eff_exp_w = (a_exp_w == 8'd0) ? 9'd1 : {1'b0, a_exp_w};
+    assign a_eff_exp_w = a_eff_exp_i;
     assign b_eff_exp_w = (b_exp_w == 8'd0) ? 9'd1 : {1'b0, b_exp_w};
-    assign a_sig_w = {(a_exp_w != 8'd0), a_frac_w};
+    assign a_sig_w = a_sig_i;
     assign b_sig_w = {(b_exp_w != 8'd0), b_frac_w};
 
     // 指数相同还要比较尾数，保证后续异号减法始终为大数减小数。
