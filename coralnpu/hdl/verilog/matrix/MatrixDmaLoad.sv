@@ -28,8 +28,8 @@ module MatrixDmaLoad #(
     parameter int REG_IDX  = 2,
     // 暂时保留以兼容现有 MatrixDma 实例；AB 写路径不再使用该参数。
     parameter int REG_BEAT = $clog2((4096 + (AXI_DATA / 8) - 1) / (AXI_DATA / 8)),
-    // 单个 AB 寄存器逻辑行最大为 64B，7bit 可表达 0~127B。
-    parameter int ROW_BYTE_W = 7,
+    // AB 行最大 64B，C 行最大 256B，需要 9 位表示行字节数。
+    parameter int ROW_BYTE_W = 9,
     parameter int CMD_QUEUE_DEPTH = 3,
     parameter int READ_OUTSTANDING_DEPTH = 4
 ) (
@@ -72,6 +72,9 @@ module MatrixDmaLoad #(
     output logic [5:0]               ab_wr_row_o,
     output logic [AXI_DATA-1:0]      ab_wr_data_o,
     output logic                     ab_wr_dst_sel_o,
+    output logic                     c_wr_en_o,
+    output logic                     c_wr_half_o,
+    output logic                     c_wr_nblock_o,
 
     // ------------------------------------------------------------------------
     // AXI 读 master 口。
@@ -98,10 +101,10 @@ module MatrixDmaLoad #(
     localparam int STREAM_COUNT_W = $clog2(STREAM_BUFFER_BYTES + 1);
     localparam int BURST_BYTE_W = 13;
     localparam int DMA_TOTAL_BYTE_W = 15;
-    // pc(32) + reg(3) + is_scale(1) + row_bytes(7) + base(32) + stride(32) + rows(8)
-    localparam int CMD_DATA = 115;
+    // pc(32) + reg(3) + dst_sel(1) + row_bytes + base(32) + stride(32) + rows(8)
+    localparam int CMD_DATA = 108 + ROW_BYTE_W;
     // 接收侧只需知道目标寄存器、目的类型、行大小和总行数，不携带地址或 stride。
-    localparam int INFLIGHT_DATA = 51;
+    localparam int INFLIGHT_DATA = 44 + ROW_BYTE_W;
 
     logic [CMD_DATA-1:0]           issue_cmd_fifo_data_in;
     logic [CMD_DATA-1:0]           issue_cmd_fifo_rd_data;
@@ -150,6 +153,12 @@ module MatrixDmaLoad #(
     logic [ROW_BYTE_W-1:0]         recv_cmd_row_bytes;
     logic [7:0]                    recv_cmd_rows;
     logic [31:0]                   issue_addr;
+    logic [ROW_BYTE_W-1:0]         issue_row_offset;
+    logic [12:0]                   issue_page_left;
+    logic                          issue_row_last;
+    logic [ROW_BYTE_W-1:0]         recv_row_offset;
+    logic [ROW_BYTE_W-1:0]         recv_chunk_bytes;
+    logic                          recv_chunk_last;
 
     logic [7:0]                    bursts_issued;
     logic [7:0]                    rows_received;
@@ -176,7 +185,7 @@ module MatrixDmaLoad #(
     logic                          read_pause;
 
     // 接收侧将 AXI beat 压紧后追加到 128B 流缓冲，再按 row_bytes 逐行取出。
-    logic [ROW_BYTE_W-1:0]         read_beat_byte_count;
+    logic [AXI_BEAT_LG2:0]         read_beat_byte_count;
     logic [AXI_DATA-1:0]           read_beat_compact_data;
     logic [AXI_DATA-1:0]           read_beat_valid_data;
     logic [AXI_DATA-1:0]           read_beat_valid_mask;
@@ -184,6 +193,10 @@ module MatrixDmaLoad #(
     logic [AXI_DATA*2-1:0]         read_beat_append_data;
     logic [AXI_DATA*2-1:0]         recv_stream_data;
     logic [STREAM_COUNT_W-1:0]     recv_stream_byte_count;
+    logic [STREAM_COUNT_W-1:0]     recv_stream_count_after_pop;
+    logic [AXI_DATA*2-1:0]         recv_stream_data_after_pop;
+    logic [AXI_DATA*2-1:0]         recv_stream_data_next;
+    logic [ROW_BYTE_W-1:0]         recv_consume_bytes;
     logic                          recv_stream_row_ready;
     logic [AXI_DATA-1:0]           recv_row_data_mask;
     logic [ROW_BYTE_W-1:0]         recv_row_pad_bytes;
@@ -239,9 +252,10 @@ module MatrixDmaLoad #(
 // 1) 命令发射路径
 // =========================================================================
 
-    // 发射一条指令
+    // 命令可排队；上一条命令排空后再发射下一条，保证错误恢复不混入下一条数据。
+    // 同一命令内部仍允许多个 AXI burst 在途。
     assign issue_cmd_pop =
-        !issue_cmd_active &&
+        !issue_cmd_active && !recv_cmd_active && !read_busy && inflight_fifo_empty &&
         !issue_cmd_fifo_empty &&
         !inflight_fifo_full;
 
@@ -268,7 +282,7 @@ module MatrixDmaLoad #(
                                (bursts_issued < issue_cmd_rows);
 
     assign issue_request_last = issue_cmd_merge_rows ||
-                                ((bursts_issued + 1'b1) == issue_cmd_rows);
+                                (issue_row_last && ((bursts_issued + 1'b1) == issue_cmd_rows));
 
     // valid 只表示当前存在待发送请求，不依赖下层 ready。
     // ready 拉低时，issue_addr 和 cmd_burst_byte_num 保持不变。
@@ -298,13 +312,9 @@ module MatrixDmaLoad #(
         end
     end
 
-    assign issue_cmd_fifo_pc         = issue_cmd_fifo_rd_data[114:83];
-    assign issue_cmd_fifo_reg        = issue_cmd_fifo_rd_data[82:80];
-    assign issue_cmd_fifo_dst_sel    = issue_cmd_fifo_rd_data[79];
-    assign issue_cmd_fifo_row_bytes  = issue_cmd_fifo_rd_data[78:72];
-    assign issue_cmd_fifo_base       = issue_cmd_fifo_rd_data[71:40];
-    assign issue_cmd_fifo_stride     = issue_cmd_fifo_rd_data[39:8];
-    assign issue_cmd_fifo_rows       = issue_cmd_fifo_rd_data[7:0];
+    assign {issue_cmd_fifo_pc, issue_cmd_fifo_reg, issue_cmd_fifo_dst_sel,
+            issue_cmd_fifo_row_bytes, issue_cmd_fifo_base,
+            issue_cmd_fifo_stride, issue_cmd_fifo_rows} = issue_cmd_fifo_rd_data;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -332,7 +342,7 @@ module MatrixDmaLoad #(
         end else begin
             if (issue_cmd_pop) begin
                 bursts_issued <= '0;
-            end else if (read_burst_fire) begin
+            end else if (read_burst_fire && issue_row_last) begin
                 bursts_issued <= bursts_issued + 1'b1;
             end
         end
@@ -345,15 +355,31 @@ module MatrixDmaLoad #(
             if (issue_cmd_pop) begin
                 issue_addr <= issue_cmd_fifo_base;
             end else if (read_burst_fire && !issue_cmd_merge_rows) begin
-                issue_addr <= issue_addr + issue_cmd_stride;
+                issue_addr <= issue_row_last ?
+                    issue_addr - issue_row_offset + issue_cmd_stride :
+                    issue_addr + cmd_burst_byte_num;
             end
         end
     end
 
     // 连续布局使用整条 DMA 的总字节数；否则仍请求单行字节数。
+    assign issue_page_left = 13'd4096 - {1'b0, issue_addr[11:0]};
     assign cmd_burst_byte_num = issue_cmd_merge_rows ?
         issue_cmd_total_bytes[BURST_BYTE_W-1:0] :
-        {{(BURST_BYTE_W-ROW_BYTE_W){1'b0}}, issue_cmd_row_bytes};
+        ((issue_cmd_row_bytes - issue_row_offset) > issue_page_left ?
+         issue_page_left : (issue_cmd_row_bytes - issue_row_offset));
+    assign issue_row_last = issue_cmd_merge_rows ||
+        (issue_row_offset + cmd_burst_byte_num == issue_cmd_row_bytes);
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            issue_row_offset <= '0;
+        else if (issue_cmd_pop)
+            issue_row_offset <= '0;
+        else if (read_burst_fire)
+            issue_row_offset <= issue_row_last ? '0 :
+                                issue_row_offset + cmd_burst_byte_num;
+    end
 
     // -------------------------------------------------------------------------
     // AXI burst 读控制子模块
@@ -405,11 +431,13 @@ module MatrixDmaLoad #(
 
     assign m_axi_ruser_tied = '0;
 
-    // 每接收一个 beat 后暂停 R 通道，优先把流缓冲中的完整行逐行写入 AB。
-    // 当残余字节不足一行时再继续接收下一拍，保证128B缓冲不会溢出。
-    assign read_pause = read_beat_valid ||
-                        recv_stream_row_ready ||
-                        inflight_cmd_pop;
+    // 只有当前确实有 R beat 待接收时，才根据流缓冲容量暂停 RREADY。
+    // read_beat_byte_count 在无效周期可能保持上一个 beat 的值；若无条件
+    // 使用它，会把 SRAM 写出周期误判为缓冲溢出，导致 AXI RREADY 抖动。
+    assign read_pause = inflight_cmd_pop ||
+        (read_beat_valid &&
+         ((recv_stream_count_after_pop + read_beat_byte_count) >
+          STREAM_BUFFER_BYTES));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -451,11 +479,8 @@ module MatrixDmaLoad #(
         .empty_o   ( inflight_fifo_empty    )
     );
 
-    assign inflight_fifo_pc         = inflight_fifo_rd_data[50:19];
-    assign inflight_fifo_reg        = inflight_fifo_rd_data[18:16];
-    assign inflight_fifo_dst_sel    = inflight_fifo_rd_data[15];
-    assign inflight_fifo_row_bytes  = inflight_fifo_rd_data[14:8];
-    assign inflight_fifo_rows       = inflight_fifo_rd_data[7:0];
+    assign {inflight_fifo_pc, inflight_fifo_reg, inflight_fifo_dst_sel,
+            inflight_fifo_row_bytes, inflight_fifo_rows} = inflight_fifo_rd_data;
 
     assign recv_cmd_reg_idx = recv_cmd_reg[1:0];
 
@@ -491,68 +516,80 @@ module MatrixDmaLoad #(
         end
     end
 
-    // burst 首拍先移除地址低位产生的无效 byte lane，后续拍本身从 lane0 有效。
-    assign read_beat_compact_data = read_beat_first ?
-        (read_beat_data >> {read_burst_start_offset, 3'b000}) :
-        read_beat_data;
+    assign recv_chunk_last = (recv_row_offset + recv_chunk_bytes == recv_cmd_row_bytes);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            recv_row_offset <= '0;
+        else if (inflight_cmd_pop)
+            recv_row_offset <= '0;
+        else if (ab_wr_fire)
+            recv_row_offset <= recv_chunk_last ? '0 : recv_row_offset + recv_chunk_bytes;
+    end
 
-    // byte_count 之外的数据属于 AXI beat 中的无效区域，追加前用低位连续掩码清零。
-    assign read_beat_pad_bytes = AXI_STRB - read_beat_byte_count;
-    assign read_beat_valid_mask =
-        {AXI_DATA{1'b1}} >> {read_beat_pad_bytes, 3'b000};
-    assign read_beat_valid_data =
-        read_beat_compact_data & read_beat_valid_mask;
+    // 写口固定为 64B。每次取行内一个 segment，末段不足 64B 时高字节补零。
+    assign recv_chunk_bytes = (recv_cmd_row_bytes - recv_row_offset > AXI_STRB) ?
+                              AXI_STRB : recv_cmd_row_bytes - recv_row_offset;
 
-    // 将当前 beat 的有效字节追加到流缓冲已有字节之后。
-    assign read_beat_append_data =
-        {{AXI_DATA{1'b0}}, read_beat_valid_data} <<
-        {recv_stream_byte_count, 3'b000};
+    assign recv_consume_bytes = ab_wr_fire ? recv_chunk_bytes : '0;
+    // 计算流缓冲中剩余有效字节数。每次写出后减去已消费字节数。
+    assign recv_stream_count_after_pop = recv_stream_byte_count - recv_consume_bytes;
 
+    // 计算缓存中有效字节数。每次写出后减去已消费字节数，每次接收新 beat 后加上有效字节数。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             recv_stream_byte_count <= '0;
         end else if (inflight_cmd_pop || read_burst_done_error) begin
             recv_stream_byte_count <= '0;
-        end else if (ab_wr_fire) begin
-            recv_stream_byte_count <= recv_stream_byte_count - recv_cmd_row_bytes;
-        end else if (recv_cmd_active && read_beat_valid) begin
-            recv_stream_byte_count <= recv_stream_byte_count + read_beat_byte_count;
+        end else if (ab_wr_fire || (recv_cmd_active && read_beat_valid && !recv_cmd_error)) begin
+            recv_stream_byte_count <= recv_stream_count_after_pop +
+                ((recv_cmd_active && read_beat_valid && !recv_cmd_error) ? read_beat_byte_count : '0);
+        end
+    end
+
+    // burst 首拍先移除地址低位产生的无效 byte lane，后续拍本身从 lane0 有效。
+    assign read_beat_compact_data = read_beat_first ?
+        (read_beat_data >> {read_burst_start_offset, 3'b000}) : read_beat_data;
+
+    // byte_count 之外的数据属于 AXI beat 中的无效区域，追加前用低位连续掩码清零。
+    assign read_beat_pad_bytes = AXI_STRB - read_beat_byte_count;
+    assign read_beat_valid_mask = {AXI_DATA{1'b1}} >> {read_beat_pad_bytes, 3'b000};
+    assign read_beat_valid_data = read_beat_compact_data & read_beat_valid_mask;
+
+    // 将当前 beat 的有效字节追加到流缓冲已有字节之后。
+    assign recv_stream_data_after_pop = recv_stream_data >> {recv_consume_bytes, 3'b000};
+    assign recv_stream_data_next = recv_stream_data_after_pop |
+        ({{AXI_DATA{1'b0}}, read_beat_valid_data} << {recv_stream_count_after_pop, 3'b000});
+
+    // 同时存在写出和新 beat 时，先移除低位已消费数据，再把新 beat 追加到剩余数据之后。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            recv_stream_data <= '0;
+        end else if (inflight_cmd_pop || read_burst_done_error) begin
+            recv_stream_data <= '0;
+        end else if (ab_wr_fire || (recv_cmd_active && read_beat_valid && !recv_cmd_error)) begin
+            recv_stream_data <= recv_stream_data_next;
         end
     end
 
     assign recv_stream_row_ready =
         recv_cmd_active &&
         (recv_cmd_row_bytes != '0) &&
-        (recv_stream_byte_count >= recv_cmd_row_bytes);
-
-    // beat 到达时追加数据；缓冲中存在完整行时，每周期弹出低 row_bytes 字节。
-    // read_pause 保证追加和弹出不会在同一周期发生。
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            recv_stream_data <= '0;
-        end else if (inflight_cmd_pop || read_burst_done_error) begin
-            recv_stream_data <= '0;
-        end else if (ab_wr_fire) begin
-            recv_stream_data <= recv_stream_data >> {recv_cmd_row_bytes, 3'b000};
-        end else if (recv_cmd_active && read_beat_valid) begin
-            recv_stream_data <= recv_stream_data | read_beat_append_data;
-        end
-    end
+        (recv_stream_byte_count >= recv_chunk_bytes);
 
     assign ab_wr_fire  = recv_stream_row_ready && !recv_cmd_error;
-    assign ab_wr_en_o  = ab_wr_fire;
+    assign ab_wr_en_o  = ab_wr_fire && !recv_cmd_reg[2];
+    assign c_wr_en_o = ab_wr_fire && recv_cmd_reg[2];
+    assign c_wr_half_o = recv_row_offset[6];
+    assign c_wr_nblock_o = recv_row_offset[7];
     assign ab_wr_reg_o = recv_cmd_reg_idx;
     assign ab_wr_dst_sel_o = recv_cmd_dst_sel;
 
-    // AB 写口固定为64B。保留流缓冲低 row_bytes 字节，其余高字节补零。
-    assign recv_row_pad_bytes = AXI_STRB - recv_cmd_row_bytes;
-    assign recv_row_data_mask =
-        {AXI_DATA{1'b1}} >> {recv_row_pad_bytes, 3'b000};
+    assign recv_row_pad_bytes = AXI_STRB - recv_chunk_bytes;
+    assign recv_row_data_mask = {AXI_DATA{1'b1}} >> {recv_row_pad_bytes, 3'b000};
     assign ab_wr_data_o = recv_stream_data[AXI_DATA-1:0] & recv_row_data_mask;
 
-    // 行在完整 64B 数据实际写入 ABMatrixReg 后才算完成。
-    assign recv_row_done = ab_wr_fire;
-
+    // 行内最后一个 segment 写入后才推进逻辑行号。
+    assign recv_row_done = ab_wr_fire && recv_chunk_last;
     // AB Martix Reg 写口的行号输出
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -573,8 +610,8 @@ module MatrixDmaLoad #(
     assign recv_cmd_success_done = recv_cmd_active && recv_last_row &&
                                    recv_row_done && !recv_cmd_error;
 
-    assign recv_cmd_fault_done = recv_cmd_active && recv_last_row &&
-                                 recv_cmd_error && read_beat_valid && read_beat_last;
+    assign recv_cmd_fault_done = recv_cmd_active && recv_cmd_error &&
+                                 !issue_cmd_active && !read_busy && !read_beat_valid;
 
     // =========================================================================
     // 4) 完成 / busy 汇报

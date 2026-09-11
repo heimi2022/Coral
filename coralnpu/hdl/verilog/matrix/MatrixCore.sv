@@ -144,6 +144,9 @@ logic [1:0]   dma_ab_wr_reg_w;
 logic [5:0]   dma_ab_wr_row_w;
 logic [511:0] dma_ab_wr_data_w;
 logic         dma_ab_wr_dst_sel_w;
+logic         dma_c_wr_en_w;
+logic         dma_c_wr_half_w;
+logic         dma_c_wr_nblock_w;
 logic         dma_ab_matrix_wr_en_w;
 logic         dma_ab_scale_wr_en_w;
 
@@ -248,6 +251,7 @@ assign pe_cmd_complete_w = pe_rd_write_valid_w &&
                            (pe_output_blocks_left_q == 3'd1);
 
 // MatrixDma 当前只实现 load，store 命令不送入 DMA。
+// 上游保证访存命令的寄存器类别、元素宽度及矩阵尺寸合法。
 assign dma_mem_valid_w = mem_valid_i && !mem_dir_w &&
                          (state_q == STATE_IDLE) && !cmd_valid_i;
 assign mem_ready_o = !mem_dir_w && (state_q == STATE_IDLE) &&
@@ -255,7 +259,7 @@ assign mem_ready_o = !mem_dir_w && (state_q == STATE_IDLE) &&
 
 // 将指令操作码归一化成 DMA 使用的方向、目的类型、元素字节数和二维形状。
 // A 按 M x K 保存，B 按转置后的 N x K 保存，以匹配 FIR-WS 供数方向。
-// A scale 的形状为 M x (K/32)，B scale 的物理布局为 N x (K/32)。
+// A/B scale 的物理形状分别为 (K/32) x M 和 (K/32) x N。
 // 软件必须保证用于分组的 K 维度是 32 的整数倍。
 always @* begin
     mem_dir_w     = 1'b0;
@@ -416,21 +420,28 @@ ABScaleReg ab_scale_regfile (
 );
 
 // C 矩阵寄存器按 128B 行读写。读请求和同步 SRAM 返回使用独立
-// valid 信号；累加器输出携带延迟后的 reg、row 和 K block 写回原位置。
+// valid 信号；C SRAM 的高低地址区对应 N block。
+// 当前保留上游连线，pe_ctrl 的 K/N block 选择逻辑后续单独调整。
 CMatrixReg c_regfile (
-    .clk          ( clk                       ),
-    .rst_n        ( rst_n                     ),
-    .wr_en_i      ( pe_rd_write_valid_w       ),
-    .wr_reg_i     ( pe_rd_write_reg_w[1:0]    ),
-    .wr_addr_i    ( pe_rd_write_addr_w        ),
-    .wr_kblock_i  ( pe_rd_write_kblock_w      ),
-    .wr_data_i    ( pe_result_data_w          ),
-    .rd_en_i      ( pe_rd_read_valid_w        ),
-    .rd_reg_i     ( pe_rd_read_reg_w[1:0]     ),
-    .rd_addr_i    ( pe_rd_read_addr_w         ),
-    .rd_kblock_i  ( pe_rd_read_kblock_w       ),
-    .rd_valid_o   ( c_rd_data_valid_w         ),
-    .rd_data_o    ( pe_rd_data_w              )
+    .clk                ( clk                       ),
+    .rst_n              ( rst_n                     ),
+    .wr_en_i            ( pe_rd_write_valid_w       ),
+    .wr_reg_i           ( pe_rd_write_reg_w[1:0]    ),
+    .wr_addr_i          ( pe_rd_write_addr_w        ),
+    .wr_nblock_i        ( pe_rd_write_kblock_w      ),
+    .wr_data_i          ( pe_result_data_w          ),
+    .dma_wr_en_i        ( dma_c_wr_en_w             ),
+    .dma_wr_reg_i       ( dma_ab_wr_reg_w           ),
+    .dma_wr_addr_i      ( dma_ab_wr_row_w           ),
+    .dma_wr_nblock_i    ( dma_c_wr_nblock_w         ),
+    .dma_wr_half_i      ( dma_c_wr_half_w           ),
+    .dma_wr_data_i      ( dma_ab_wr_data_w          ),
+    .rd_en_i            ( pe_rd_read_valid_w        ),
+    .rd_reg_i           ( pe_rd_read_reg_w[1:0]     ),
+    .rd_addr_i          ( pe_rd_read_addr_w         ),
+    .rd_nblock_i        ( pe_rd_read_kblock_w       ),
+    .rd_valid_o         ( c_rd_data_valid_w         ),
+    .rd_data_o          ( pe_rd_data_w              )
 );
 
 // 旧 direct-dmem 通路已被专用 AXI master 取代，暂时保留顶层端口兼容 Chisel。
@@ -453,7 +464,7 @@ assign m_axi_wstrb_o   = '0;
 assign m_axi_wlast_o   = 1'b0;
 assign m_axi_bready_o  = 1'b0;
 
-// DMA 子模块负责矩阵 load 的 AXI 读和 AB 寄存器写入。
+// DMA 共享 512-bit 数据、reg 和 row，分别使能 AB/scale 或 C 写口。
 MatrixDma dma (
     .clk(clk),
     .rst_n(rst_n),
@@ -478,6 +489,9 @@ MatrixDma dma (
     .ab_wr_row_o(dma_ab_wr_row_w),
     .ab_wr_data_o(dma_ab_wr_data_w),
     .ab_wr_dst_sel_o(dma_ab_wr_dst_sel_w),
+    .c_wr_en_o(dma_c_wr_en_w),
+    .c_wr_half_o(dma_c_wr_half_w),
+    .c_wr_nblock_o(dma_c_wr_nblock_w),
     .m_axi_arvalid_o(m_axi_arvalid_o),
     .m_axi_arready_i(m_axi_arready_i),
     .m_axi_arid_o(m_axi_arid_o),

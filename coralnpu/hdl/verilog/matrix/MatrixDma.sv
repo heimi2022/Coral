@@ -32,6 +32,9 @@ module MatrixDma #(
     output logic [5:0]               ab_wr_row_o,
     output logic [AXI_DATA_W-1:0]    ab_wr_data_o,
     output logic                     ab_wr_dst_sel_o,
+    output logic                     c_wr_en_o,
+    output logic                     c_wr_half_o,
+    output logic                     c_wr_nblock_o,
 
     // DDR AXI master read address channel。
     output logic                     m_axi_arvalid_o,
@@ -62,7 +65,7 @@ module MatrixDma #(
         .AXI_DATA               ( AXI_DATA_W           ),
         .AXI_ID                 ( AXI_ID_W             ),
         .REG_IDX                ( REG_IDX_W            ),
-        .ROW_BYTE_W             ( 7                    ),
+            .ROW_BYTE_W             ( 9                    ),
         .CMD_QUEUE_DEPTH        ( LOAD_CMD_QUEUE_DEPTH ),
         .READ_OUTSTANDING_DEPTH ( 4                    )
     ) u_matrix_dma_load (
@@ -88,6 +91,9 @@ module MatrixDma #(
         .ab_wr_row_o      ( ab_wr_row_o            ),
         .ab_wr_data_o     ( ab_wr_data_o           ),
         .ab_wr_dst_sel_o  ( ab_wr_dst_sel_o        ),
+        .c_wr_en_o        ( c_wr_en_o              ),
+        .c_wr_half_o      ( c_wr_half_o            ),
+        .c_wr_nblock_o    ( c_wr_nblock_o          ),
         .m_axi_arvalid_o  ( m_axi_arvalid_o        ),
         .m_axi_arready_i  ( m_axi_arready_i        ),
         .m_axi_arid_o     ( m_axi_arid_o           ),
