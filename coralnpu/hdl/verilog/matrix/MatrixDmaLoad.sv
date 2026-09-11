@@ -19,6 +19,10 @@
    - 已经直写进矩阵寄存器的 beat 不回滚
 
 ！ RISCV 拓展中 转置指令暂时不考虑，若做转置需要额外大量寄存器开销，或者在一整条DMA指令中对数据分块进行转置。
+
+
+mzero 指令 并入 MatrixDmaLoad 以此共用sram的写端口
+load中执行 zero指令时，不会同时执行load指令，后续考虑是否需要根据寄存器是否冲突来决定是否可以同时执行zero和load指令
 */
 
 module MatrixDmaLoad #(
@@ -35,6 +39,13 @@ module MatrixDmaLoad #(
 ) (
     input  logic                     clk,
     input  logic                     rst_n,
+
+    // ZERO command input. Count encoding: 000/001/011/111 = 1/2/4/8 registers.
+    input  logic                     zero_valid_i,
+    output logic                     zero_ready_o,
+    input  logic [31:0]              zero_pc_i,
+    input  logic [2:0]               zero_md_i,
+    input  logic [2:0]               zero_reg_count_i,
 
     // ------------------------------------------------------------------------
     // 归一化后的矩阵 load 命令输入。
@@ -101,8 +112,9 @@ module MatrixDmaLoad #(
     localparam int STREAM_COUNT_W = $clog2(STREAM_BUFFER_BYTES + 1);
     localparam int BURST_BYTE_W = 13;
     localparam int DMA_TOTAL_BYTE_W = 15;
-    // pc(32) + reg(3) + dst_sel(1) + row_bytes + base(32) + stride(32) + rows(8)
-    localparam int CMD_DATA = 108 + ROW_BYTE_W;
+    // cmd_type + pc(32) + reg(3) + dst_sel(1) + row_bytes + base(32) +
+    // stride(32) + rows(8) + zero_reg_count(3)
+    localparam int CMD_DATA = 112 + ROW_BYTE_W;
     // 接收侧只需知道目标寄存器、目的类型、行大小和总行数，不携带地址或 stride。
     localparam int INFLIGHT_DATA = 44 + ROW_BYTE_W;
 
@@ -112,6 +124,7 @@ module MatrixDmaLoad #(
     logic                          issue_cmd_fifo_empty;
     logic                          issue_cmd_push;
     logic                          issue_cmd_pop;
+    logic                          issue_cmd_type;
 
     logic [31:0]                   issue_cmd_fifo_pc;
     logic [2:0]                    issue_cmd_fifo_reg;
@@ -123,6 +136,8 @@ module MatrixDmaLoad #(
     logic [DMA_TOTAL_BYTE_W-1:0]   issue_cmd_fifo_total_bytes;
     logic [12:0]                   issue_cmd_fifo_4k_bytes_left;
     logic                          issue_cmd_fifo_contiguous;
+    logic                          issue_cmd_fifo_type;
+    logic [2:0]                    issue_cmd_fifo_zero_reg_count;
 
     logic [INFLIGHT_DATA-1:0]      inflight_fifo_data_in;
     logic [INFLIGHT_DATA-1:0]      inflight_fifo_rd_data;
@@ -190,7 +205,6 @@ module MatrixDmaLoad #(
     logic [AXI_DATA-1:0]           read_beat_valid_data;
     logic [AXI_DATA-1:0]           read_beat_valid_mask;
     logic [ROW_BYTE_W-1:0]         read_beat_pad_bytes;
-    logic [AXI_DATA*2-1:0]         read_beat_append_data;
     logic [AXI_DATA*2-1:0]         recv_stream_data;
     logic [STREAM_COUNT_W-1:0]     recv_stream_byte_count;
     logic [STREAM_COUNT_W-1:0]     recv_stream_count_after_pop;
@@ -209,6 +223,19 @@ module MatrixDmaLoad #(
     logic                          recv_cmd_success_done;
     logic                          recv_cmd_fault_done;
 
+    // ZERO command execution state. A ZERO command writes one 512-bit zero
+    // segment per cycle and does not use the AXI read path.
+    logic                          zero_active;
+    logic [31:0]                   zero_pc;
+    logic [2:0]                    zero_reg;
+    logic [2:0]                    zero_reg_end;
+    logic [5:0]                    zero_row;
+    logic [1:0]                    zero_segment;
+    logic                          zero_write_fire;
+    logic                          zero_last_write;
+    logic                          zero_done;
+    logic                          zero_fault_done;
+
     logic                          m_axi_arlock_unused;
     logic [3:0]                    m_axi_arcache_unused;
     logic [2:0]                    m_axi_arprot_unused;
@@ -221,18 +248,16 @@ module MatrixDmaLoad #(
 // =========================================================================
 
     // 先缓存完整矩阵 load 命令；一条命令可连续发出多个 row burst。
-    assign issue_cmd_push = mem_valid_i && mem_ready_o;
-    assign mem_ready_o = !issue_cmd_fifo_full;
+    // The FIFO has one write port. Give ZERO a fixed priority when both
+    // producers present a command in the same cycle; this keeps ready/valid
+    // from deadlocking when either producer holds valid until it is accepted.
+    assign zero_ready_o = !issue_cmd_fifo_full;
+    assign mem_ready_o = !issue_cmd_fifo_full && !zero_valid_i;
+    assign issue_cmd_push = (zero_valid_i && zero_ready_o) || (mem_valid_i && mem_ready_o);
     assign mem_row_byte_num = mem_cols_i[6:0] << mem_elem_bytes_i;
-    assign issue_cmd_fifo_data_in = {
-        mem_pc_i,
-        mem_reg_i,
-        mem_dst_sel_i,
-        mem_row_byte_num,
-        mem_base_i,
-        mem_stride_i,
-        mem_rows_i
-    };
+    assign issue_cmd_fifo_data_in = zero_valid_i ?
+        {1'b1, zero_pc_i, zero_md_i, 1'b0, {ROW_BYTE_W{1'b0}}, 32'b0, 32'b0, 8'b0, zero_reg_count_i} :
+        {1'b0, mem_pc_i, mem_reg_i, mem_dst_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i, 3'b0};
 
     fifo #(
         .DATA_WIDTH ( CMD_DATA        ),
@@ -255,7 +280,8 @@ module MatrixDmaLoad #(
     // 命令可排队；上一条命令排空后再发射下一条，保证错误恢复不混入下一条数据。
     // 同一命令内部仍允许多个 AXI burst 在途。
     assign issue_cmd_pop =
-        !issue_cmd_active && !recv_cmd_active && !read_busy && inflight_fifo_empty &&
+        !issue_cmd_active && !zero_active && !recv_cmd_active &&
+        !read_busy && inflight_fifo_empty &&
         !issue_cmd_fifo_empty &&
         !inflight_fifo_full;
 
@@ -287,7 +313,7 @@ module MatrixDmaLoad #(
     // valid 只表示当前存在待发送请求，不依赖下层 ready。
     // ready 拉低时，issue_addr 和 cmd_burst_byte_num 保持不变。
     assign read_burst_valid =
-        issue_cmd_active &&
+        issue_cmd_active && !issue_cmd_type &&
         issue_has_request;
 
     // 下层真正接收一次 burst 请求后，才推进发射侧状态。
@@ -305,19 +331,21 @@ module MatrixDmaLoad #(
             issue_cmd_active <= 1'b0;
         end else begin
             if (issue_cmd_pop) begin
-                issue_cmd_active <= 1'b1;
+                issue_cmd_active <= !issue_cmd_fifo_type;
             end else if (issue_cmd_done) begin
                 issue_cmd_active <= 1'b0;
             end
         end
     end
 
-    assign {issue_cmd_fifo_pc, issue_cmd_fifo_reg, issue_cmd_fifo_dst_sel,
+    assign {issue_cmd_fifo_type, issue_cmd_fifo_pc, issue_cmd_fifo_reg, issue_cmd_fifo_dst_sel,
             issue_cmd_fifo_row_bytes, issue_cmd_fifo_base,
-            issue_cmd_fifo_stride, issue_cmd_fifo_rows} = issue_cmd_fifo_rd_data;
+            issue_cmd_fifo_stride, issue_cmd_fifo_rows,
+            issue_cmd_fifo_zero_reg_count} = issue_cmd_fifo_rd_data;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
+            issue_cmd_type <= 1'b0;
             issue_cmd_row_bytes <= '0;
             issue_cmd_stride <= '0;
             issue_cmd_rows <= '0;
@@ -326,6 +354,7 @@ module MatrixDmaLoad #(
             issue_cmd_contiguous <= 1'b0;
         end else begin
             if (issue_cmd_pop) begin
+                issue_cmd_type <= issue_cmd_fifo_type;
                 issue_cmd_row_bytes <= issue_cmd_fifo_row_bytes;
                 issue_cmd_stride <= issue_cmd_fifo_stride;
                 issue_cmd_rows <= issue_cmd_fifo_rows;
@@ -335,6 +364,59 @@ module MatrixDmaLoad #(
             end
         end
     end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            zero_active     <= 1'b0;
+            zero_pc         <= '0;
+            zero_reg        <= '0;
+            zero_reg_end    <= '0;
+            zero_row        <= '0;
+            zero_segment    <= '0;
+        end else if (issue_cmd_pop && issue_cmd_fifo_type) begin
+            zero_active     <= 1'b1;
+            zero_pc         <= issue_cmd_fifo_pc;
+            zero_reg        <= issue_cmd_fifo_reg;
+            zero_reg_end    <= issue_cmd_fifo_reg + issue_cmd_fifo_zero_reg_count;
+            zero_row        <= '0;
+            zero_segment    <= '0;
+        end else if (zero_write_fire) begin
+            if (zero_last_write) begin
+                zero_active     <= 1'b0;
+                zero_reg_end    <= '0;
+                zero_row        <= '0;
+                zero_segment    <= '0;
+            end else if (zero_reg[2]) begin
+                if (zero_segment == 2'd3) begin
+                    zero_segment <= '0;
+                    if (zero_row == 6'd63) begin
+                        zero_row       <= '0;
+                        zero_reg      <= zero_reg + 1'b1;
+                    end else begin
+                        zero_row <= zero_row + 1'b1;
+                    end
+                end else begin
+                    zero_segment <= zero_segment + 2'd1;
+                end
+            end else begin
+                if (zero_row == 6'd63) begin
+                    zero_row        <= '0;
+                    zero_reg        <= zero_reg + 1'b1;
+                end else begin
+                    zero_row <= zero_row + 1'b1;
+                end
+            end
+        end
+    end
+
+    assign zero_write_fire = zero_active;
+    assign zero_last_write = zero_write_fire &&
+                             (zero_reg == zero_reg_end) &&
+                             (zero_row == 6'd63) &&
+                             ((!zero_reg[2] && (zero_segment == 2'd0)) ||
+                              ( zero_reg[2] && (zero_segment == 2'd3)));
+    assign zero_done = zero_last_write;
+    assign zero_fault_done = 1'b0;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -471,7 +553,7 @@ module MatrixDmaLoad #(
     ) u_inflight_cmd_fifo (
         .clk       ( clk                    ),
         .rst_n     ( rst_n                  ),
-        .wr_en_i   ( issue_cmd_pop          ),
+        .wr_en_i   ( issue_cmd_pop && !issue_cmd_fifo_type ),
         .wr_data_i ( inflight_fifo_data_in  ),
         .full_o    ( inflight_fifo_full     ),
         .rd_en_i   ( inflight_cmd_pop       ),
@@ -577,16 +659,19 @@ module MatrixDmaLoad #(
         (recv_stream_byte_count >= recv_chunk_bytes);
 
     assign ab_wr_fire  = recv_stream_row_ready && !recv_cmd_error;
-    assign ab_wr_en_o  = ab_wr_fire && !recv_cmd_reg[2];
-    assign c_wr_en_o = ab_wr_fire && recv_cmd_reg[2];
-    assign c_wr_half_o = recv_row_offset[6];
-    assign c_wr_nblock_o = recv_row_offset[7];
-    assign ab_wr_reg_o = recv_cmd_reg_idx;
-    assign ab_wr_dst_sel_o = recv_cmd_dst_sel;
+    assign ab_wr_en_o  = zero_active ? !zero_reg[2] :
+                         (ab_wr_fire && !recv_cmd_reg[2]);
+    assign c_wr_en_o = zero_active ? zero_reg[2] :
+                       (ab_wr_fire && recv_cmd_reg[2]);
+    assign c_wr_half_o = zero_active ? zero_segment[0] : recv_row_offset[6];
+    assign c_wr_nblock_o = zero_active ? zero_segment[1] : recv_row_offset[7];
+    assign ab_wr_reg_o = zero_active ? zero_reg[1:0] : recv_cmd_reg_idx;
+    assign ab_wr_dst_sel_o = zero_active ? 1'b0 : recv_cmd_dst_sel;
 
     assign recv_row_pad_bytes = AXI_STRB - recv_chunk_bytes;
     assign recv_row_data_mask = {AXI_DATA{1'b1}} >> {recv_row_pad_bytes, 3'b000};
-    assign ab_wr_data_o = recv_stream_data[AXI_DATA-1:0] & recv_row_data_mask;
+    assign ab_wr_data_o = zero_active ? '0 :
+                          (recv_stream_data[AXI_DATA-1:0] & recv_row_data_mask);
 
     // 行内最后一个 segment 写入后才推进逻辑行号。
     assign recv_row_done = ab_wr_fire && recv_chunk_last;
@@ -602,7 +687,7 @@ module MatrixDmaLoad #(
             end
         end
     end
-    assign ab_wr_row_o  = rows_received[5:0];
+    assign ab_wr_row_o  = zero_active ? zero_row : rows_received[5:0];
 
     assign recv_last_row = ((rows_received + 1'b1) == recv_cmd_rows);
     assign recv_cmd_error = recv_cmd_fault_seen || read_burst_done_error;
@@ -618,6 +703,7 @@ module MatrixDmaLoad #(
     // =========================================================================
     assign busy_o =
         issue_cmd_active ||
+        zero_active ||
         recv_cmd_active ||
         !issue_cmd_fifo_empty ||
         !inflight_fifo_empty ||
@@ -637,7 +723,14 @@ module MatrixDmaLoad #(
             done_valid_o <= 1'b0;
             done_fault_o <= 1'b0;
 
-            if (recv_cmd_success_done) begin
+            if (zero_done) begin
+                done_valid_o <= 1'b1;
+                done_pc_o <= zero_pc;
+            end else if (zero_fault_done) begin
+                done_valid_o <= 1'b1;
+                done_fault_o <= 1'b1;
+                done_pc_o <= zero_pc;
+            end else if (recv_cmd_success_done) begin
                 done_valid_o <= 1'b1;
                 done_pc_o <= recv_cmd_pc;
             end else if (recv_cmd_fault_done) begin

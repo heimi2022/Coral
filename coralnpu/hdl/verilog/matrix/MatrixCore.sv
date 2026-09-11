@@ -2,6 +2,8 @@ module MatrixCore (
     input  logic         clk,
     input  logic         rst_n,
 
+    // 上游 Scoreboard 必须覆盖已接收及排队命令的 RAW/WAR/WAW，
+    // 包括 AB/scale 源读取、C 读改写，以及 ZERO 的全部目标寄存器。
     // 矩阵计算命令通道。
     // 当前计算路径一次只接收一条命令。
     input  logic         cmd_valid_i,
@@ -11,6 +13,14 @@ module MatrixCore (
     input  logic [2:0]   cmd_ms1_i,
     input  logic [2:0]   cmd_ms2_i,
     input  logic [2:0]   cmd_md_i,
+
+    // mzero 命令接口。zero_reg_count_i 使用规范定义的数量编码：
+    // 000/001/011/111 分别表示清零 1/2/4/8 个矩阵寄存器。
+    input  logic          zero_valid_i,
+    output logic          zero_ready_o,
+    input  logic [31:0]   zero_pc_i,
+    input  logic [2:0]    zero_md_i,
+    input  logic [2:0]    zero_reg_count_i,
 
     // mem load/store 命令通道
     input  logic         mem_valid_i,
@@ -131,10 +141,10 @@ logic [1:0] state_q;
 logic [31:0] pc_q;
 logic       illegal_q;
 // N/K 各最多拆成两个 block，因此一条 matmul 最多产生四个输出 block。
-logic [2:0] pe_output_blocks_left_q;
-logic [2:0] pe_rs1_q;
-logic [2:0] pe_rs2_q;
-logic [2:0] pe_rd_q;
+logic [2:0]  pe_output_blocks_left_q;
+logic [2:0]  pe_rs1_q;
+logic [2:0]  pe_rs2_q;
+logic [2:0]  pe_rd_q;
 logic [31:0] pe_cfg_m_q;
 logic [31:0] pe_cfg_n_q;
 logic [31:0] pe_cfg_k_q;
@@ -217,6 +227,13 @@ logic         dma_done_fault_w;
 logic [31:0]  dma_done_pc_w;
 logic [31:0]  dma_done_fault_addr_w;
 
+logic dma_zero_valid_w;
+logic dma_zero_ready_w;
+
+// LOAD/ZERO share the DMA command FIFO; its single write port arbitrates them.
+assign dma_zero_valid_w = zero_valid_i;
+assign zero_ready_o = dma_zero_ready_w;
+
 // 当前计算指令的合法性检查：
 // - 两个源操作数必须是 tile 寄存器
 // - 目标操作数必须是 acc 寄存器
@@ -226,10 +243,10 @@ assign illegal_cfg_w = (cfg_m_i == 0) || (cfg_n_i == 0) || (cfg_k_i == 0) ||
 assign illegal_reg_class_w = cmd_ms1_i[2] || cmd_ms2_i[2] || !cmd_md_i[2];
 assign illegal_op_w = (cmd_op_i != 2'b00);
 
-// AB SRAM 是单端口结构。当前先让计算与 DMA 互斥，避免 DMA load 写入时
-// pe_ctrl 的逐行读取被冲突仲裁丢弃。两条命令同时到达时计算命令优先。
+// Independent registers have separate SRAM banks. The upstream scoreboard
+// excludes DMA writes to registers still read or written by the computation.
 assign cmd_can_issue_w = (state_q == STATE_IDLE) &&
-                         !dma_busy_w && !dma_done_valid_w && !pe_cmd_busy_w;
+                         !pe_cmd_busy_w;
 assign cmd_issue_w = cmd_valid_i && cmd_can_issue_w;
 assign pe_start_w = pe_start_q;
 
@@ -252,10 +269,8 @@ assign pe_cmd_complete_w = pe_rd_write_valid_w &&
 
 // MatrixDma 当前只实现 load，store 命令不送入 DMA。
 // 上游保证访存命令的寄存器类别、元素宽度及矩阵尺寸合法。
-assign dma_mem_valid_w = mem_valid_i && !mem_dir_w &&
-                         (state_q == STATE_IDLE) && !cmd_valid_i;
-assign mem_ready_o = !mem_dir_w && (state_q == STATE_IDLE) &&
-                     !cmd_valid_i && dma_mem_ready_w;
+assign dma_mem_valid_w = mem_valid_i && !mem_dir_w;
+assign mem_ready_o = !mem_dir_w && dma_mem_ready_w;
 
 // 将指令操作码归一化成 DMA 使用的方向、目的类型、元素字节数和二维形状。
 // A 按 M x K 保存，B 按转置后的 N x K 保存，以匹配 FIR-WS 供数方向。
@@ -350,7 +365,9 @@ end
 // - 本地计算 FSM
 // - DMA 子模块 FSM
 assign cmd_ready_o = cmd_can_issue_w;
-assign busy_o = dma_busy_w || ((state_q != STATE_IDLE) && (state_q != STATE_DONE));
+// Include pending completions. STATE_DONE is held if DMA uses the output.
+assign busy_o = dma_busy_w || dma_done_valid_w ||
+                (state_q != STATE_IDLE) || pe_cmd_busy_w;
 assign done_valid_o = dma_done_valid_w || (state_q == STATE_DONE);
 assign done_illegal_o = dma_done_valid_w ? dma_done_illegal_w : ((state_q == STATE_DONE) && illegal_q);
 assign done_pc_o = dma_done_valid_w ? dma_done_pc_w : pc_q;
@@ -468,6 +485,11 @@ assign m_axi_bready_o  = 1'b0;
 MatrixDma dma (
     .clk(clk),
     .rst_n(rst_n),
+    .zero_valid_i(dma_zero_valid_w),
+    .zero_ready_o(dma_zero_ready_w),
+    .zero_pc_i(zero_pc_i),
+    .zero_md_i(zero_md_i),
+    .zero_reg_count_i(zero_reg_count_i),
     .mem_valid_i(dma_mem_valid_w),
     .mem_ready_o(dma_mem_ready_w),
     .mem_pc_i(mem_pc_i),
@@ -515,52 +537,52 @@ pe_ctrl #(
     .TILE_COLS  ( PE_TILE_COLS  ),
     .TILE_ROWS  ( PE_TILE_ROWS  )
 ) u_pe_ctrl (
-    .clk                ( clk                       ),
-    .rst_n              ( rst_n                     ),
-    .cfg_m_i            ( pe_cfg_m_q                ),
-    .cfg_n_i            ( pe_cfg_n_q                ),
-    .cfg_k_i            ( pe_cfg_k_q                ),
-    .rs1_i              ( pe_rs1_q                  ),
-    .rs2_i              ( pe_rs2_q                  ),
-    .rd_i               ( pe_rd_q                   ),
-    .start_i            ( pe_start_w                ),
-    .rs1_data_i         ( ab_rd0_data_w             ),
-    .rs1_data_valid_i   ( ab_rd0_valid_w            ),
-    .rs1_o              ( pe_rs1_reg_w              ),
-    .rs1_addr_o         ( pe_rs1_addr_w             ),
-    .rs1_read_valid_o   ( pe_rs1_read_valid_w       ),
-    .rs1_col_o          ( pe_rs1_col_w              ),
-    .rs1_scale_data_i   ( ab_scale_rd0_data_w       ),
+    .clk                    ( clk                       ),
+    .rst_n                  ( rst_n                     ),
+    .cfg_m_i                ( pe_cfg_m_q                ),
+    .cfg_n_i                ( pe_cfg_n_q                ),
+    .cfg_k_i                ( pe_cfg_k_q                ),
+    .rs1_i                  ( pe_rs1_q                  ),
+    .rs2_i                  ( pe_rs2_q                  ),
+    .rd_i                   ( pe_rd_q                   ),
+    .start_i                ( pe_start_w                ),
+    .rs1_data_i             ( ab_rd0_data_w             ),
+    .rs1_data_valid_i       ( ab_rd0_valid_w            ),
+    .rs1_o                  ( pe_rs1_reg_w              ),
+    .rs1_addr_o             ( pe_rs1_addr_w             ),
+    .rs1_read_valid_o       ( pe_rs1_read_valid_w       ),
+    .rs1_col_o              ( pe_rs1_col_w              ),
+    .rs1_scale_data_i       ( ab_scale_rd0_data_w       ),
     .rs1_scale_data_valid_i ( ab_scale_rd0_valid_w  ),
-    .rs1_scale_reg_o    ( pe_rs1_scale_reg_w        ),
-    .rs1_scale_bank_o   ( pe_rs1_scale_bank_w       ),
-    .rs1_scale_kblock_o ( pe_rs1_scale_kblock_w     ),
+    .rs1_scale_reg_o        ( pe_rs1_scale_reg_w        ),
+    .rs1_scale_bank_o       ( pe_rs1_scale_bank_w       ),
+    .rs1_scale_kblock_o     ( pe_rs1_scale_kblock_w     ),
     .rs1_scale_read_valid_o ( pe_rs1_scale_read_valid_w ),
-    .rs2_data_i         ( ab_rd1_data1_w            ),
-    .rs2_data_valid_i   ( ab_rd1_valid_w            ),
-    .rs2_o              ( pe_rs2_reg_w              ),
-    .rs2_addr_o         ( pe_rs2_addr_w             ),
-    .rs2_read_valid_o   ( pe_rs2_read_valid_w       ),
-    .rs2_col_o          ( pe_rs2_col_w              ),
-    .rs2_scale_data_i   ( ab_scale_rd1_data_w       ),
+    .rs2_data_i             ( ab_rd1_data1_w            ),
+    .rs2_data_valid_i       ( ab_rd1_valid_w            ),
+    .rs2_o                  ( pe_rs2_reg_w              ),
+    .rs2_addr_o             ( pe_rs2_addr_w             ),
+    .rs2_read_valid_o       ( pe_rs2_read_valid_w       ),
+    .rs2_col_o              ( pe_rs2_col_w              ),
+    .rs2_scale_data_i       ( ab_scale_rd1_data_w       ),
     .rs2_scale_data_valid_i ( ab_scale_rd1_valid_w  ),
-    .rs2_scale_reg_o    ( pe_rs2_scale_reg_w        ),
-    .rs2_scale_bank_o   ( pe_rs2_scale_bank_w       ),
-    .rs2_scale_kblock_o ( pe_rs2_scale_kblock_w     ),
+    .rs2_scale_reg_o        ( pe_rs2_scale_reg_w        ),
+    .rs2_scale_bank_o       ( pe_rs2_scale_bank_w       ),
+    .rs2_scale_kblock_o     ( pe_rs2_scale_kblock_w     ),
     .rs2_scale_read_valid_o ( pe_rs2_scale_read_valid_w ),
-    .rd_data_i          ( pe_rd_data_w              ),
-    .rd_data_valid_i    ( c_rd_data_valid_w         ),
-    .rd_read_o          ( pe_rd_read_reg_w          ),
-    .rd_write_o         ( pe_rd_write_reg_w         ),
-    .rd_read_addr_o     ( pe_rd_read_addr_w         ),
-    .rd_write_addr_o    ( pe_rd_write_addr_w        ),
-    .rd_read_kblock_o   ( pe_rd_read_kblock_w       ),
-    .rd_write_kblock_o  ( pe_rd_write_kblock_w      ),
-    .rd_write_valid_o   ( pe_rd_write_valid_w       ),
-    .rd_read_valid_o    ( pe_rd_read_valid_w        ),
-    .cmd_busy_o         ( pe_cmd_busy_w             ),
-    .matmul_finish_o    ( pe_finish_w               ),
-    .pe_array_o         ( pe_result_data_w          )
+    .rd_data_i              ( pe_rd_data_w              ),
+    .rd_data_valid_i        ( c_rd_data_valid_w         ),
+    .rd_read_o              ( pe_rd_read_reg_w          ),
+    .rd_write_o             ( pe_rd_write_reg_w         ),
+    .rd_read_addr_o         ( pe_rd_read_addr_w         ),
+    .rd_write_addr_o        ( pe_rd_write_addr_w        ),
+    .rd_read_kblock_o       ( pe_rd_read_kblock_w       ),
+    .rd_write_kblock_o      ( pe_rd_write_kblock_w      ),
+    .rd_write_valid_o       ( pe_rd_write_valid_w       ),
+    .rd_read_valid_o        ( pe_rd_read_valid_w        ),
+    .cmd_busy_o             ( pe_cmd_busy_w             ),
+    .matmul_finish_o        ( pe_finish_w               ),
+    .pe_array_o             ( pe_result_data_w          )
 );
 
 always @(posedge clk or negedge rst_n) begin
@@ -578,7 +600,7 @@ always @(posedge clk or negedge rst_n) begin
     end else begin
         case (state_q)
             STATE_IDLE: begin
-                // 当整个矩阵核空闲时，锁存一条新的计算命令。
+                // 计算单元空闲时锁存命令，允许 DMA 同时执行。
                 if (cmd_issue_w) begin
                     pc_q <= cmd_pc_i;
                     pe_rs1_q <= cmd_ms1_i;
@@ -617,8 +639,9 @@ always @(posedge clk or negedge rst_n) begin
                 end
             end
             STATE_DONE: begin
-                // done 保持一拍，然后回到空闲态。
-                state_q <= STATE_IDLE;
+                // DMA completion has priority; retain PC/illegal until reported.
+                if (!dma_done_valid_w)
+                    state_q <= STATE_IDLE;
             end
             default: begin
                 state_q <= STATE_IDLE;

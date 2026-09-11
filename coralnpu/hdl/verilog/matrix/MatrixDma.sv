@@ -7,6 +7,14 @@ module MatrixDma #(
     input  logic                     clk,
     input  logic                     rst_n,
 
+    // Count encoding: 000/001/011/111 = 1/2/4/8 registers.
+    // Payload must remain stable while valid is asserted and ready is low.
+    input  logic                     zero_valid_i,
+    output logic                     zero_ready_o,
+    input  logic [31:0]              zero_pc_i,
+    input  logic [2:0]               zero_md_i,
+    input  logic [2:0]               zero_reg_count_i,
+
     // 来自 MatrixCore 的矩阵 load 命令。
     input  logic                     mem_valid_i,
     output logic                     mem_ready_o,
@@ -71,6 +79,11 @@ module MatrixDma #(
     ) u_matrix_dma_load (
         .clk              ( clk                    ),
         .rst_n            ( rst_n                  ),
+        .zero_valid_i     ( zero_valid_i           ),
+        .zero_ready_o     ( zero_ready_o           ),
+        .zero_pc_i        ( zero_pc_i              ),
+        .zero_md_i        ( zero_md_i              ),
+        .zero_reg_count_i ( zero_reg_count_i       ),
         .mem_valid_i      ( mem_valid_i            ),
         .mem_ready_o      ( mem_ready_o            ),
         .mem_pc_i         ( mem_pc_i               ),
