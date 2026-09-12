@@ -40,6 +40,15 @@ module CMatrixReg (
     input  logic          dma_wr_half_i,
     input  logic [511:0]  dma_wr_data_i,
 
+    // DMA 读端口：每周期读取一个 64B bank。
+    input  logic          dma_rd_en_i,
+    input  logic [1:0]    dma_rd_reg_i,
+    input  logic [5:0]    dma_rd_addr_i,
+    input  logic          dma_rd_nblock_i,
+    input  logic          dma_rd_half_i,
+    output logic          dma_rd_valid_o,
+    output logic [511:0]  dma_rd_data_o,
+
     // 计算读端口：每周期读取一个 128B 逻辑行。
     // SRAM 为同步读，读数据在接受请求后的一个时钟周期有效。
     input  logic          rd_en_i,
@@ -63,10 +72,13 @@ module CMatrixReg (
     logic         wr_dma_conflict_w;
     logic         rd_wr_conflict_w;
     logic         rd_dma_conflict_w;
+    logic         dma_rd_accept_w;
     logic [5:0]   wr_sram_addr_w;
     logic [5:0]   dma_wr_sram_addr_w;
     logic [5:0]   rd_sram_addr_w;
     logic [1:0]   dma_wr_bank_w;
+    logic [5:0]   dma_rd_sram_addr_w;
+    logic [1:0]   dma_rd_bank_w;
 
     logic [1:0]   rd_reg_q;
     logic         rd_odd_q;
@@ -78,6 +90,7 @@ module CMatrixReg (
     assign wr_sram_addr_w     = {wr_nblock_i,     wr_addr_i[5:1]};
     assign dma_wr_sram_addr_w = {dma_wr_nblock_i, dma_wr_addr_i[5:1]};
     assign rd_sram_addr_w     = {rd_nblock_i,     rd_addr_i[5:1]};
+    assign dma_rd_sram_addr_w = {dma_rd_nblock_i, dma_rd_addr_i[5:1]};
 
     // bank[1] 选择逻辑行奇偶，bank[0] 选择该行的低/高 64B。
     assign dma_wr_bank_w = {dma_wr_addr_i[0], dma_wr_half_i};
@@ -96,6 +109,15 @@ module CMatrixReg (
                               (wr_reg_i == rd_reg_i) &&
                               (wr_addr_i[0] == rd_addr_i[0]);
     assign rd_accept_w = rd_en_i && !rd_dma_conflict_w && !rd_wr_conflict_w;
+    assign dma_rd_bank_w = {dma_rd_addr_i[0], dma_rd_half_i};
+    assign dma_rd_accept_w = dma_rd_en_i &&
+                             !(dma_wr_en_i &&
+                               (dma_wr_reg_i == dma_rd_reg_i) &&
+                               (dma_wr_addr_i[0] == dma_rd_addr_i[0]) &&
+                               (dma_wr_half_i == dma_rd_half_i)) &&
+                             !(rd_en_i &&
+                               (rd_reg_i == dma_rd_reg_i) &&
+                               (rd_addr_i[0] == dma_rd_addr_i[0]));
 
     // 默认关闭所有 bank。CEN/WEN 均为低有效。
     always @* begin
@@ -135,6 +157,12 @@ module CMatrixReg (
             bank_addr[dma_wr_reg_i][dma_wr_bank_w] = dma_wr_sram_addr_w;
             bank_d[dma_wr_reg_i][dma_wr_bank_w]    = dma_wr_data_i;
         end
+
+        if (dma_rd_accept_w) begin
+            bank_cen[dma_rd_reg_i][dma_rd_bank_w] = 1'b0;
+            bank_wen[dma_rd_reg_i][dma_rd_bank_w] = 1'b1;
+            bank_addr[dma_rd_reg_i][dma_rd_bank_w] = dma_rd_sram_addr_w;
+        end
     end
 
     genvar gen_reg_idx;
@@ -167,15 +195,23 @@ module CMatrixReg (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             rd_valid_o <= 1'b0;
+            dma_rd_valid_o <= 1'b0;
             rd_reg_q   <= '0;
             rd_odd_q   <= 1'b0;
         end else begin
             rd_valid_o <= rd_accept_w;
+            dma_rd_valid_o <= dma_rd_accept_w;
             if (rd_accept_w) begin
                 rd_reg_q <= rd_reg_i;
                 rd_odd_q <= rd_addr_i[0];
             end
         end
+    end
+
+    always @* begin
+        dma_rd_data_o = '0;
+        if (dma_rd_valid_o)
+            dma_rd_data_o = bank_q[dma_rd_reg_i][dma_rd_bank_w];
     end
 
     // bank0/2 输出低 64B，bank1/3 输出高 64B。

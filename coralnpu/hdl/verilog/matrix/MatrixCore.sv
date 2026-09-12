@@ -137,80 +137,88 @@ localparam logic [3:0] MEM_ST_CT     = 4'd13;
 
 // 这里只保存计算路径的状态。
 // 访存搬运状态全部放在 MatrixDma 内部。
-logic [1:0] state_q;
-logic [31:0] pc_q;
-logic       illegal_q;
+logic [1:0]                     state_q;
+logic [31:0]                    pc_q;
+logic                           illegal_q;
+logic                           compute_done_pending_q;
 // N/K 各最多拆成两个 block，因此一条 matmul 最多产生四个输出 block。
-logic [2:0]  pe_output_blocks_left_q;
-logic [2:0]  pe_rs1_q;
-logic [2:0]  pe_rs2_q;
-logic [2:0]  pe_rd_q;
-logic [31:0] pe_cfg_m_q;
-logic [31:0] pe_cfg_n_q;
-logic [31:0] pe_cfg_k_q;
+logic [2:0]                     pe_output_blocks_left_q;
+logic [2:0]                     pe_rs1_q;
+logic [2:0]                     pe_rs2_q;
+logic [2:0]                     pe_rd_q;
+logic [31:0]                    pe_cfg_m_q;
+logic [31:0]                    pe_cfg_n_q;
+logic [31:0]                    pe_cfg_k_q;
 
-logic         dma_ab_wr_en_w;
-logic [1:0]   dma_ab_wr_reg_w;
-logic [5:0]   dma_ab_wr_row_w;
-logic [511:0] dma_ab_wr_data_w;
-logic         dma_ab_wr_dst_sel_w;
-logic         dma_c_wr_en_w;
-logic         dma_c_wr_half_w;
-logic         dma_c_wr_nblock_w;
-logic         dma_ab_matrix_wr_en_w;
-logic         dma_ab_scale_wr_en_w;
+logic                           dma_ab_wr_en_w;
+logic [1:0]                     dma_ab_wr_reg_w;
+logic [5:0]                     dma_ab_wr_row_w;
+logic [511:0]                   dma_ab_wr_data_w;
+logic                           dma_ab_wr_dst_sel_w;
+logic                           dma_c_wr_en_w;
+logic                           dma_c_wr_half_w;
+logic                           dma_c_wr_nblock_w;
+logic                           dma_ab_matrix_wr_en_w;
+logic                           dma_ab_scale_wr_en_w;
 
-logic         ab_rd0_valid_w;
-logic [PE_ACT_INPUT_W-1:0] ab_rd0_data_w;
-logic         ab_rd1_valid_w;
-logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data1_w;
-logic [PE_WEIGHT_INPUT_W-1:0] ab_rd1_data2_unused;
-logic         ab_scale_rd0_valid_w;
-logic [255:0] ab_scale_rd0_data_w;
-logic         ab_scale_rd1_valid_w;
-logic [255:0] ab_scale_rd1_data_w;
+logic                           ab_rd0_valid_w;
+logic [PE_ACT_INPUT_W-1:0]      ab_rd0_data_w;
+logic                           ab_rd1_valid_w;
+logic [PE_WEIGHT_INPUT_W-1:0]   ab_rd1_data1_w;
+logic [PE_WEIGHT_INPUT_W-1:0]   ab_rd1_data2_unused;
+logic                           ab_scale_rd0_valid_w;
+logic [255:0]                   ab_scale_rd0_data_w;
+logic                           ab_scale_rd1_valid_w;
+logic [255:0]                   ab_scale_rd1_data_w;
 
-logic [1:0]   pe_rs1_scale_reg_w;
-logic         pe_rs1_scale_bank_w;
-logic         pe_rs1_scale_kblock_w;
-logic         pe_rs1_scale_read_valid_w;
-logic [1:0]   pe_rs2_scale_reg_w;
-logic         pe_rs2_scale_bank_w;
-logic         pe_rs2_scale_kblock_w;
-logic         pe_rs2_scale_read_valid_w;
+logic [1:0]                     pe_rs1_scale_reg_w;
+logic                           pe_rs1_scale_bank_w;
+logic                           pe_rs1_scale_kblock_w;
+logic                           pe_rs1_scale_read_valid_w;
+logic [1:0]                     pe_rs2_scale_reg_w;
+logic                           pe_rs2_scale_bank_w;
+logic                           pe_rs2_scale_kblock_w;
+logic                           pe_rs2_scale_read_valid_w;
 
-logic         pe_start_w;
-logic         pe_start_q;
-logic         pe_cmd_busy_w;
-logic         pe_finish_w;
-logic         pe_cmd_complete_w;
-logic [2:0]   pe_rs1_reg_w;
-logic [5:0]   pe_rs1_addr_w;
-logic         pe_rs1_read_valid_w;
-logic [2:0]   pe_rs2_reg_w;
-logic [5:0]   pe_rs2_addr_w;
-logic         pe_rs2_read_valid_w;
-logic [2:0]   pe_rd_read_reg_w;
-logic [2:0]   pe_rd_write_reg_w;
-logic [5:0]   pe_rd_read_addr_w;
-logic [5:0]   pe_rd_write_addr_w;
-logic         pe_rd_read_kblock_w;
-logic         pe_rd_write_kblock_w;
-logic         pe_rd_read_valid_w;
-logic         pe_rd_write_valid_w;
-logic         c_rd_data_valid_w;
-logic [PE_ACC_ROW_W-1:0] pe_rd_data_w;
-logic [PE_ACC_ROW_W-1:0] pe_result_data_w;
+logic                           pe_start_w;
+logic                           pe_start_q;
+logic                           pe_cmd_busy_w;
+logic                           pe_finish_w;
+logic                           pe_cmd_complete_w;
+logic [2:0]                     pe_rs1_reg_w;
+logic [5:0]                     pe_rs1_addr_w;
+logic                           pe_rs1_read_valid_w;
+logic [2:0]                     pe_rs2_reg_w;
+logic [5:0]                     pe_rs2_addr_w;
+logic                           pe_rs2_read_valid_w;
+logic [2:0]                     pe_rd_read_reg_w;
+logic [2:0]                     pe_rd_write_reg_w;
+logic [5:0]                     pe_rd_read_addr_w;
+logic [5:0]                     pe_rd_write_addr_w;
+logic                           pe_rd_read_kblock_w;
+logic                           pe_rd_write_kblock_w;
+logic                           pe_rd_read_valid_w;
+logic                           pe_rd_write_valid_w;
+logic                           c_rd_data_valid_w;
+logic [PE_ACC_ROW_W-1:0]        pe_rd_data_w;
+logic [PE_ACC_ROW_W-1:0]        pe_result_data_w;
+logic                           dma_c_rd_en_w;
+logic [1:0]                     dma_c_rd_reg_w;
+logic [5:0]                     dma_c_rd_addr_w;
+logic                           dma_c_rd_nblock_w;
+logic                           dma_c_rd_half_w;
+logic                           dma_c_rd_valid_w;
+logic [511:0]                   dma_c_rd_data_w;
 
-logic         pe_rs1_col_w;
-logic         pe_rs2_col_w;
+logic                           pe_rs1_col_w;
+logic                           pe_rs2_col_w;
 
-logic         mem_dir_w;
-logic         mem_dst_sel_w;
-logic [1:0]   mem_elem_bytes_w;
-logic [7:0]   mem_rows_w;
-logic [7:0]   mem_cols_w;
-logic [31:0]  mem_stride_w;
+logic                           mem_dir_w;
+logic                           mem_dst_sel_w;
+logic [1:0]                     mem_elem_bytes_w;
+logic [7:0]                     mem_rows_w;
+logic [7:0]                     mem_cols_w;
+logic [31:0]                    mem_stride_w;
 
 logic         illegal_cfg_w;
 logic         illegal_reg_class_w;
@@ -245,8 +253,7 @@ assign illegal_op_w = (cmd_op_i != 2'b00);
 
 // Independent registers have separate SRAM banks. The upstream scoreboard
 // excludes DMA writes to registers still read or written by the computation.
-assign cmd_can_issue_w = (state_q == STATE_IDLE) &&
-                         !pe_cmd_busy_w;
+assign cmd_can_issue_w = (state_q == STATE_IDLE) && !pe_cmd_busy_w;
 assign cmd_issue_w = cmd_valid_i && cmd_can_issue_w;
 assign pe_start_w = pe_start_q;
 
@@ -256,8 +263,7 @@ always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
         pe_start_q <= 1'b0;
     end else begin
-        pe_start_q <= cmd_issue_w &&
-                      !(illegal_cfg_w || illegal_reg_class_w || illegal_op_w);
+        pe_start_q <= cmd_issue_w && !(illegal_cfg_w || illegal_reg_class_w || illegal_op_w);
     end
 end
 
@@ -367,9 +373,11 @@ end
 assign cmd_ready_o = cmd_can_issue_w;
 // Include pending completions. STATE_DONE is held if DMA uses the output.
 assign busy_o = dma_busy_w || dma_done_valid_w ||
-                (state_q != STATE_IDLE) || pe_cmd_busy_w;
-assign done_valid_o = dma_done_valid_w || (state_q == STATE_DONE);
-assign done_illegal_o = dma_done_valid_w ? dma_done_illegal_w : ((state_q == STATE_DONE) && illegal_q);
+                (state_q != STATE_IDLE) || pe_cmd_busy_w ||
+                compute_done_pending_q;
+assign done_valid_o = dma_done_valid_w || compute_done_pending_q;
+assign done_illegal_o = dma_done_valid_w ? dma_done_illegal_w :
+                        (compute_done_pending_q && illegal_q);
 assign done_pc_o = dma_done_valid_w ? dma_done_pc_w : pc_q;
 
 // 当前 pe_ctrl 实现的是普通 32-bit 累加，不产生饱和事件。
@@ -453,6 +461,13 @@ CMatrixReg c_regfile (
     .dma_wr_nblock_i    ( dma_c_wr_nblock_w         ),
     .dma_wr_half_i      ( dma_c_wr_half_w           ),
     .dma_wr_data_i      ( dma_ab_wr_data_w          ),
+    .dma_rd_en_i        ( dma_c_rd_en_w             ),
+    .dma_rd_reg_i       ( dma_c_rd_reg_w            ),
+    .dma_rd_addr_i      ( dma_c_rd_addr_w           ),
+    .dma_rd_nblock_i    ( dma_c_rd_nblock_w         ),
+    .dma_rd_half_i      ( dma_c_rd_half_w           ),
+    .dma_rd_valid_o     ( dma_c_rd_valid_w          ),
+    .dma_rd_data_o      ( dma_c_rd_data_w           ),
     .rd_en_i            ( pe_rd_read_valid_w        ),
     .rd_reg_i           ( pe_rd_read_reg_w[1:0]     ),
     .rd_addr_i          ( pe_rd_read_addr_w         ),
@@ -590,6 +605,7 @@ always @(posedge clk or negedge rst_n) begin
         state_q <= STATE_IDLE;
         pc_q <= '0;
         illegal_q <= 1'b0;
+        compute_done_pending_q <= 1'b0;
         pe_output_blocks_left_q <= '0;
         pe_rs1_q <= '0;
         pe_rs2_q <= '0;
@@ -612,6 +628,7 @@ always @(posedge clk or negedge rst_n) begin
                     if (illegal_cfg_w || illegal_reg_class_w || illegal_op_w) begin
                         illegal_q <= 1'b1;
                         pe_output_blocks_left_q <= '0;
+                        compute_done_pending_q <= 1'b1;
                         state_q <= STATE_DONE;
                     end else begin
                         illegal_q <= 1'b0;
@@ -632,6 +649,7 @@ always @(posedge clk or negedge rst_n) begin
                     (pe_rd_write_addr_w == (pe_cfg_m_q[5:0] - 1'b1))) begin
                     if (pe_cmd_complete_w) begin
                         pe_output_blocks_left_q <= '0;
+                        compute_done_pending_q <= 1'b1;
                         state_q <= STATE_DONE;
                     end else begin
                         pe_output_blocks_left_q <= pe_output_blocks_left_q - 3'd1;
@@ -639,9 +657,12 @@ always @(posedge clk or negedge rst_n) begin
                 end
             end
             STATE_DONE: begin
-                // DMA completion has priority; retain PC/illegal until reported.
-                if (!dma_done_valid_w)
+                // The shared completion port reports DMA first. Keep the
+                // compute completion pending until a cycle without DMA done.
+                if (compute_done_pending_q && !dma_done_valid_w) begin
+                    compute_done_pending_q <= 1'b0;
                     state_q <= STATE_IDLE;
+                end
             end
             default: begin
                 state_q <= STATE_IDLE;
