@@ -10,6 +10,9 @@
  * select the 64B beat within that row.  This layout matches the current C
  * register file and keeps the store engine independent of the register-file
  * implementation.
+ * This first version requires beat-aligned row addresses and at most four
+ * beats per row. Rows crossing 4KB are reported as faults, not split.
+ * Each matrix read request must be accepted; arbitration is external.
  */
 module MatrixDmaStore #(
     parameter int AXI_ADDR_W = 32,
@@ -75,6 +78,7 @@ module MatrixDmaStore #(
 
     typedef enum logic [3:0] {
         ST_IDLE,
+        ST_ROW_CHECK,
         ST_READ_REQ,
         ST_READ_WAIT,
         ST_WRITE,
@@ -144,7 +148,8 @@ module MatrixDmaStore #(
         matrix_rd_half_o       = beat_q[0];
         matrix_rd_source_sel_o = cmd_source_sel_q;
 
-        m_axi_awvalid_o = (state_q == ST_WRITE) && !aw_done_q;
+        // Keep AWVALID asserted even if W finishes before AW is accepted.
+        m_axi_awvalid_o = (state_q != ST_IDLE) && (state_q != ST_ROW_CHECK) && !aw_done_q;
         m_axi_awid_o    = '0;
         m_axi_awaddr_o  = row_addr_q;
         m_axi_awlen_o   = row_beats_q - 1'b1;
@@ -181,6 +186,8 @@ module MatrixDmaStore #(
             done_valid_q  <= 1'b0;
         end else begin
             done_valid_q <= 1'b0;
+            if (aw_fire)
+                aw_done_q <= 1'b1;
 
             case (state_q)
                 ST_IDLE: begin
@@ -200,15 +207,31 @@ module MatrixDmaStore #(
                         aw_done_q        <= 1'b0;
                         fault_q          <= 1'b0;
                         fault_addr_q     <= '0;
+                        // Current source addressing covers four banks per row.
+                        // Reject unsupported layouts before issuing AXI traffic.
                         if ((cmd_rows_i == 0) || (cmd_cols_i == 0) ||
-                            (cmd_rows_i > (1 << ROW_IDX_W))) begin
+                            (cmd_rows_i > (1 << ROW_IDX_W)) ||
+                            (cmd_elem_bytes_i > 2) || (row_beats_calc > 4) ||
+                            (cmd_base_i[BYTE_LG2-1:0] != 0) ||
+                            ((cmd_rows_i > 1) && (cmd_stride_i[BYTE_LG2-1:0] != 0))) begin
                             fault_q      <= 1'b1;
                             fault_addr_q <= cmd_base_i;
                             done_valid_q <= 1'b1;
                             state_q      <= ST_IDLE;
                         end else begin
-                            state_q <= ST_READ_REQ;
+                            state_q <= ST_ROW_CHECK;
                         end
+                    end
+                end
+
+                ST_ROW_CHECK: begin
+                    if (({1'b0, row_addr_q[11:0]} + (row_beats_q * BYTE_COUNT)) > 4096) begin
+                        fault_q <= 1'b1;
+                        fault_addr_q <= row_addr_q;
+                        done_valid_q <= 1'b1;
+                        state_q <= ST_IDLE;
+                    end else begin
+                        state_q <= ST_READ_REQ;
                     end
                 end
 
@@ -225,9 +248,6 @@ module MatrixDmaStore #(
                 end
 
                 ST_WRITE: begin
-                    if (aw_fire)
-                        aw_done_q <= 1'b1;
-
                     if (w_fire) begin
                         data_valid_q <= 1'b0;
                         if (!m_axi_wlast_o) begin
@@ -254,7 +274,7 @@ module MatrixDmaStore #(
                             beat_q      <= '0;
                             row_addr_q  <= row_addr_q + cmd_stride_q;
                             aw_done_q   <= 1'b0;
-                            state_q      <= ST_READ_REQ;
+                            state_q      <= ST_ROW_CHECK;
                         end
                     end
                 end

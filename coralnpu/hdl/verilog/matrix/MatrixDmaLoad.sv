@@ -58,7 +58,7 @@ module MatrixDmaLoad #(
     output logic                     mem_ready_o,
     input  logic [31:0]              mem_pc_i,
     input  logic [2:0]               mem_reg_i,
-    input  logic                     mem_dst_sel_i,     // 0: ABMatrixReg，1: ABScaleReg
+    input  logic                     mem_ab_scale_sel_i, // 0: ABMatrixReg，1: ABScaleReg
     input  logic [1:0]               mem_elem_bytes_i,  // 0: 1 byte, 1: 2 bytes, 2: 4 bytes
     input  logic [31:0]              mem_base_i,
     input  logic [31:0]              mem_stride_i,
@@ -257,7 +257,7 @@ module MatrixDmaLoad #(
     assign mem_row_byte_num = mem_cols_i[6:0] << mem_elem_bytes_i;
     assign issue_cmd_fifo_data_in = zero_valid_i ?
         {1'b1, zero_pc_i, zero_md_i, 1'b0, {ROW_BYTE_W{1'b0}}, 32'b0, 32'b0, 8'b0, zero_reg_count_i} :
-        {1'b0, mem_pc_i, mem_reg_i, mem_dst_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i, 3'b0};
+        {1'b0, mem_pc_i, mem_reg_i, mem_ab_scale_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i, 3'b0};
 
     fifo #(
         .DATA_WIDTH ( CMD_DATA        ),

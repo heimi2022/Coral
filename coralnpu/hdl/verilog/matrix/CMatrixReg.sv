@@ -82,6 +82,8 @@ module CMatrixReg (
 
     logic [1:0]   rd_reg_q;
     logic         rd_odd_q;
+    logic [1:0]   dma_rd_reg_q;
+    logic [1:0]   dma_rd_bank_q;
 
     integer reg_idx;
     integer bank_idx;
@@ -111,6 +113,9 @@ module CMatrixReg (
     assign rd_accept_w = rd_en_i && !rd_dma_conflict_w && !rd_wr_conflict_w;
     assign dma_rd_bank_w = {dma_rd_addr_i[0], dma_rd_half_i};
     assign dma_rd_accept_w = dma_rd_en_i &&
+                             !(wr_accept_w &&
+                               (wr_reg_i == dma_rd_reg_i) &&
+                               (wr_addr_i[0] == dma_rd_addr_i[0])) &&
                              !(dma_wr_en_i &&
                                (dma_wr_reg_i == dma_rd_reg_i) &&
                                (dma_wr_addr_i[0] == dma_rd_addr_i[0]) &&
@@ -198,6 +203,8 @@ module CMatrixReg (
             dma_rd_valid_o <= 1'b0;
             rd_reg_q   <= '0;
             rd_odd_q   <= 1'b0;
+            dma_rd_reg_q  <= '0;
+            dma_rd_bank_q <= '0;
         end else begin
             rd_valid_o <= rd_accept_w;
             dma_rd_valid_o <= dma_rd_accept_w;
@@ -205,13 +212,17 @@ module CMatrixReg (
                 rd_reg_q <= rd_reg_i;
                 rd_odd_q <= rd_addr_i[0];
             end
+            if (dma_rd_accept_w) begin
+                dma_rd_reg_q  <= dma_rd_reg_i;
+                dma_rd_bank_q <= dma_rd_bank_w;
+            end
         end
     end
 
     always @* begin
         dma_rd_data_o = '0;
         if (dma_rd_valid_o)
-            dma_rd_data_o = bank_q[dma_rd_reg_i][dma_rd_bank_w];
+            dma_rd_data_o = bank_q[dma_rd_reg_q][dma_rd_bank_q];
     end
 
     // bank0/2 输出低 64B，bank1/3 输出高 64B。

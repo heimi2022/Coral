@@ -214,7 +214,7 @@ logic                           pe_rs1_col_w;
 logic                           pe_rs2_col_w;
 
 logic                           mem_dir_w;
-logic                           mem_dst_sel_w;
+logic                           mem_ab_scale_sel_w; // 0: AB matrix, 1: AB scale
 logic [1:0]                     mem_elem_bytes_w;
 logic [7:0]                     mem_rows_w;
 logic [7:0]                     mem_cols_w;
@@ -228,12 +228,24 @@ logic         cmd_issue_w;
 
 logic         dma_busy_w;
 logic         dma_mem_valid_w;
+logic         dma_mem_store_w;
 logic         dma_mem_ready_w;
 logic         dma_done_valid_w;
 logic         dma_done_illegal_w;
 logic         dma_done_fault_w;
 logic [31:0]  dma_done_pc_w;
 logic [31:0]  dma_done_fault_addr_w;
+logic         dma_m_axi_awvalid_w;
+logic [0:0]   dma_m_axi_awid_w;
+logic [31:0]  dma_m_axi_awaddr_w;
+logic [7:0]   dma_m_axi_awlen_w;
+logic [2:0]   dma_m_axi_awsize_w;
+logic [1:0]   dma_m_axi_awburst_w;
+logic         dma_m_axi_wvalid_w;
+logic [511:0] dma_m_axi_wdata_w;
+logic [63:0]  dma_m_axi_wstrb_w;
+logic         dma_m_axi_wlast_w;
+logic         dma_m_axi_bready_w;
 
 logic dma_zero_valid_w;
 logic dma_zero_ready_w;
@@ -273,10 +285,11 @@ assign pe_cmd_complete_w = pe_rd_write_valid_w &&
                            (pe_rd_write_addr_w == (pe_cfg_m_q[5:0] - 1'b1)) &&
                            (pe_output_blocks_left_q == 3'd1);
 
-// MatrixDma 当前只实现 load，store 命令不送入 DMA。
 // 上游保证访存命令的寄存器类别、元素宽度及矩阵尺寸合法。
-assign dma_mem_valid_w = mem_valid_i && !mem_dir_w;
-assign mem_ready_o = !mem_dir_w && dma_mem_ready_w;
+// Only STORE C has a source read adapter; other STORE variants remain disabled.
+assign dma_mem_valid_w = mem_valid_i && (!mem_dir_w || (mem_op_i == MEM_ST_C));
+assign dma_mem_store_w = mem_dir_w;
+assign mem_ready_o = dma_mem_ready_w && (!mem_dir_w || (mem_op_i == MEM_ST_C));
 
 // 将指令操作码归一化成 DMA 使用的方向、目的类型、元素字节数和二维形状。
 // A 按 M x K 保存，B 按转置后的 N x K 保存，以匹配 FIR-WS 供数方向。
@@ -284,7 +297,7 @@ assign mem_ready_o = !mem_dir_w && dma_mem_ready_w;
 // 软件必须保证用于分组的 K 维度是 32 的整数倍。
 always @* begin
     mem_dir_w     = 1'b0;
-    mem_dst_sel_w = 1'b0;
+    mem_ab_scale_sel_w = 1'b0;
     mem_elem_bytes_w = mem_elem_width_i;
     mem_rows_w    = cfg_m_i[7:0];
     mem_cols_w    = cfg_k_i[7:0];
@@ -327,14 +340,14 @@ always @* begin
             mem_stride_w = 32'd64;
         end
         MEM_LD_AT: begin
-            mem_dst_sel_w = 1'b1;
+            mem_ab_scale_sel_w = 1'b1;
             mem_elem_bytes_w = 2'b00;
             // scale 在内存中按 K block 转置存放，每行包含全部 M scale。
             mem_rows_w    = cfg_k_i >> 5;
             mem_cols_w    = cfg_m_i[7:0];
         end
         MEM_LD_BT: begin
-            mem_dst_sel_w = 1'b1;
+            mem_ab_scale_sel_w = 1'b1;
             mem_elem_bytes_w = 2'b00;
             // scale 在内存中按 K block 转置存放，每行包含全部 N scale。
             mem_rows_w    = cfg_k_i >> 5;
@@ -483,65 +496,89 @@ assign dmem_req_addr_o  = 32'b0;
 assign dmem_req_wdata_o = 256'b0;
 assign dmem_req_wmask_o = 32'b0;
 
-// MatrixDma 当前不包含 store，保留顶层 AXI 写端口并固定为空闲。
-assign m_axi_awvalid_o = 1'b0;
-assign m_axi_awid_o    = '0;
-assign m_axi_awaddr_o  = '0;
-assign m_axi_awlen_o   = '0;
-assign m_axi_awsize_o  = '0;
-assign m_axi_awburst_o = '0;
-assign m_axi_wvalid_o  = 1'b0;
-assign m_axi_wdata_o   = '0;
-assign m_axi_wstrb_o   = '0;
-assign m_axi_wlast_o   = 1'b0;
-assign m_axi_bready_o  = 1'b0;
+assign m_axi_awvalid_o = dma_m_axi_awvalid_w;
+assign m_axi_awid_o    = dma_m_axi_awid_w;
+assign m_axi_awaddr_o  = dma_m_axi_awaddr_w;
+assign m_axi_awlen_o   = dma_m_axi_awlen_w;
+assign m_axi_awsize_o  = dma_m_axi_awsize_w;
+assign m_axi_awburst_o = dma_m_axi_awburst_w;
+assign m_axi_wvalid_o  = dma_m_axi_wvalid_w;
+assign m_axi_wdata_o   = dma_m_axi_wdata_w;
+assign m_axi_wstrb_o   = dma_m_axi_wstrb_w;
+assign m_axi_wlast_o   = dma_m_axi_wlast_w;
+assign m_axi_bready_o  = dma_m_axi_bready_w;
 
 // DMA 共享 512-bit 数据、reg 和 row，分别使能 AB/scale 或 C 写口。
 MatrixDma dma (
-    .clk(clk),
-    .rst_n(rst_n),
-    .zero_valid_i(dma_zero_valid_w),
-    .zero_ready_o(dma_zero_ready_w),
-    .zero_pc_i(zero_pc_i),
-    .zero_md_i(zero_md_i),
-    .zero_reg_count_i(zero_reg_count_i),
-    .mem_valid_i(dma_mem_valid_w),
-    .mem_ready_o(dma_mem_ready_w),
-    .mem_pc_i(mem_pc_i),
-    .mem_reg_i(mem_reg_i),
-    .mem_dst_sel_i(mem_dst_sel_w),
-    .mem_elem_bytes_i(mem_elem_bytes_w),
-    .mem_base_i(mem_base_i),
-    .mem_stride_i(mem_stride_w),
-    .mem_rows_i(mem_rows_w),
-    .mem_cols_i(mem_cols_w),
-    .busy_o(dma_busy_w),
-    .done_valid_o(dma_done_valid_w),
-    .done_illegal_o(dma_done_illegal_w),
-    .done_fault_o(dma_done_fault_w),
-    .done_pc_o(dma_done_pc_w),
-    .done_fault_addr_o(dma_done_fault_addr_w),
-    .ab_wr_en_o(dma_ab_wr_en_w),
-    .ab_wr_reg_o(dma_ab_wr_reg_w),
-    .ab_wr_row_o(dma_ab_wr_row_w),
-    .ab_wr_data_o(dma_ab_wr_data_w),
-    .ab_wr_dst_sel_o(dma_ab_wr_dst_sel_w),
-    .c_wr_en_o(dma_c_wr_en_w),
-    .c_wr_half_o(dma_c_wr_half_w),
-    .c_wr_nblock_o(dma_c_wr_nblock_w),
-    .m_axi_arvalid_o(m_axi_arvalid_o),
-    .m_axi_arready_i(m_axi_arready_i),
-    .m_axi_arid_o(m_axi_arid_o),
-    .m_axi_araddr_o(m_axi_araddr_o),
-    .m_axi_arlen_o(m_axi_arlen_o),
-    .m_axi_arsize_o(m_axi_arsize_o),
-    .m_axi_arburst_o(m_axi_arburst_o),
-    .m_axi_rvalid_i(m_axi_rvalid_i),
-    .m_axi_rready_o(m_axi_rready_o),
-    .m_axi_rid_i(m_axi_rid_i),
-    .m_axi_rdata_i(m_axi_rdata_i),
-    .m_axi_rresp_i(m_axi_rresp_i),
-    .m_axi_rlast_i(m_axi_rlast_i)
+    .clk                    (clk                    ),
+    .rst_n                  (rst_n                  ),
+    .zero_valid_i           (dma_zero_valid_w       ),
+    .zero_ready_o           (dma_zero_ready_w       ),
+    .zero_pc_i              (zero_pc_i              ),
+    .zero_md_i              (zero_md_i              ),
+    .zero_reg_count_i       (zero_reg_count_i       ),
+    .mem_valid_i            (dma_mem_valid_w        ),
+    .mem_ready_o            (dma_mem_ready_w        ),
+    .mem_store_i            (dma_mem_store_w        ),
+    .mem_pc_i               (mem_pc_i               ),
+    .mem_reg_i              (mem_reg_i              ),
+    .mem_ab_scale_sel_i     (mem_ab_scale_sel_w     ),
+    .mem_elem_bytes_i       (mem_elem_bytes_w       ),
+    .mem_base_i             (mem_base_i             ),
+    .mem_stride_i           (mem_stride_w           ),
+    .mem_rows_i             (mem_rows_w             ),
+    .mem_cols_i             (mem_cols_w             ),
+    .matrix_rd_en_o         (dma_c_rd_en_w          ),
+    .matrix_rd_reg_o        (dma_c_rd_reg_w         ),
+    .matrix_rd_addr_o       (dma_c_rd_addr_w        ),
+    .matrix_rd_nblock_o     (dma_c_rd_nblock_w      ),
+    .matrix_rd_half_o       (dma_c_rd_half_w        ),
+    .matrix_rd_source_sel_o (),
+    .matrix_rd_valid_i      (dma_c_rd_valid_w       ),
+    .matrix_rd_data_i       (dma_c_rd_data_w        ),
+    .busy_o                 (dma_busy_w             ),
+    .done_valid_o           (dma_done_valid_w       ),
+    .done_illegal_o         (dma_done_illegal_w     ),
+    .done_fault_o           (dma_done_fault_w       ),
+    .done_pc_o              (dma_done_pc_w          ),
+    .done_fault_addr_o      (dma_done_fault_addr_w  ),
+    .ab_wr_en_o             (dma_ab_wr_en_w         ),
+    .ab_wr_reg_o            (dma_ab_wr_reg_w        ),
+    .ab_wr_row_o            (dma_ab_wr_row_w        ),
+    .ab_wr_data_o           (dma_ab_wr_data_w       ),
+    .ab_wr_dst_sel_o        (dma_ab_wr_dst_sel_w    ),
+    .c_wr_en_o              (dma_c_wr_en_w          ),
+    .c_wr_half_o            (dma_c_wr_half_w        ),
+    .c_wr_nblock_o          (dma_c_wr_nblock_w      ),
+    .m_axi_arvalid_o        (m_axi_arvalid_o        ),
+    .m_axi_arready_i        (m_axi_arready_i        ),
+    .m_axi_arid_o           (m_axi_arid_o           ),
+    .m_axi_araddr_o         (m_axi_araddr_o         ),
+    .m_axi_arlen_o          (m_axi_arlen_o          ),
+    .m_axi_arsize_o         (m_axi_arsize_o         ),
+    .m_axi_arburst_o        (m_axi_arburst_o        ),
+    .m_axi_rvalid_i         (m_axi_rvalid_i         ),
+    .m_axi_rready_o         (m_axi_rready_o         ),
+    .m_axi_rid_i            (m_axi_rid_i            ),
+    .m_axi_rdata_i          (m_axi_rdata_i          ),
+    .m_axi_rresp_i          (m_axi_rresp_i          ),
+    .m_axi_rlast_i          (m_axi_rlast_i          ),
+    .m_axi_awvalid_o        (dma_m_axi_awvalid_w    ),
+    .m_axi_awready_i        (m_axi_awready_i        ),
+    .m_axi_awid_o           (dma_m_axi_awid_w       ),
+    .m_axi_awaddr_o         (dma_m_axi_awaddr_w     ),
+    .m_axi_awlen_o          (dma_m_axi_awlen_w      ),
+    .m_axi_awsize_o         (dma_m_axi_awsize_w     ),
+    .m_axi_awburst_o        (dma_m_axi_awburst_w    ),
+    .m_axi_wvalid_o         (dma_m_axi_wvalid_w     ),
+    .m_axi_wready_i         (m_axi_wready_i         ),
+    .m_axi_wdata_o          (dma_m_axi_wdata_w      ),
+    .m_axi_wstrb_o          (dma_m_axi_wstrb_w      ),
+    .m_axi_wlast_o          (dma_m_axi_wlast_w      ),
+    .m_axi_bvalid_i         (m_axi_bvalid_i         ),
+    .m_axi_bready_o         (dma_m_axi_bready_w     ),
+    .m_axi_bid_i            (m_axi_bid_i            ),
+    .m_axi_bresp_i          (m_axi_bresp_i          ) 
 );
 
 // Coral 的 mmacc.w.b 使用 int8 A/B 和 32-bit C。pe_ctrl 负责 K 分块、
