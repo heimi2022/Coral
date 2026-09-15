@@ -2,7 +2,8 @@ module MatrixDma #(
     parameter int AXI_ADDR_W = 32,
     parameter int AXI_DATA_W = 512,
     parameter int AXI_ID_W   = 1,
-    parameter int REG_IDX_W  = 2
+    parameter int REG_IDX_W  = 2,
+    parameter int WRITE_OUTSTANDING_DEPTH = 4
 ) (
     input  logic                     clk,
     input  logic                     rst_n,
@@ -222,7 +223,8 @@ module MatrixDma #(
         .AXI_ADDR_W       ( AXI_ADDR_W ),
         .AXI_DATA_W       ( AXI_DATA_W ),
         .AXI_ID_W         ( AXI_ID_W   ),
-        .REG_IDX_W        ( REG_IDX_W )
+        .REG_IDX_W        ( REG_IDX_W ),
+        .WRITE_OUTSTANDING_DEPTH ( WRITE_OUTSTANDING_DEPTH )
     ) u_matrix_dma_store (
         .clk                    ( clk                    ),
         .rst_n                  ( rst_n                  ),
