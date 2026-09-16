@@ -136,7 +136,7 @@ module MatrixDma #(
 
     assign mem_ready_o = mem_store_i ? (store_mem_ready_w && store_accept_enable) : load_mem_ready_w;
     assign busy_o = load_busy_w || store_busy_w || store_done_pending_q;
-    // LOAD/ZERO completion is a pulse and cannot be stalled. Retain STORE
+    // LOAD completion is a pulse and cannot be stalled. Retain STORE
     // completion until the shared port is free; block new stores meanwhile.
     assign done_valid_o = load_done_valid_w || store_done_pending_q;
     assign done_fault_o = done_valid_o && (load_done_valid_w ? load_done_fault_w : store_fault_q);
@@ -171,6 +171,9 @@ module MatrixDma #(
     assign m_axi_wlast_o   = store_wlast_w;
     assign m_axi_bready_o  = store_bready_w;
 
+    // ZERO 执行路径已移除；保留顶层接口，等待独立实现，期间不接收命令。
+    assign zero_ready_o = 1'b0;
+
     MatrixDmaLoad #(
         .AXI_ADDR               ( AXI_ADDR_W           ),
         .AXI_DATA               ( AXI_DATA_W           ),
@@ -182,11 +185,6 @@ module MatrixDma #(
     ) u_matrix_dma_load (
         .clk              ( clk                    ),
         .rst_n            ( rst_n                  ),
-        .zero_valid_i     ( zero_valid_i           ),
-        .zero_ready_o     ( zero_ready_o           ),
-        .zero_pc_i        ( zero_pc_i              ),
-        .zero_md_i        ( zero_md_i              ),
-        .zero_reg_count_i ( zero_reg_count_i       ),
         .mem_valid_i      ( mem_valid_i && !mem_store_i ),
         .mem_ready_o      ( load_mem_ready_w       ),
         .mem_pc_i         ( mem_pc_i               ),
