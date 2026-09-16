@@ -113,6 +113,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
   addResource("hdl/verilog/matrix/MatrixMacArray.sv")
   addResource("hdl/verilog/matrix/MatrixDma.sv")
   addResource("hdl/verilog/matrix/MatrixDmaStore.sv")
+  addResource("hdl/verilog/matrix/MatrixReadDataProcess.sv")
   addResource("hdl/verilog/matrix/MatrixCore.sv")
 }
 

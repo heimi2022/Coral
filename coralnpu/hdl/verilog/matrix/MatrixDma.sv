@@ -118,6 +118,12 @@ module MatrixDma #(
     logic [2:0] store_awsize_w;
     logic [1:0] store_awburst_w;
     logic [AXI_DATA_W-1:0] store_wdata_w;
+    logic [AXI_DATA_W-1:0] store_rd_data_w;
+    logic store_rd_valid_w;
+    logic store_rd_ready_w;
+    logic store_rd_convert_c_q;
+    logic store_cmd_valid_w;
+    logic [1:0] store_cmd_source_sel_w;
     logic [AXI_DATA_W/8-1:0] store_wstrb_w;
     logic store_wlast_w;
     logic store_bready_w;
@@ -219,6 +225,34 @@ module MatrixDma #(
         .m_axi_rlast_i    ( m_axi_rlast_i          )
     );
 
+    // 矩阵读延迟固定一拍；来源跟随请求锁存，不能使用已切换的下一段上下文。
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            store_rd_convert_c_q <= 1'b0;
+        else if (matrix_rd_en_o)
+            store_rd_convert_c_q <= (matrix_rd_source_sel_o == 2'd2);
+    end
+
+    // 原始矩阵读返回先暂存和处理，再通过 ready/valid 送入 Store FIFO。
+    MatrixReadDataProcess #(
+        .DATA_W (AXI_DATA_W)
+    ) u_store_read_data_process (
+        .clk         (clk),
+        .rst_n       (rst_n),
+        .in_valid_i  (matrix_rd_valid_i),
+        .in_ready_o  (),
+        .in_data_i   (matrix_rd_data_i),
+        .convert_c_i (store_rd_convert_c_q),
+        .out_valid_o (store_rd_valid_w),
+        .out_ready_i (store_rd_ready_w),
+        .out_data_o  (store_rd_data_w)
+    );
+
+    assign store_cmd_valid_w = mem_valid_i && mem_store_i && store_accept_enable;
+    // 0: AB, 1: AB scale, 2: C. mem_ab_scale_sel_i only selects AB/scale.
+    assign store_cmd_source_sel_w = mem_reg_i[2] ? 2'd2 :
+                                    (mem_ab_scale_sel_i ? 2'd1 : 2'd0);
+                                    
     MatrixDmaStore #(
         .AXI_ADDR_W       ( AXI_ADDR_W ),
         .AXI_DATA_W       ( AXI_DATA_W ),
@@ -228,12 +262,11 @@ module MatrixDma #(
     ) u_matrix_dma_store (
         .clk                    ( clk                    ),
         .rst_n                  ( rst_n                  ),
-        .cmd_valid_i            ( mem_valid_i && mem_store_i && store_accept_enable ),
+        .cmd_valid_i            ( store_cmd_valid_w        ),
         .cmd_ready_o            ( store_mem_ready_w       ),
         .cmd_pc_i               ( mem_pc_i                ),
         .cmd_reg_i              ( mem_reg_i[REG_IDX_W-1:0] ),
-        // 0: AB, 1: AB scale, 2: C. mem_ab_scale_sel_i only selects AB/scale.
-        .cmd_source_sel_i       ( mem_reg_i[2] ? 2'd2 : (mem_ab_scale_sel_i ? 2'd1 : 2'd0) ),
+        .cmd_source_sel_i       ( store_cmd_source_sel_w   ),
         .cmd_elem_bytes_i       ( mem_elem_bytes_i         ),
         .cmd_base_i             ( mem_base_i               ),
         .cmd_stride_i           ( mem_stride_i             ),
@@ -250,8 +283,9 @@ module MatrixDma #(
         .matrix_rd_nblock_o     ( matrix_rd_nblock_o        ),
         .matrix_rd_half_o       ( matrix_rd_half_o          ),
         .matrix_rd_source_sel_o ( matrix_rd_source_sel_o    ),
-        .matrix_rd_valid_i      ( matrix_rd_valid_i         ),
-        .matrix_rd_data_i       ( matrix_rd_data_i          ),
+        .matrix_rd_valid_i      ( store_rd_valid_w          ),
+        .matrix_rd_data_i       ( store_rd_data_w           ),
+        .matrix_rd_ready_o      ( store_rd_ready_w          ),
         .m_axi_awvalid_o        ( store_awvalid_w           ),
         .m_axi_awready_i        ( m_axi_awready_i          ),
         .m_axi_awid_o           ( store_awid_w              ),

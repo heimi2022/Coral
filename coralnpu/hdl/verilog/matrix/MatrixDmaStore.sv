@@ -1,39 +1,7 @@
-/* 矩阵寄存器读出数据处理：一级弹性缓存，格式转换接口默认直通。 */
-module MatrixReadDataProcess #(
-    parameter int DATA_W = 512
-) (
-    input  logic             clk,
-    input  logic             rst_n,
-    input  logic             in_valid_i,
-    output logic             in_ready_o,
-    input  logic [DATA_W-1:0] in_data_i,
-    output logic             out_valid_o,
-    input  logic             out_ready_i,
-    output logic [DATA_W-1:0] out_data_o
-);
-    logic [DATA_W-1:0] data_q;
-    logic              valid_q;
-
-    // 当前先保持原始编码直通。定制 FP32 转换应在这里替换。
-    assign out_data_o  = data_q;
-    assign out_valid_o = valid_q;
-    assign in_ready_o  = !valid_q || out_ready_i;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            data_q  <= '0;
-            valid_q <= 1'b0;
-        end else if (in_ready_o) begin
-            valid_q <= in_valid_i;
-            if (in_valid_i)
-                data_q <= in_data_i;
-        end
-    end
-endmodule
-
 /* 
     矩阵寄存器到 DDR 的通用 Store 引擎。 
-    1. 当前DMA 对矩阵寄存器读出默认 发出请求后会的下一周期 即可返回数据。 否则逻辑需要修改。
+    1. 当前DMA 对矩阵寄存器读出默认 发出请求后会的下一周期 即可返回数据。 否则需要修改反压逻辑
+    2. 软件使用上 存储的地址 需要 64B 对齐，否则wstrb 逻辑会有问题
 
 */
 module MatrixDmaStore #(
@@ -73,6 +41,7 @@ module MatrixDmaStore #(
     output logic [1:0]                   matrix_rd_source_sel_o,
     input  logic                         matrix_rd_valid_i,
     input  logic [AXI_DATA_W-1:0]        matrix_rd_data_i,
+    output logic                         matrix_rd_ready_o,
 
     output logic                         m_axi_awvalid_o,
     input  logic                         m_axi_awready_i,
@@ -99,15 +68,17 @@ module MatrixDmaStore #(
     localparam int PAGE_LEN_W        = PAGE_OFFSET_W - BYTE_LG2;
     localparam int ROW_BYTES_W       = 10;
     localparam int DATA_FIFO_DEPTH   = 2;
+    // 包含 MatrixDma 中读数据处理模块的一拍缓存；返回接口遵循 ready/valid。
     localparam int READ_CAPACITY     = DATA_FIFO_DEPTH + 1;
     localparam int READ_COUNT_W      = $clog2(READ_CAPACITY + 1);
     localparam int OUT_COUNT_W       = $clog2(WRITE_OUTSTANDING_DEPTH + 1);
 
-    localparam int CMD_DATA_W = 32 + REG_IDX_W + 2 + AXI_ADDR_W + 32 + 8 + ROW_BYTES_W + 8;
+    localparam int CMD_DATA_W = REG_IDX_W + 2 + AXI_ADDR_W + 32 + 8 + ROW_BYTES_W + 8;
 
     // 一个 entry 对应一个不跨 4KB 的 AXI burst。
-    localparam int AW_CTX_DATA_W = AXI_ADDR_W + 8 + REG_IDX_W + 2 + ROW_IDX_W + 8 + ROW_BYTES_W + 32 + 1;
-    localparam int RESP_DATA_W = AXI_ADDR_W + 32 + 1;
+    localparam int AW_CTX_DATA_W = AXI_ADDR_W + 8 + REG_IDX_W + 2 + ROW_IDX_W + 8 + ROW_BYTES_W + 1;
+    localparam int RESP_DATA_W = AXI_ADDR_W + 1;
+    localparam int W_CTX_DATA_W = AXI_ADDR_W + 8 + 8 + ROW_BYTES_W + 1;
 
     logic [CMD_DATA_W-1:0]      cmd_fifo_data_in;
     logic [CMD_DATA_W-1:0]      cmd_fifo_data_out;
@@ -115,7 +86,9 @@ module MatrixDmaStore #(
     logic                       cmd_fifo_empty;
     logic                       cmd_fifo_push;
     logic                       cmd_fifo_pop;
-    logic [31:0]                cmd_fifo_pc;
+    logic [31:0]                pc_fifo_data_out;
+    logic                       pc_fifo_full;
+    logic                       pc_fifo_empty;
     logic [REG_IDX_W-1:0]       cmd_fifo_reg;
     logic [1:0]                 cmd_fifo_source_sel;
     logic [AXI_ADDR_W-1:0]      cmd_fifo_base;
@@ -127,14 +100,13 @@ module MatrixDmaStore #(
     logic [7:0]                 cmd_len_calc;
 
     logic                       gen_active_q;
-    logic [31:0]                gen_pc_q;
     logic [REG_IDX_W-1:0]       gen_reg_q;
     logic [1:0]                 gen_source_sel_q;
     logic [AXI_ADDR_W-1:0]      gen_addr_q;
     logic [31:0]                gen_stride_q;
     logic [7:0]                 gen_rows_q;
     logic [7:0]                 gen_row_len_q;
-    logic [ROW_BYTES_W-1:0]      gen_row_bytes_q;
+    logic [ROW_BYTES_W-1:0]         gen_row_bytes_q;
     logic [ROW_IDX_W-1:0]       gen_row_q;
     logic [ROW_IDX_W:0]         gen_row_p1;
     logic [7:0]                 gen_segment_offset_q;
@@ -159,7 +131,6 @@ module MatrixDmaStore #(
     logic [ROW_IDX_W-1:0]       aw_ctx_matrix_row;
     logic [7:0]                 aw_ctx_beat_offset;
     logic [ROW_BYTES_W-1:0]     aw_ctx_row_bytes;
-    logic [31:0]                aw_ctx_pc;
     logic                       aw_ctx_command_last;
 
     logic [OUT_COUNT_W-1:0]     axi_outstanding_q;
@@ -168,42 +139,42 @@ module MatrixDmaStore #(
     logic                       aw_can_issue;
 
     logic                       w_active_q;
-    logic                       w_context_load;
     logic [AXI_ADDR_W-1:0]      w_addr_q;
     logic [7:0]                 w_len_q;
-    logic [REG_IDX_W-1:0]       w_reg_q;
-    logic [1:0]                 w_source_sel_q;
-    logic [ROW_IDX_W-1:0]       w_matrix_row_q;
     logic [7:0]                 w_beat_offset_q;
     logic [ROW_BYTES_W-1:0]     w_row_bytes_q;
-    logic [31:0]                w_pc_q;
     logic                       w_command_last_q;
+
+    logic [AXI_ADDR_W-1:0]      w_addr;
+    logic [7:0]                 w_len;
+    logic [7:0]                 w_beat_offset;
+    logic [ROW_BYTES_W-1:0]     w_row_bytes;
+    logic                       w_command_last;
+
     logic [7:0]                 w_beat_q;
-    logic [8:0]                 w_beat_p1;
     logic [8:0]                 w_global_beat;
     logic                       w_last;
     logic [AXI_DATA_W/8-1:0]    w_strb;
     logic                       w_burst_done;
     integer                     strb_idx;
 
+    logic [W_CTX_DATA_W-1:0]    w_ctx_data_in, w_ctx_data_out;
+    logic                       w_ctx_full, w_ctx_empty, w_ctx_pop;
+    logic                       read_active_q, read_burst_done;
+    logic [REG_IDX_W-1:0]       read_reg_q;
+    logic [ROW_IDX_W-1:0]       read_row_q;
+    logic [1:0]                 read_source_sel_q;
+
     // 只有深度 2 的 beat FIFO，不再缓存整行矩阵数据。
     logic [AXI_DATA_W-1:0]          data_fifo_data_out;
     logic                           data_fifo_empty;
     logic                           data_fifo_full;
     logic                           data_fifo_push;
-    logic                           data_fifo_pop;
-    logic [AXI_DATA_W-1:0]          processed_data;
-    logic                            processed_valid;
-    logic                            process_in_ready;
-    logic                            process_out_ready;
+    logic                           w_handshake;
 
-    logic                           read_done_q;
-    logic [READ_COUNT_W-1:0]         read_reserved_q;
+    logic [READ_COUNT_W-1:0]        read_reserved_q;
     logic [7:0]                     read_issue_beat_q;
-    logic                           read_issue_done_q;
-    logic [7:0]                     read_beat_q;
-    logic [8:0]                     read_beat_p1;
-    logic [8:0]                     read_last_beat;
+    logic [8:0]                     read_last_beat_q;
 
     logic [RESP_DATA_W-1:0]         resp_fifo_data_in;
     logic [RESP_DATA_W-1:0]         resp_fifo_data_out;
@@ -212,7 +183,6 @@ module MatrixDmaStore #(
     logic                           resp_fifo_push;
     logic                           resp_fifo_pop;
     logic [AXI_ADDR_W-1:0]          resp_fifo_addr;
-    logic [31:0]                    resp_fifo_pc;
     logic                           resp_fifo_command_last;
     logic                           done_fault_q;
     logic [AXI_ADDR_W-1:0]          done_fault_addr_q;
@@ -223,9 +193,9 @@ module MatrixDmaStore #(
     assign cmd_row_bytes_calc = {2'b0, cmd_cols_i} << cmd_elem_bytes_i;
     assign cmd_len_calc = (cmd_row_bytes_calc - 1'b1) >> BYTE_LG2;
 
-    assign cmd_fifo_data_in = { cmd_pc_i,cmd_reg_i,cmd_source_sel_i,cmd_base_i,cmd_stride_i,
+    assign cmd_fifo_data_in = { cmd_reg_i,cmd_source_sel_i,cmd_base_i,cmd_stride_i,
                                 cmd_rows_i,cmd_row_bytes_calc,cmd_len_calc};
-    assign cmd_ready_o   = !cmd_fifo_full;
+    assign cmd_ready_o   = !cmd_fifo_full && !pc_fifo_full;
     assign cmd_fifo_push = cmd_valid_i && cmd_ready_o;
     assign cmd_fifo_pop  = !gen_active_q && !cmd_fifo_empty;
 
@@ -243,13 +213,12 @@ module MatrixDmaStore #(
         .empty_o    (cmd_fifo_empty)
     );
 
-    assign { cmd_fifo_pc, cmd_fifo_reg, cmd_fifo_source_sel, cmd_fifo_base,
+    assign { cmd_fifo_reg, cmd_fifo_source_sel, cmd_fifo_base,
         cmd_fifo_stride, cmd_fifo_rows, cmd_fifo_row_bytes, cmd_fifo_len } = cmd_fifo_data_out;
 
     // 命令参数寄存器。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            gen_pc_q         <= '0;
             gen_reg_q        <= '0;
             gen_source_sel_q <= '0;
             gen_stride_q     <= '0;
@@ -257,7 +226,6 @@ module MatrixDmaStore #(
             gen_row_bytes_q  <= '0;
             gen_rows_q       <= '0;
         end else if (cmd_fifo_pop) begin
-            gen_pc_q         <= cmd_fifo_pc;
             gen_reg_q        <= cmd_fifo_reg;
             gen_source_sel_q <= cmd_fifo_source_sel;
             gen_stride_q     <= cmd_fifo_stride;
@@ -327,12 +295,9 @@ module MatrixDmaStore #(
     //当前 burst 的起始地址
     assign gen_segment_addr = gen_addr_q + (AXI_ADDR_W'(gen_segment_offset_q) << BYTE_LG2);
     assign gen_command_last = gen_segment_last && (gen_row_p1 == gen_rows_q);
-    // TODO 命令的最后一次burst才需要保存一次 pc , 但需要改变一下fifo结构, 后续有空可以优化
     assign aw_ctx_data_in = {gen_segment_addr, gen_segment_len, gen_reg_q, gen_source_sel_q,
-        gen_row_q, gen_segment_offset_q, gen_row_bytes_q, gen_pc_q, gen_command_last };
+        gen_row_q, gen_segment_offset_q, gen_row_bytes_q, gen_command_last };
 
-    // 生成器直接驱动 AW，握手时将同一份描述写入上下文 FIFO。
-    // 上下文 FIFO 占用数不超过 outstanding 数，且深度相同；有额度就一定有空间。
     assign aw_can_issue    = gen_active_q && (axi_outstanding_q < WRITE_OUTSTANDING_DEPTH);
 
     always @(posedge clk or negedge rst_n) begin
@@ -370,92 +335,54 @@ module MatrixDmaStore #(
         .rd_data_o  (aw_ctx_data_out),
         .empty_o    (aw_ctx_empty)
     );
-
     assign { aw_ctx_addr, aw_ctx_len, aw_ctx_reg, aw_ctx_source_sel, aw_ctx_matrix_row,
-        aw_ctx_beat_offset, aw_ctx_row_bytes, aw_ctx_pc, aw_ctx_command_last} = aw_ctx_data_out;
+        aw_ctx_beat_offset, aw_ctx_row_bytes, aw_ctx_command_last} = aw_ctx_data_out;
 
-    // AW 上下文队首装载到 W 发送器，保证 W 与 AW 顺序一致。
-    assign w_context_load = !w_active_q && !aw_ctx_empty;
+    // 最后一个读请求发出时即可接续下一段，不等待当前段 WLAST。
+    assign aw_ctx_pop = (!read_active_q || read_burst_done) &&!aw_ctx_empty && !w_ctx_full;
+
+    // 全局 beat 地址只在请求侧维护，切换时保存新段的寄存器及行信息。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            w_addr_q         <= '0;
-            w_len_q          <= '0;
-            w_reg_q          <= '0;
-            w_source_sel_q   <= '0;
-            w_matrix_row_q   <= '0;
-            w_beat_offset_q  <= '0;
-            w_row_bytes_q    <= '0;
-            w_pc_q           <= '0;
-            w_command_last_q <= 1'b0;
-        end else if (w_context_load) begin
-            w_addr_q         <= aw_ctx_addr;
-            w_len_q          <= aw_ctx_len;
-            w_reg_q          <= aw_ctx_reg;
-            w_source_sel_q   <= aw_ctx_source_sel;
-            w_matrix_row_q   <= aw_ctx_matrix_row;
-            w_beat_offset_q  <= aw_ctx_beat_offset;
-            w_row_bytes_q    <= aw_ctx_row_bytes;
-            w_pc_q           <= aw_ctx_pc;
-            w_command_last_q <= aw_ctx_command_last;
+            read_reg_q        <= '0;
+            read_row_q        <= '0;
+            read_source_sel_q <= '0;
+            read_last_beat_q  <= '0;
+        end else if (aw_ctx_pop) begin
+            read_reg_q        <= aw_ctx_reg;
+            read_row_q        <= aw_ctx_matrix_row;
+            read_source_sel_q <= aw_ctx_source_sel;
+            read_last_beat_q  <= {1'b0, aw_ctx_beat_offset} + {1'b0, aw_ctx_len};
+        end
+    end
+
+    assign read_burst_done = matrix_rd_en_o && ({1'b0, read_issue_beat_q} == read_last_beat_q);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            read_issue_beat_q <= '0;
+        end else if (aw_ctx_pop) begin
+            read_issue_beat_q <= aw_ctx_beat_offset;
+        end else if (matrix_rd_en_o && !read_burst_done) begin
+            read_issue_beat_q <= read_issue_beat_q + 1'b1;
         end
     end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            w_active_q       <= 1'b0;
-        end 
-        else begin
-            if (w_context_load) begin
-                w_active_q       <= 1'b1;
-            end else if (w_burst_done) begin
-                w_active_q <= 1'b0;
-            end
+            read_active_q <= 1'b0;
+        end else if (aw_ctx_pop) begin
+            read_active_q <= 1'b1;
+        end else if (read_burst_done) begin
+            read_active_q <= 1'b0;
         end
     end
 
-    assign aw_ctx_pop = w_burst_done;
-    assign w_beat_p1 = {1'b0, w_beat_q} + 1'b1;
-    assign w_global_beat = {1'b0, w_beat_offset_q} + w_beat_q;
-    assign w_last = w_beat_q == w_len_q;
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            w_beat_q <= '0;
-        end else if (w_context_load) begin
-            w_beat_q <= '0;
-        end else if (data_fifo_pop) begin
-            if (w_last)
-                w_beat_q <= '0;
-            else
-                w_beat_q <= w_beat_p1[7:0];
-        end
-    end
-
-    assign b_handshake = resp_fifo_pop;
-
-    // 当前 W burst 的矩阵读请求。
-    assign read_beat_p1 = {1'b0, read_beat_q} + 1'b1;
-    assign read_last_beat = {1'b0, w_beat_offset_q} + {1'b0, w_len_q};
-    // 固定一拍返回：请求发出即预留空间，W 握手后释放，包含在途数据。
-    // FIFO 两拍 + 处理寄存器一拍；不能只用当前 ready 判断下一拍的容量。
-    assign matrix_rd_en_o = w_active_q && !read_done_q &&
-                            !read_issue_done_q &&
-                            ((read_reserved_q < READ_CAPACITY) || data_fifo_pop) &&
-                            ({1'b0, read_issue_beat_q} <= read_last_beat);
-    assign matrix_rd_reg_o        = w_reg_q;
-    assign matrix_rd_addr_o       = w_matrix_row_q;
-    assign matrix_rd_nblock_o     = read_issue_beat_q[1];
-    assign matrix_rd_half_o       = read_issue_beat_q[0];
-    assign matrix_rd_source_sel_o = w_source_sel_q;
-    assign data_fifo_push = processed_valid && process_out_ready;
-
-    assign process_out_ready = !data_fifo_full;
-
+    // 已发出矩阵读请求、但还没有被 AXI W 接收的数据数量，用作反压 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             read_reserved_q <= '0;
         end else begin
-            case ({matrix_rd_en_o, data_fifo_pop})
+            case ({matrix_rd_en_o, w_handshake})
                 2'b10: read_reserved_q <= read_reserved_q + 1'b1;
                 2'b01: read_reserved_q <= read_reserved_q - 1'b1;
                 default: ;
@@ -463,61 +390,18 @@ module MatrixDmaStore #(
         end
     end
 
-    MatrixReadDataProcess #(
-        .DATA_W (AXI_DATA_W)
-    ) u_store_read_data_process (
-        .clk         (clk),
-        .rst_n       (rst_n),
-        .in_valid_i  (w_active_q && matrix_rd_valid_i),
-        .in_ready_o  (process_in_ready),
-        .in_data_i   (matrix_rd_data_i),
-        .out_valid_o (processed_valid),
-        .out_ready_i (process_out_ready),
-        .out_data_o  (processed_data)
-    );
+    /************** sram 数据读出 ****************/
+    assign matrix_rd_en_o = read_active_q && ((read_reserved_q < READ_CAPACITY) || w_handshake);
+    assign matrix_rd_reg_o = read_reg_q;
+    assign matrix_rd_addr_o = read_row_q;
+    assign matrix_rd_nblock_o = read_issue_beat_q[1];
+    assign matrix_rd_half_o = read_issue_beat_q[0];
+    assign matrix_rd_source_sel_o = read_source_sel_q;
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            read_issue_beat_q <= '0;
-            read_issue_done_q <= 1'b0;
-        end else if (w_context_load) begin
-            read_issue_beat_q <= aw_ctx_beat_offset;
-            read_issue_done_q <= 1'b0;
-        end else if (matrix_rd_en_o) begin
-            if ({1'b0, read_issue_beat_q} == read_last_beat) begin
-                read_issue_beat_q <= '0;
-                read_issue_done_q <= 1'b1;
-            end else begin
-                read_issue_beat_q <= read_issue_beat_q + 1'b1;
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            read_done_q <= 1'b0;
-        end else if (w_context_load) begin
-            read_done_q <= 1'b0;
-        end else if (matrix_rd_valid_i &&
-                     ({1'b0, read_beat_q} == read_last_beat)) begin
-            read_done_q <= 1'b1;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            read_beat_q <= '0;
-        end else if (w_context_load) begin
-            read_beat_q <= aw_ctx_beat_offset;
-        end else if (matrix_rd_valid_i) begin
-            if ({1'b0, read_beat_q} == read_last_beat)
-                read_beat_q <= '0;
-            else
-                read_beat_q <= read_beat_p1[7:0];
-        end
-    end
-
-    // 深度 2 的 beat FIFO，使用工程统一 FIFO 模块。
+    // 输入已经过外部处理和暂存，握手后直接进入数据 FIFO。
+    assign matrix_rd_ready_o = !data_fifo_full;
+    assign data_fifo_push = matrix_rd_valid_i && matrix_rd_ready_o;
+    // 存储 W 通道待发送的数据
     fifo #(
         .DATA_WIDTH (AXI_DATA_W),
         .DEPTH      (DATA_FIFO_DEPTH)
@@ -525,21 +409,80 @@ module MatrixDmaStore #(
         .clk        (clk),
         .rst_n      (rst_n),
         .wr_en_i    (data_fifo_push),
-        .wr_data_i  (processed_data),
+        .wr_data_i  (matrix_rd_data_i),
         .full_o     (data_fifo_full),
-        .rd_en_i    (data_fifo_pop),
+        .rd_en_i    (w_handshake),
         .rd_data_o  (data_fifo_data_out),
         .empty_o    (data_fifo_empty)
     );
 
-    // W 通道只能发送当前 AW 队首 burst 的数据。
-    assign m_axi_wvalid_o = w_active_q && !data_fifo_empty &&
-                            (!w_last || !resp_fifo_full);
+    assign w_ctx_data_in = {aw_ctx_addr, aw_ctx_len, aw_ctx_beat_offset,
+                           aw_ctx_row_bytes, aw_ctx_command_last};
+    fifo #(
+        .DATA_WIDTH (W_CTX_DATA_W),
+        .DEPTH      (WRITE_OUTSTANDING_DEPTH)
+    ) u_store_w_context_fifo (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .wr_en_i    (aw_ctx_pop),
+        .wr_data_i  (w_ctx_data_in),
+        .full_o     (w_ctx_full),
+        .rd_en_i    (w_ctx_pop),
+        .rd_data_o  (w_ctx_data_out),
+        .empty_o    (w_ctx_empty)
+    );
+
+    // 当前 WLAST 握手的同一时钟沿切换描述，避免 burst 边界的装载空拍。
+    assign w_ctx_pop = (!w_active_q || w_burst_done) && !w_ctx_empty;
+    assign {w_addr, w_len, w_beat_offset, w_row_bytes, w_command_last} = w_ctx_data_out;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            w_addr_q         <= '0;
+            w_len_q          <= '0;
+            w_beat_offset_q  <= '0;
+            w_row_bytes_q    <= '0;
+            w_command_last_q <= 1'b0;
+        end else if (w_ctx_pop) begin
+            w_addr_q         <= w_addr;
+            w_len_q          <= w_len;
+            w_beat_offset_q  <= w_beat_offset;
+            w_row_bytes_q    <= w_row_bytes;
+            w_command_last_q <= w_command_last;
+        end
+    end
+    assign w_burst_done = w_handshake && w_last;
+    // W 通道当前是否正在处理一个 burst
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) 
+            w_active_q <= 1'b0;
+        else begin
+            if (w_ctx_pop) begin
+                w_active_q <= 1'b1;
+            end else if (w_burst_done) begin
+                w_active_q <= 1'b0;
+            end
+        end
+    end
+    
+    assign w_last = w_beat_q == w_len_q;
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            w_beat_q <= '0;
+        end else if (w_ctx_pop) begin
+            w_beat_q <= '0;
+        end else if (w_handshake && !w_last) begin
+            w_beat_q <= w_beat_q + 1'b1;
+        end
+    end
+
+/********************** W 通道 **************************/
+    // 数据按请求顺序返回，W 按独立描述顺序消费，不依赖读侧当前上下文。
+    assign m_axi_wvalid_o = w_active_q && !data_fifo_empty && (!w_last || !resp_fifo_full);
     assign m_axi_wdata_o  = data_fifo_data_out;
     assign m_axi_wlast_o  = w_last;
-    assign data_fifo_pop  = m_axi_wvalid_o && m_axi_wready_i;
-    assign w_burst_done   = data_fifo_pop && w_last;
+    assign w_handshake    = m_axi_wvalid_o && m_axi_wready_i;
 
+    assign w_global_beat = {1'b0, w_beat_offset_q} + w_beat_q;
     always @* begin
         w_strb = {BYTE_COUNT{1'b1}};
         if ((w_row_bytes_q[BYTE_LG2-1:0] != 0) &&
@@ -552,12 +495,14 @@ module MatrixDmaStore #(
     end
     assign m_axi_wstrb_o = w_strb;
 
+/********************** B 通道 **************************/
     // WLAST 握手后登记一个 B 响应上下文；B 可以延迟返回。
-    assign resp_fifo_push = w_burst_done;
-    assign resp_fifo_data_in = {w_addr_q, w_pc_q, w_command_last_q};
     assign m_axi_bready_o = !resp_fifo_empty;
-    assign resp_fifo_pop = m_axi_bvalid_i && m_axi_bready_o;
+    assign b_handshake = m_axi_bvalid_i && m_axi_bready_o;
 
+    // 保存W 数据已经发完、正在等待 B 响应的 burst 信息
+    assign resp_fifo_push = w_burst_done;
+    assign resp_fifo_data_in = {w_addr_q, w_command_last_q};
     fifo #(
         .DATA_WIDTH (RESP_DATA_W),
         .DEPTH      (WRITE_OUTSTANDING_DEPTH)
@@ -571,12 +516,8 @@ module MatrixDmaStore #(
         .rd_data_o  (resp_fifo_data_out),
         .empty_o    (resp_fifo_empty)
     );
-
-    assign {
-        resp_fifo_addr,
-        resp_fifo_pc,
-        resp_fifo_command_last
-    } = resp_fifo_data_out;
+    assign resp_fifo_pop = b_handshake;
+    assign { resp_fifo_addr, resp_fifo_command_last } = resp_fifo_data_out;
 
     // 非最后 burst 的错误先保存，最后一个 burst 返回时统一输出一次。
     always @(posedge clk or negedge rst_n) begin
@@ -593,12 +534,29 @@ module MatrixDmaStore #(
         end
     end
 
+    // 相同 AXI ID 保证 B 按序返回；只有命令最后一个 B 握手才释放 PC。
+    fifo #(
+        .DATA_WIDTH (32),
+        .DEPTH      (CMD_QUEUE_DEPTH)
+    ) u_store_pc_fifo (
+        .clk        (clk),
+        .rst_n      (rst_n),
+        .wr_en_i    (cmd_fifo_push),
+        .wr_data_i  (cmd_pc_i),
+        .full_o     (pc_fifo_full),
+        .rd_en_i    (done_valid_o),
+        .rd_data_o  (pc_fifo_data_out),
+        .empty_o    (pc_fifo_empty)
+    );
+    
     assign done_valid_o = resp_fifo_pop && resp_fifo_command_last;
     assign done_fault_o = done_valid_o && (done_fault_q || m_axi_bresp_i[1]);
-    assign done_pc_o    = resp_fifo_pc;
+    assign done_pc_o    = pc_fifo_data_out;
     assign done_fault_addr_o = done_fault_q ? done_fault_addr_q : resp_fifo_addr;
 
-    assign busy_o = gen_active_q || !cmd_fifo_empty ||
-                    !aw_ctx_empty || w_active_q || !data_fifo_empty ||
+    assign busy_o = gen_active_q || !cmd_fifo_empty || !pc_fifo_empty ||
+                    !aw_ctx_empty || read_active_q || !w_ctx_empty ||
+                    w_active_q || (read_reserved_q != 0) || !data_fifo_empty ||
                     !resp_fifo_empty;
+
 endmodule
