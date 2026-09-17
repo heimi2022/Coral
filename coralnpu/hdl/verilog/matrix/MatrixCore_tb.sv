@@ -5,12 +5,12 @@ module MatrixCore_tb;
     logic         clk;
     logic         rst_n;
 
-    logic         cmd_valid_i;
-    logic         cmd_ready_o;
-    logic [1:0]   cmd_op_i;
-    logic [2:0]   cmd_ms1_i;
-    logic [2:0]   cmd_ms2_i;
-    logic [2:0]   cmd_md_i;
+    logic         matmul_valid_i;
+    logic         matmul_ready_o;
+    logic [1:0]   matmul_op_i;
+    logic [2:0]   matmul_ms1_i;
+    logic [2:0]   matmul_ms2_i;
+    logic [2:0]   matmul_md_i;
 
     logic [31:0]  cfg_m_i;
     logic [31:0]  cfg_k_i;
@@ -42,12 +42,12 @@ module MatrixCore_tb;
     MatrixCore dut (
         .clk(clk),
         .rst_n(rst_n),
-        .cmd_valid_i(cmd_valid_i),
-        .cmd_ready_o(cmd_ready_o),
-        .cmd_op_i(cmd_op_i),
-        .cmd_ms1_i(cmd_ms1_i),
-        .cmd_ms2_i(cmd_ms2_i),
-        .cmd_md_i(cmd_md_i),
+        .matmul_valid_i(matmul_valid_i),
+        .matmul_ready_o(matmul_ready_o),
+        .matmul_op_i(matmul_op_i),
+        .matmul_ms1_i(matmul_ms1_i),
+        .matmul_ms2_i(matmul_ms2_i),
+        .matmul_md_i(matmul_md_i),
         .cfg_m_i(cfg_m_i),
         .cfg_k_i(cfg_k_i),
         .cfg_n_i(cfg_n_i),
@@ -84,11 +84,11 @@ module MatrixCore_tb;
     task automatic init_inputs;
         begin
             rst_n = 1'b0;
-            cmd_valid_i = 1'b0;
-            cmd_op_i = '0;
-            cmd_ms1_i = '0;
-            cmd_ms2_i = '0;
-            cmd_md_i = '0;
+            matmul_valid_i = 1'b0;
+            matmul_op_i = '0;
+            matmul_ms1_i = '0;
+            matmul_ms2_i = '0;
+            matmul_md_i = '0;
             cfg_m_i = '0;
             cfg_k_i = '0;
             cfg_n_i = '0;
@@ -202,18 +202,18 @@ module MatrixCore_tb;
         input logic [2:0] md
     );
         begin
-            while (cmd_ready_o !== 1'b1) @(negedge clk);
-            cmd_op_i = op;
-            cmd_ms1_i = ms1;
-            cmd_ms2_i = ms2;
-            cmd_md_i = md;
-            cmd_valid_i = 1'b1;
+            while (matmul_ready_o !== 1'b1) @(negedge clk);
+            matmul_op_i = op;
+            matmul_ms1_i = ms1;
+            matmul_ms2_i = ms2;
+            matmul_md_i = md;
+            matmul_valid_i = 1'b1;
             @(negedge clk);
-            cmd_valid_i = 1'b0;
-            cmd_op_i = '0;
-            cmd_ms1_i = '0;
-            cmd_ms2_i = '0;
-            cmd_md_i = '0;
+            matmul_valid_i = 1'b0;
+            matmul_op_i = '0;
+            matmul_ms1_i = '0;
+            matmul_ms2_i = '0;
+            matmul_md_i = '0;
         end
     endtask
 

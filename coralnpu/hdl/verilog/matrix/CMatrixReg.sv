@@ -25,6 +25,15 @@ module CMatrixReg (
     input  logic          clk,
     input  logic          rst_n,
 
+    // mzero 只清除状态位，不访问 SRAM；mask 每位对应一个 C 寄存器。
+    input  logic          c_reg_clear_valid_i,
+    input  logic [3:0]    c_reg_clear_mask_i,
+    // DMA LOAD C 或 PE 整条矩阵乘法完成后，提交对应 C reg 为有效。
+    input  logic          c_reg_commit_valid_i,
+    input  logic [3:0]    c_reg_commit_mask_i,
+    // 0：处于逻辑清零状态；1：该寄存器已提交为有效。
+    output logic [3:0]    c_reg_zero_n_o,
+
     // 计算写回端口：每周期写入一个 128B 逻辑行。
     input  logic          wr_en_i,
     input  logic [1:0]    wr_reg_i,
@@ -61,6 +70,10 @@ module CMatrixReg (
 
     localparam int BANK_COUNT = 4;
 
+    logic [3:0] c_reg_zero_n;
+    logic [3:0] c_reg_clear_mask;
+    logic [3:0] c_reg_commit_mask;
+    logic       c_reg_state_update;
     logic [511:0] bank_q    [0:3][0:BANK_COUNT-1];
     logic         bank_cen  [0:3][0:BANK_COUNT-1];
     logic         bank_wen  [0:3][0:BANK_COUNT-1];
@@ -88,6 +101,20 @@ module CMatrixReg (
     integer reg_idx;
     integer bank_idx;
 
+    // 寄存器清零逻辑
+    // 0：逻辑清零状态；1：整条指令已提交。物理写入不改变标志，提交优先于清除。
+    assign c_reg_clear_mask = c_reg_clear_mask_i & {4{c_reg_clear_valid_i}};
+    assign c_reg_commit_mask = c_reg_commit_mask_i & {4{c_reg_commit_valid_i}};
+    assign c_reg_state_update = c_reg_clear_valid_i || c_reg_commit_valid_i;
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            c_reg_zero_n <= '0;
+        else if (c_reg_state_update)
+            c_reg_zero_n <= (c_reg_zero_n & ~c_reg_clear_mask) | c_reg_commit_mask;
+    end
+    assign c_reg_zero_n_o = c_reg_zero_n;
+    
     // 每个 bank 的低/高 32 行分别存放低/高 N block。
     assign wr_sram_addr_w     = {wr_nblock_i,     wr_addr_i[5:1]};
     assign dma_wr_sram_addr_w = {dma_wr_nblock_i, dma_wr_addr_i[5:1]};

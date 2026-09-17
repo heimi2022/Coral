@@ -40,7 +40,7 @@ C = C + A * B
 从模块职责上看，当前结构可以概括为：
 
 ```text
-start_i + cfg/rs
+cmd_valid_i + cfg/rs
     |
     v
 matmul_tiling
@@ -309,7 +309,7 @@ weight_inject_row = (TILE_ROWS - (col % TILE_ROWS)) % TILE_ROWS
 weight 队列里存的不是权重数据本身，而是**怎么去读权重**的描述：
 
 ```text
-{ rs2, weight_base_addr, weight_k_rows }
+{ rs2, weight_base_addr, weight_k_cols }
 ```
 
 含义：
@@ -318,13 +318,13 @@ weight 队列里存的不是权重数据本身，而是**怎么去读权重**的
   - 从哪个权重寄存器 / buffer 读
 - `weight_base_addr`
   - 这一块权重的“倒序读取起点”
-- `weight_k_rows`
-  - 这一块需要读多少行
+- `weight_k_cols`
+  - 这一块权重的 K 方向有效列数
 
 这里采用了**倒序地址语义**：
 
-- 第一块保存 `first_k_chunk_rows - 1`
-- 第二块保存 `TILE_ROWS + second_k_chunk_rows - 1`
+- 第一块保存 `first_k_chunk_cols - 1`
+- 第二块保存 `TILE_ROWS + second_k_chunk_cols - 1`
 
 后面 `pe_ctrl` 会用：
 
@@ -434,7 +434,7 @@ rs2_addr_o = weight_base_addr - weight_count
 
 - `weight_rs2`
 - `weight_base_addr`
-- `weight_k_rows`
+- `weight_k_cols`
 
 以及：
 
@@ -443,7 +443,7 @@ rs2_addr_o = weight_base_addr - weight_count
 - `stream_act_base_row`
 - `stream_m_rows`
 - `active_n_cols`
-- `active_k_rows`
+- `active_k_cols`
 
 后面这个 block 的整段执行，都用这些本地寄存器。
 
@@ -513,7 +513,7 @@ rs2_addr_o = weight_base_addr - weight_count
 
 ### `row_valid_mask`
 
-按 `active_k_rows` 生成：
+按 `active_k_cols` 生成：
 
 - 哪些行参与本轮 K 段计算
 
@@ -574,16 +574,16 @@ accum_sum = psum_bottom_ext + rd_data_i
 - 在阵列输出到达前一拍，先把历史 `rd` 数据读出来
 - 等到 `psum_valid` 到达时，就能直接送入尾部累加器
 
-## 8.3 output metadata FIFO
+## 8.3 accumulation block metadata FIFO
 
 由于当前支持 block 之间无缝衔接，`psum_valid` 可能持续不断，中间没有明显空档，因此不能再依赖边沿判断“新 block 开始”。
 
 当前做法是：
 
-1. act/psum block 每 pop 一次，就往输出 metadata FIFO 里压一条记录
+1. act/psum block 每 pop 一次，就往 accumulation block metadata FIFO 里压一条记录
 2. 当输入侧送出某个 block 的第一个激活 beat 时，打一发 `output_block_head_in`
 3. 经过 `TILE_ROWS` 级移位寄存器延迟后，这个 token 会和输出端的 block 头对齐
-4. 用这个对齐后的 token 去 pop output metadata FIFO
+4. 用这个对齐后的 token 去 pop accumulation block metadata FIFO
 
 这样就能在输出端知道：
 
@@ -611,7 +611,7 @@ accum_sum = psum_bottom_ext + rd_data_i
 - 第一段写回时 `matmul_finish_o = 0`
 - 第二段写回时 `matmul_finish_o = 1`
 
-这正是 `act_psum_last_o` 和 output metadata FIFO 里那一位 `last` 的意义。
+这正是 `act_psum_last_o` 和 accumulation block metadata FIFO 里那一位 `last` 的意义。
 
 ## 9. `accumulaters`
 
@@ -667,8 +667,8 @@ cmd_busy_o = (cmd_pending_count == 2) || cmd_decode_busy
 当 `m=32, n=32, k=64` 时，当前设计的典型流程如下：
 
 1. `matmul_tiling` 把命令拆成两块
-   - weight block 0: `k_rows=32`
-   - weight block 1: `k_rows=32`
+   - weight block 0: `k_cols=32`
+   - weight block 1: `k_cols=32`
    - act/psum block 0: `act_base_row=0, last=0`
    - act/psum block 1: `act_base_row=32, last=1`
 2. `pe_ctrl` 进入 `LoadWeight`
@@ -705,7 +705,7 @@ cmd_busy_o = (cmd_pending_count == 2) || cmd_decode_busy
 2. 把外部 `rs1 / rs2 / rd` 访问改成完整 ready/valid 握手。
 3. 进一步确认当前 `act_valid / psum_valid` 与阵列拓扑的严格时序关系。
 4. 若后续 `TILE_ROWS != TILE_COLS` 真的要支持，需要重新检查掩码和部分位宽写法。
-5. 给 `output metadata` 和 `rd` 通路补更系统的时序图。
+5. 给 `accumulation block metadata` 和 `rd` 通路补更系统的时序图。
 6. 若要接更大系统，可继续把命令调度、DMA、PE 控制之间的接口契约文档化。
 
 ## 14. 一句话总结

@@ -8,14 +8,6 @@ module MatrixDma #(
     input  logic                     clk,
     input  logic                     rst_n,
 
-    // Count encoding: 000/001/011/111 = 1/2/4/8 registers.
-    // Payload must remain stable while valid is asserted and ready is low.
-    input  logic                     zero_valid_i,
-    output logic                     zero_ready_o,
-    input  logic [31:0]              zero_pc_i,
-    input  logic [2:0]               zero_md_i,
-    input  logic [2:0]               zero_reg_count_i,
-
     // Matrix commands: mem_store_i selects STORE, otherwise LOAD.
     input  logic                     mem_valid_i,
     output logic                     mem_ready_o,
@@ -170,9 +162,6 @@ module MatrixDma #(
     assign m_axi_wstrb_o   = store_wstrb_w;
     assign m_axi_wlast_o   = store_wlast_w;
     assign m_axi_bready_o  = store_bready_w;
-
-    // ZERO 执行路径已移除；保留顶层接口，等待独立实现，期间不接收命令。
-    assign zero_ready_o = 1'b0;
 
     MatrixDmaLoad #(
         .AXI_ADDR               ( AXI_ADDR_W           ),

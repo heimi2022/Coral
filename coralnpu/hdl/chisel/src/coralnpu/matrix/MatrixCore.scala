@@ -12,13 +12,13 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val clk = Input(Clock())
     val rst_n = Input(Bool())
 
-    val cmd_valid_i = Input(Bool())
-    val cmd_ready_o = Output(Bool())
-    val cmd_pc_i = Input(UInt(32.W))
-    val cmd_op_i = Input(UInt(2.W))
-    val cmd_ms1_i = Input(UInt(3.W))
-    val cmd_ms2_i = Input(UInt(3.W))
-    val cmd_md_i = Input(UInt(3.W))
+    val matmul_valid_i = Input(Bool())
+    val matmul_ready_o = Output(Bool())
+    val matmul_pc_i = Input(UInt(32.W))
+    val matmul_op_i = Input(UInt(2.W))
+    val matmul_ms1_i = Input(UInt(3.W))
+    val matmul_ms2_i = Input(UInt(3.W))
+    val matmul_md_i = Input(UInt(3.W))
 
     val zero_valid_i = Input(Bool())
     val zero_ready_o = Output(Bool())
@@ -129,13 +129,13 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.clk := clock
   matrixCore.io.rst_n := !reset.asBool
 
-  matrixCore.io.cmd_valid_i := io.core.cmd.valid
-  matrixCore.io.cmd_pc_i := io.core.cmd.bits.pc
-  matrixCore.io.cmd_op_i := io.core.cmd.bits.op.asUInt
-  matrixCore.io.cmd_ms1_i := io.core.cmd.bits.ms1
-  matrixCore.io.cmd_ms2_i := io.core.cmd.bits.ms2
-  matrixCore.io.cmd_md_i := io.core.cmd.bits.md
-  io.core.cmd.ready := matrixCore.io.cmd_ready_o
+  matrixCore.io.matmul_valid_i := io.core.cmd.valid
+  matrixCore.io.matmul_pc_i := io.core.cmd.bits.pc
+  matrixCore.io.matmul_op_i := io.core.cmd.bits.op.asUInt
+  matrixCore.io.matmul_ms1_i := io.core.cmd.bits.ms1
+  matrixCore.io.matmul_ms2_i := io.core.cmd.bits.ms2
+  matrixCore.io.matmul_md_i := io.core.cmd.bits.md
+  io.core.cmd.ready := matrixCore.io.matmul_ready_o
 
   matrixCore.io.zero_valid_i := false.B
   matrixCore.io.zero_pc_i := 0.U
