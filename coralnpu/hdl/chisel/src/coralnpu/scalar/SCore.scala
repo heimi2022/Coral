@@ -243,6 +243,11 @@ class SCore(p: Parameters) extends Module {
         // matrix instruction dispatch
         io.matrixcore.get.cmd <> dispatch.io.matrix.get
 
+        // TODO: 接入 CPU 解码及依赖检查后的 mzero 发射通道。
+        // MatrixCoreWrapper 已支持独立 zero 握手；CPU 尚未提供该命令源。
+        io.matrixcore.get.zero.valid := false.B
+        io.matrixcore.get.zero.bits := 0.U.asTypeOf(io.matrixcore.get.zero.bits)
+
         val matrixMemIsWhole = dispatch.io.matrixMem.get.bits.op.isOneOf(
             MatrixMemOp.LD_WHOLE,
             MatrixMemOp.ST_WHOLE

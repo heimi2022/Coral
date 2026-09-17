@@ -28,10 +28,10 @@ module CMatrixReg (
     // mzero 只清除状态位，不访问 SRAM；mask 每位对应一个 C 寄存器。
     input  logic          c_reg_clear_valid_i,
     input  logic [3:0]    c_reg_clear_mask_i,
-    // DMA LOAD C 或 PE 整条矩阵乘法完成后，提交对应 C reg 为有效。
+    // PE 整条矩阵乘法完成后提交；DMA 写入时在内部直接解除清零。
     input  logic          c_reg_commit_valid_i,
     input  logic [3:0]    c_reg_commit_mask_i,
-    // 0：处于逻辑清零状态；1：该寄存器已提交为有效。
+    // 0：处于逻辑清零状态；1：已由 PE 提交或 DMA 写入解除清零。
     output logic [3:0]    c_reg_zero_n_o,
 
     // 计算写回端口：每周期写入一个 128B 逻辑行。
@@ -73,6 +73,8 @@ module CMatrixReg (
     logic [3:0] c_reg_zero_n;
     logic [3:0] c_reg_clear_mask;
     logic [3:0] c_reg_commit_mask;
+    logic       dma_zero_release;
+    logic [3:0] dma_zero_release_mask;
     logic       c_reg_state_update;
     logic [511:0] bank_q    [0:3][0:BANK_COUNT-1];
     logic         bank_cen  [0:3][0:BANK_COUNT-1];
@@ -86,6 +88,8 @@ module CMatrixReg (
     logic         rd_wr_conflict_w;
     logic         rd_dma_conflict_w;
     logic         dma_rd_accept_w;
+    logic         dma_rd_zero_w;
+    logic         dma_rd_zero_q;
     logic [5:0]   wr_sram_addr_w;
     logic [5:0]   dma_wr_sram_addr_w;
     logic [5:0]   rd_sram_addr_w;
@@ -102,16 +106,20 @@ module CMatrixReg (
     integer bank_idx;
 
     // 寄存器清零逻辑
-    // 0：逻辑清零状态；1：整条指令已提交。物理写入不改变标志，提交优先于清除。
+    // PE 物理写入不改变标志；DMA 首次写入逻辑零寄存器时立即解除清零。
+    // 置位优先于清除；同目标 mzero 与写入的依赖由上游保证。
     assign c_reg_clear_mask = c_reg_clear_mask_i & {4{c_reg_clear_valid_i}};
     assign c_reg_commit_mask = c_reg_commit_mask_i & {4{c_reg_commit_valid_i}};
-    assign c_reg_state_update = c_reg_clear_valid_i || c_reg_commit_valid_i;
+    assign dma_zero_release = dma_wr_en_i && !c_reg_zero_n[dma_wr_reg_i];
+    assign dma_zero_release_mask = dma_zero_release ? (4'b0001 << dma_wr_reg_i) : 4'b0;
+    assign c_reg_state_update = c_reg_clear_valid_i || c_reg_commit_valid_i || dma_zero_release;
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             c_reg_zero_n <= '0;
         else if (c_reg_state_update)
-            c_reg_zero_n <= (c_reg_zero_n & ~c_reg_clear_mask) | c_reg_commit_mask;
+            c_reg_zero_n <= (c_reg_zero_n & ~c_reg_clear_mask) |
+                            c_reg_commit_mask | dma_zero_release_mask;
     end
     assign c_reg_zero_n_o = c_reg_zero_n;
     
@@ -139,7 +147,9 @@ module CMatrixReg (
                               (wr_addr_i[0] == rd_addr_i[0]);
     assign rd_accept_w = rd_en_i && !rd_dma_conflict_w && !rd_wr_conflict_w;
     assign dma_rd_bank_w = {dma_rd_addr_i[0], dma_rd_half_i};
-    assign dma_rd_accept_w = dma_rd_en_i &&
+    // 逻辑零读取不占 SRAM 端口；同目标指令依赖仍由上游保证。
+    assign dma_rd_zero_w = !c_reg_zero_n[dma_rd_reg_i];
+    assign dma_rd_accept_w = dma_rd_en_i && (dma_rd_zero_w || (
                              !(wr_accept_w &&
                                (wr_reg_i == dma_rd_reg_i) &&
                                (wr_addr_i[0] == dma_rd_addr_i[0])) &&
@@ -149,7 +159,7 @@ module CMatrixReg (
                                (dma_wr_half_i == dma_rd_half_i)) &&
                              !(rd_en_i &&
                                (rd_reg_i == dma_rd_reg_i) &&
-                               (rd_addr_i[0] == dma_rd_addr_i[0]));
+                               (rd_addr_i[0] == dma_rd_addr_i[0]))));
 
     // 默认关闭所有 bank。CEN/WEN 均为低有效。
     always @* begin
@@ -190,7 +200,7 @@ module CMatrixReg (
             bank_d[dma_wr_reg_i][dma_wr_bank_w]    = dma_wr_data_i;
         end
 
-        if (dma_rd_accept_w) begin
+        if (dma_rd_accept_w && !dma_rd_zero_w) begin
             bank_cen[dma_rd_reg_i][dma_rd_bank_w] = 1'b0;
             bank_wen[dma_rd_reg_i][dma_rd_bank_w] = 1'b1;
             bank_addr[dma_rd_reg_i][dma_rd_bank_w] = dma_rd_sram_addr_w;
@@ -232,6 +242,7 @@ module CMatrixReg (
             rd_odd_q   <= 1'b0;
             dma_rd_reg_q  <= '0;
             dma_rd_bank_q <= '0;
+            dma_rd_zero_q <= 1'b0;
         end else begin
             rd_valid_o <= rd_accept_w;
             dma_rd_valid_o <= dma_rd_accept_w;
@@ -240,6 +251,8 @@ module CMatrixReg (
                 rd_odd_q <= rd_addr_i[0];
             end
             if (dma_rd_accept_w) begin
+                // 随请求保存零状态，与同步读返回对齐。
+                dma_rd_zero_q <= dma_rd_zero_w;
                 dma_rd_reg_q  <= dma_rd_reg_i;
                 dma_rd_bank_q <= dma_rd_bank_w;
             end
@@ -248,7 +261,7 @@ module CMatrixReg (
 
     always @* begin
         dma_rd_data_o = '0;
-        if (dma_rd_valid_o)
+        if (dma_rd_valid_o && !dma_rd_zero_q)
             dma_rd_data_o = bank_q[dma_rd_reg_q][dma_rd_bank_q];
     end
 

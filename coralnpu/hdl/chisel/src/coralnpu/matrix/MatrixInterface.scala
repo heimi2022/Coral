@@ -25,6 +25,14 @@ class MatrixStatusIO extends Bundle {
     val donePc = Output(UInt(32.W))
 }
 
+// 上游保证指令合法、目标对齐，并已处理全部目标寄存器依赖。
+class MatrixZeroCmd extends Bundle {
+    val pc = UInt(32.W)
+    val md = UInt(3.W)
+    // 数量减一编码：000/001/011/111 对应 1/2/4/8 个寄存器。
+    val regCount = UInt(3.W)
+}
+
 class MatrixDebugIO(p: Parameters) extends Bundle {
     val tileWrite = new Bundle {
         val enable = Input(Bool())
@@ -99,9 +107,9 @@ class MatrixMemDirectIO(p: Parameters) extends Bundle {
 
 class MatrixCoreIO(p: Parameters) extends Bundle {
     val cmd = Flipped(Decoupled(new MatrixInstCmd(p)))
+    val zero = Flipped(Decoupled(new MatrixZeroCmd))
     val mem = Flipped(Decoupled(new MatrixMemExecReq(p)))
     val csr = Flipped(new CsrMatrixIO(p))
     val status = new MatrixStatusIO
     val debug = new MatrixDebugIO(p)
 }
-

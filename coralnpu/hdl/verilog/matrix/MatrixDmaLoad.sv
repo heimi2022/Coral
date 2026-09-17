@@ -101,10 +101,15 @@ module MatrixDmaLoad #(
     localparam int STREAM_COUNT_W = $clog2(STREAM_BUFFER_BYTES + 1);
     localparam int BURST_BYTE_W = 13;
     localparam int DMA_TOTAL_BYTE_W = 15;
-    // pc(32) + reg(3) + dst_sel(1) + row_bytes + base(32) + stride(32) + rows(8)
-    localparam int CMD_DATA = 108 + ROW_BYTE_W;
+    // reg(3) + dst_sel(1) + row_bytes + base(32) + stride(32) + rows(8)
+    localparam int CMD_DATA = 76 + ROW_BYTE_W;
     // 接收侧只需知道目标寄存器、目的类型、行大小和总行数，不携带地址或 stride。
-    localparam int INFLIGHT_DATA = 44 + ROW_BYTE_W;
+    localparam int INFLIGHT_DATA = 12 + ROW_BYTE_W;
+    // 当前命令串行执行：命令队列之外最多有一条执行中的命令。
+    localparam int PC_QUEUE_DEPTH = CMD_QUEUE_DEPTH + 1;
+    logic [31:0] pc_fifo_data_out;
+    logic pc_fifo_full;
+    logic pc_fifo_pop;
 
     logic [CMD_DATA-1:0]           issue_cmd_fifo_data_in;
     logic [CMD_DATA-1:0]           issue_cmd_fifo_rd_data;
@@ -113,7 +118,6 @@ module MatrixDmaLoad #(
     logic                          issue_cmd_push;
     logic                          issue_cmd_pop;
 
-    logic [31:0]                   issue_cmd_fifo_pc;
     logic [2:0]                    issue_cmd_fifo_reg;
     logic                          issue_cmd_fifo_dst_sel;
     logic [ROW_BYTE_W-1:0]         issue_cmd_fifo_row_bytes;
@@ -130,7 +134,6 @@ module MatrixDmaLoad #(
     logic                          inflight_fifo_empty;
     logic                          inflight_cmd_pop;
 
-    logic [31:0]                   inflight_fifo_pc;
     logic [2:0]                    inflight_fifo_reg;
     logic                          inflight_fifo_dst_sel;
     logic [ROW_BYTE_W-1:0]         inflight_fifo_row_bytes;
@@ -147,7 +150,6 @@ module MatrixDmaLoad #(
 
     logic                          recv_cmd_active;
     logic                          recv_cmd_fault_seen;
-    logic [31:0]                   recv_cmd_pc;
     logic [2:0]                    recv_cmd_reg;
     logic                          recv_cmd_dst_sel;
     logic [ROW_BYTE_W-1:0]         recv_cmd_row_bytes;
@@ -221,11 +223,27 @@ module MatrixDmaLoad #(
 // =========================================================================
 
     // 先缓存完整矩阵 load 命令；一条命令可连续发出多个 row burst。
-    assign mem_ready_o = !issue_cmd_fifo_full;
+    assign mem_ready_o = !issue_cmd_fifo_full && !pc_fifo_full;
     assign issue_cmd_push = mem_valid_i && mem_ready_o;
     assign mem_row_byte_num = mem_cols_i[6:0] << mem_elem_bytes_i;
     assign issue_cmd_fifo_data_in =
-        {mem_pc_i, mem_reg_i, mem_ab_scale_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i};
+        {mem_reg_i, mem_ab_scale_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i};
+
+    // PC 只按整条命令保存；完成沿锁存当前队头，同时弹出。
+    assign pc_fifo_pop = recv_cmd_success_done || recv_cmd_fault_done;
+    fifo #(
+        .DATA_WIDTH ( 32             ),
+        .DEPTH      ( PC_QUEUE_DEPTH )
+    ) u_load_pc_fifo (
+        .clk       ( clk              ),
+        .rst_n     ( rst_n            ),
+        .wr_en_i   ( issue_cmd_push   ),
+        .wr_data_i ( mem_pc_i         ),
+        .full_o    ( pc_fifo_full     ),
+        .rd_en_i   ( pc_fifo_pop      ),
+        .rd_data_o ( pc_fifo_data_out ),
+        .empty_o   ()
+    );
 
     fifo #(
         .DATA_WIDTH ( CMD_DATA        ),
@@ -306,7 +324,7 @@ module MatrixDmaLoad #(
         end
     end
 
-    assign {issue_cmd_fifo_pc, issue_cmd_fifo_reg, issue_cmd_fifo_dst_sel,
+    assign {issue_cmd_fifo_reg, issue_cmd_fifo_dst_sel,
             issue_cmd_fifo_row_bytes, issue_cmd_fifo_base,
             issue_cmd_fifo_stride, issue_cmd_fifo_rows} = issue_cmd_fifo_rd_data;
 
@@ -449,7 +467,6 @@ module MatrixDmaLoad #(
     // 命令一开始发 AR 就进入 in-flight FIFO。R 通道使用单 ID 保序返回，
     // 因此接收侧按 FIFO 顺序恢复每条大命令的上下文即可。
     assign inflight_fifo_data_in = {
-        issue_cmd_fifo_pc,
         issue_cmd_fifo_reg,
         issue_cmd_fifo_dst_sel,
         issue_cmd_fifo_row_bytes,
@@ -470,21 +487,19 @@ module MatrixDmaLoad #(
         .empty_o   ( inflight_fifo_empty    )
     );
 
-    assign {inflight_fifo_pc, inflight_fifo_reg, inflight_fifo_dst_sel,
+    assign {inflight_fifo_reg, inflight_fifo_dst_sel,
             inflight_fifo_row_bytes, inflight_fifo_rows} = inflight_fifo_rd_data;
 
     assign recv_cmd_reg_idx = recv_cmd_reg[1:0];
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            recv_cmd_pc <= '0;
             recv_cmd_reg <= '0;
             recv_cmd_dst_sel <= 1'b0;
             recv_cmd_row_bytes <= '0;
             recv_cmd_rows <= '0;
         end else begin
             if (inflight_cmd_pop) begin
-                recv_cmd_pc <= inflight_fifo_pc;
                 recv_cmd_reg <= inflight_fifo_reg;
                 recv_cmd_dst_sel <= inflight_fifo_dst_sel;
                 recv_cmd_row_bytes <= inflight_fifo_row_bytes;
@@ -633,11 +648,11 @@ module MatrixDmaLoad #(
 
             if (recv_cmd_success_done) begin
                 done_valid_o <= 1'b1;
-                done_pc_o <= recv_cmd_pc;
+                done_pc_o <= pc_fifo_data_out;
             end else if (recv_cmd_fault_done) begin
                 done_valid_o <= 1'b1;
                 done_fault_o <= 1'b1;
-                done_pc_o <= recv_cmd_pc;
+                done_pc_o <= pc_fifo_data_out;
                 // 接收侧不再携带请求地址 metadata，当前无法精确回报故障地址。
                 done_fault_addr_o <= '0;
             end

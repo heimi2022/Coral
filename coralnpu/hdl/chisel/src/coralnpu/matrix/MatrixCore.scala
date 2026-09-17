@@ -137,10 +137,11 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.matmul_md_i := io.core.cmd.bits.md
   io.core.cmd.ready := matrixCore.io.matmul_ready_o
 
-  matrixCore.io.zero_valid_i := false.B
-  matrixCore.io.zero_pc_i := 0.U
-  matrixCore.io.zero_md_i := 0.U
-  matrixCore.io.zero_reg_count_i := 0.U
+  matrixCore.io.zero_valid_i := io.core.zero.valid
+  matrixCore.io.zero_pc_i := io.core.zero.bits.pc
+  matrixCore.io.zero_md_i := io.core.zero.bits.md
+  matrixCore.io.zero_reg_count_i := io.core.zero.bits.regCount
+  io.core.zero.ready := matrixCore.io.zero_ready_o
 
   matrixCore.io.mem_valid_i := io.core.mem.valid
   matrixCore.io.mem_pc_i := io.core.mem.bits.req.pc
