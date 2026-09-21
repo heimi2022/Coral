@@ -217,7 +217,10 @@ class TlulWidthBridge(val host_p: TLULParameters, val device_p: TLULParameters) 
     val index_width = log2Ceil(numSourceIds)
     val addr_lsb_regs = RegInit(VecInit(Seq.fill(numSourceIds)(0.U(addr_lsb_width.W))))
 
-    val req_addr_lsb = io.tl_h.a.bits.address(addr_lsb_width - 1, 0)
+    // Data/mask already carry the byte offset within the host beat. Move only
+    // the entire host-width lane within the wider beat (also for read returns).
+    val req_addr_lsb = io.tl_h.a.bits.address(addr_lsb_width - 1, 0) &
+      (~(host_p.w - 1).U(addr_lsb_width.W))
 
     for (s <- 0 until numSourceIds) {
       val source_match = if (index_width > 0) io.tl_h.a.bits.source(index_width-1, 0) === s.U else true.B

@@ -189,11 +189,11 @@ chisel_library(
         "matrix/MatrixInterface.scala",
     ],
     resources = [
-        "//hdl/verilog/matrix:MatrixRegFile.sv",
         "//hdl/verilog/matrix:MatrixCore.sv",
     ],
     deps = [
         ":coralnpu_base",
+        "//hdl/chisel/src/bus",
     ],
 )
 

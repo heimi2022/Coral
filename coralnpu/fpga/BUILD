@@ -138,6 +138,13 @@ coralnpu_v2_sim_test(
     sim_timeout = 120,
 )
 
+coralnpu_v2_binary(
+    name = "dma_jtag_uart",
+    srcs = ["sw/dma_test.cc"],
+    copts = ["-DCLOCK_FREQUENCY_MHZ=" + _CLOCK_FREQUENCY_MHZ],
+    deps = [":uart"],
+)
+
 coralnpu_v2_sim_test(
     name = "spi_flash_sim_test",
     srcs = ["sw/spi_flash_test.cc"],

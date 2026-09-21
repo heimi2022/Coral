@@ -15,7 +15,7 @@
  */
 
 .section .data
-.align 16
+.balign 64
 
 .global input_nothing
 input_nothing:
@@ -23,15 +23,15 @@ input_nothing:
 
 .global input_1
 input_1:
-    .space 16
+    .space 32
 
 .global input_2
 input_2:
-    .space 16
+    .space 32
 
 .global output_1
 output_1:
-    .space 16
+    .space 32
 
 .section .text
 .global main
@@ -53,6 +53,7 @@ main:
             vle8.v v1, (t1)
             vle8.v v2, (t2)
             vadd.vv v3, v1, v2
+            vse8.v v3, (t3)
             addi t1, t1, 16
             addi t2, t2, 16
             addi t3, t3, 16
@@ -70,9 +71,10 @@ main:
     li t4, 0
 
     loop16 :  bge t4, t0, loop16_exit
-            vle8.v v1, (t1)
-            vle8.v v2, (t2)
+            vle16.v v1, (t1)
+            vle16.v v2, (t2)
             vadd.vv v3, v1, v2
+            vse16.v v3, (t3)
             addi t1, t1, 8
             addi t2, t2, 8
             addi t3, t3, 8
@@ -91,9 +93,10 @@ main:
     li t4, 0
 
     loop32 :  bge t4, t0, loop32_exit
-            vle8.v v1, (t1)
-            vle8.v v2, (t2)
+            vle32.v v1, (t1)
+            vle32.v v2, (t2)
             vadd.vv v3, v1, v2
+            vse32.v v3, (t3)
             addi t1, t1, 4
             addi t2, t2, 4
             addi t3, t3, 4
@@ -101,4 +104,14 @@ main:
             j loop32
     loop32_exit:
     wfi
+    la t1, input_1
+    la t2, input_2
+    la t3, output_1
+    vsetivli x0, 5, e32, m2, ta, ma
+    vle32.v v2, (t1)
+    vle32.v v4, (t2)
+    vadd.vv v6, v2, v4
+    vse32.v v6, (t3)
+    wfi
+    li a0, 0
     ret

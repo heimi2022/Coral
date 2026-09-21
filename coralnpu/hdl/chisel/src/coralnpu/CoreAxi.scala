@@ -96,6 +96,7 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         dm.io.ext.rsp.ready := inflight.io.deq.valid && Mux(rspId === 1.U, csr.io.debug.rsp.ready, io.dm.rsp.ready)
         
         val core_reset = Mux(io.te, (!io.aresetn.asBool).asAsyncReset, (csr.io.reset || dm.io.ndmreset).asAsyncReset)
+        // module Core 
         val core = withClockAndReset(cg.io.clk_o, core_reset) { Core(p, coreModuleName) }
         if (p.enableMatrix) {
             io.matrix_axi_master.get <> core.io.matrixAxi.get

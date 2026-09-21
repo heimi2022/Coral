@@ -4,7 +4,7 @@
 
 #include "fpga/sw/uart.h"
 
-#define UART1_BASE 0x40010000
+#define UART0_BASE 0x40000000
 #define UART_CTRL_OFFSET 0x10
 #define UART_STATUS_OFFSET 0x14
 #define UART_WDATA_OFFSET 0x1c
@@ -14,14 +14,14 @@
 void uart_init(uint32_t clock_frequency_mhz) {
   const uint64_t uart_ctrl_nco =
       ((uint64_t)115200 << 20) / (clock_frequency_mhz * 1000000);
-  REG32(UART1_BASE + UART_CTRL_OFFSET) = (uint32_t)((uart_ctrl_nco << 16) | 3);
+  REG32(UART0_BASE + UART_CTRL_OFFSET) = (uint32_t)((uart_ctrl_nco << 16) | 3);
 }
 
 void uart_putc(char c) {
   volatile uint32_t* uart_status =
-      (volatile uint32_t*)(UART1_BASE + UART_STATUS_OFFSET);
+      (volatile uint32_t*)(UART0_BASE + UART_STATUS_OFFSET);
   volatile uint32_t* uart_wdata =
-      (volatile uint32_t*)(UART1_BASE + UART_WDATA_OFFSET);
+      (volatile uint32_t*)(UART0_BASE + UART_WDATA_OFFSET);
   while (*uart_status & 1) asm volatile("nop");
   *uart_wdata = (uint32_t)c;
 }

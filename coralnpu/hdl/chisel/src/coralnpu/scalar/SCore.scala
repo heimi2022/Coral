@@ -20,7 +20,7 @@ import chisel3._
 import chisel3.util._
 import common._
 import coralnpu.float.{FloatCore}
-import coralnpu.rvv.{RvvCompressedInstruction, RvvCoreIO}
+import coralnpu.rvv.RvvCoreIO
 import _root_.circt.stage.ChiselStage
 import coralnpu.matrix.{MatrixCoreIO, MatrixMemOp}
 
@@ -488,28 +488,9 @@ class SCore(p: Parameters) extends Module {
     // ---------------------------------------------------------------------------
     // Rvv Extension
     if (p.enableRvv) {
-        // Keep the scalar dispatch ready path out of the RVV frontend.  A
-        // packet preserves the scalar issue-lane order at the RVV boundary.
-        val rvvIssueQueue = Module(new Queue(
-            Vec(p.instructionLanes, Valid(new RvvCompressedInstruction)), 2))
-        val rvvDispatch = dispatch.io.rvv.get
-
-        rvvIssueQueue.io.enq.valid := rvvDispatch.map(_.valid).reduce(_||_)
-        for (i <- 0 until p.instructionLanes) {
-            rvvIssueQueue.io.enq.bits(i).valid := rvvDispatch(i).valid
-            rvvIssueQueue.io.enq.bits(i).bits := rvvDispatch(i).bits
-            rvvDispatch(i).ready := rvvIssueQueue.io.enq.ready
-        }
-
-        val rvvIssueCount = PopCount(rvvIssueQueue.io.deq.bits.map(_.valid))
-        val rvvIssueFits = rvvIssueCount <= io.rvvcore.get.queue_capacity
-        rvvIssueQueue.io.deq.ready := rvvIssueFits
-        for (i <- 0 until p.instructionLanes) {
-            io.rvvcore.get.inst(i).valid :=
-                rvvIssueQueue.io.deq.valid && rvvIssueFits &&
-                rvvIssueQueue.io.deq.bits(i).valid
-            io.rvvcore.get.inst(i).bits := rvvIssueQueue.io.deq.bits(i).bits
-        }
+        // RVV operands and configuration writeback share the scalar issue
+        // timing. An instruction-only queue here misaligns both paths.
+        io.rvvcore.get.inst <> dispatch.io.rvv.get
 
         dispatch.io.rvvState.get := io.rvvcore.get.configState
         dispatch.io.rvvIdle.get := io.rvvcore.get.rvv_idle

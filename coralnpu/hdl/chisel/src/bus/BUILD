@@ -255,3 +255,12 @@ chisel_test(
         "//hdl/chisel/src/coralnpu:coralnpu_params",
     ],
 )
+
+chisel_test(
+    name = "tlul_width_bridge_test",
+    srcs = ["TlulWidthBridgeTest.scala"],
+    deps = [
+        ":bus",
+        "//hdl/chisel/src/coralnpu:coralnpu_params",
+    ],
+)

@@ -192,6 +192,36 @@ CORE_MINI_AXI_DEBUG_TESTCASES = [
 # END_TESTCASES_FOR_core_mini_axi_debug_cocotb
 
 # BEGIN_TESTCASES_FOR_rvv_assembly_cocotb_test
+verilator_cocotb_model(
+    name = "rvv_zve32x_smoke_model",
+    trace = False,
+    cflags = [flag for flag in VERILATOR_BUILD_ARGS if flag != "-DZVE32F_ON"],
+    hdl_toplevel = "RvvCoreMiniAxi",
+    verilog_source = "//hdl/chisel/src/coralnpu:RvvCoreMiniAxi.sv",
+)
+
+cocotb_test_suite(
+    name = "rvv_zve32x_smoke",
+    simulators = ["verilator"],
+    testcases = ["core_mini_rvv_add"],
+    verilator_model = ":rvv_zve32x_smoke_model",
+    tests_kwargs = {
+        "hdl_toplevel": "RvvCoreMiniAxi",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["rvv_assembly_cocotb_test.py"],
+        "deps": [
+            "//coralnpu_test_utils:core_mini_axi_sim_interface",
+            "//coralnpu_test_utils:rvv_type_util",
+            "//coralnpu_test_utils:sim_test_fixture",
+            "@bazel_tools//tools/python/runfiles",
+            requirement("tqdm"),
+        ],
+        "data": ["//tests/cocotb/rvv:rvv_add.elf"],
+        "size": "large",
+    },
+)
+
 RVV_ASSEMBLY_TESTCASES = [
     "core_mini_rvv_load",
     "core_mini_rvv_add",
