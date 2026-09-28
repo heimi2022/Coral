@@ -28,7 +28,7 @@ static inline void msettilem_reg(uint32_t value) {
 }
 
 static inline void mmacc_w_b_tr0_tr1_acc0(void) {
-  asm volatile(".word 0x15900a2b" ::: "memory");
+  asm volatile(".word 0x19900a2b" ::: "memory");
 }
 
 static inline uint32_t read_xtilem(void) {

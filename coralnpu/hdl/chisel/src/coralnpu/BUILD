@@ -186,7 +186,9 @@ chisel_library(
     name = "coralnpu_matrix",
     srcs = [
         "matrix/MatrixCore.scala",
+        "matrix/MatrixDecode.scala",
         "matrix/MatrixInterface.scala",
+        "matrix/MatrixScoreboard.scala",
     ],
     resources = [
         "//hdl/verilog/matrix:MatrixCore.sv",
@@ -194,6 +196,24 @@ chisel_library(
     deps = [
         ":coralnpu_base",
         "//hdl/chisel/src/bus",
+    ],
+)
+
+chisel_test(
+    name = "coralnpu_matrix_decode_tests",
+    srcs = ["matrix/MatrixDecodeTest.scala"],
+    deps = [
+        ":coralnpu_base",
+        ":coralnpu_matrix",
+    ],
+)
+
+chisel_test(
+    name = "coralnpu_matrix_scoreboard_tests",
+    srcs = ["matrix/MatrixScoreboardTest.scala"],
+    deps = [
+        ":coralnpu_base",
+        ":coralnpu_matrix",
     ],
 )
 
@@ -225,6 +245,7 @@ chisel_test(
     ],
     deps = [
         ":coralnpu_base",
+        ":coralnpu_matrix",
         ":coralnpu_scalar",
         "//hdl/chisel/src/common:testing",
     ],

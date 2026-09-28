@@ -11,7 +11,7 @@ object MatrixInstOp extends ChiselEnum {
     val MMACCSU_W_B = Value // 11
 }
 
-class MatrixInstCmd(p: Parameters) extends Bundle {
+class MatrixInstCmd extends Bundle {
     val pc = UInt(32.W)
     val op  = MatrixInstOp()
     val ms1 = UInt(3.W)
@@ -76,7 +76,7 @@ object MatrixMemOp extends ChiselEnum {
     val ST_CT = Value
 }
 
-class MatrixMemReq(p: Parameters) extends Bundle {
+class MatrixMemCmd extends Bundle {
     val pc = UInt(32.W)
     val op = MatrixMemOp()
     val reg = UInt(3.W)
@@ -84,7 +84,7 @@ class MatrixMemReq(p: Parameters) extends Bundle {
 }
 
 class MatrixMemExecReq(p: Parameters) extends Bundle {
-    val req = new MatrixMemReq(p)
+    val req = new MatrixMemCmd
     val base = UInt(32.W)
     val stride = UInt(32.W)
 }
@@ -106,7 +106,7 @@ class MatrixMemDirectIO(p: Parameters) extends Bundle {
 
 
 class MatrixCoreIO(p: Parameters) extends Bundle {
-    val cmd = Flipped(Decoupled(new MatrixInstCmd(p)))
+    val cmd = Flipped(Decoupled(new MatrixInstCmd))
     val zero = Flipped(Decoupled(new MatrixZeroCmd))
     val mem = Flipped(Decoupled(new MatrixMemExecReq(p)))
     val csr = Flipped(new CsrMatrixIO(p))

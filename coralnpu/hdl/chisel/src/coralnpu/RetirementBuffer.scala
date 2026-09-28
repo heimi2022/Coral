@@ -279,6 +279,13 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     // Compute update based on register writeback.
     // Note: The shift when committing instructions will be handled in a later block.
     val resultUpdate = Wire(Vec(bufferSize, Valid(new InstructionUpdate)))
+    val matrixDoneMatches = VecInit((0 until bufferSize).map { i =>
+        val entry = instBuffer.io.dataOut(i)
+        io.matrixComplete.map(x =>
+            x.valid && (i.U < instBuffer.io.nEnqueued) && entry.isMatrix &&
+            !resultBuffer(i).valid && (x.bits === entry.addr)
+        ).getOrElse(false.B)
+    })
 
     for (i <- 0 until bufferSize) {
         val bufferEntry = instBuffer.io.dataOut(i)
@@ -296,9 +303,8 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         )).getOrElse(Seq(false.B))
         // Check if this entry is an operation that doesn't require a register write, but is not a store.
         val nonWritingInstr = (bufferEntry.idx === noWriteRegIdx) && !bufferEntry.isMatrix
-        val matrixDone = io.matrixComplete.map(x =>
-            x.valid && (x.bits === bufferEntry.addr)
-            ).getOrElse(false.B)
+        val earlierMatrixDone = if (i == 0) false.B else matrixDoneMatches.take(i).reduce(_ || _)
+        val matrixDone = matrixDoneMatches(i) && !earlierMatrixDone
         val storeInstr = bufferEntry.idx === storeRegIdx
         // Check if this entry is the faulting instruction
         val faultingInstr = io.fault.valid && (bufferEntry.addr === faultPc)

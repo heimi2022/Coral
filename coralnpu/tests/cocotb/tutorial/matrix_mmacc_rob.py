@@ -6,7 +6,7 @@ from bazel_tools.tools.python.runfiles import runfiles
 from coralnpu_test_utils.core_mini_axi_interface import CoreMiniAxiInterface
 
 
-MMACC_W_B_TR0_TR1_ACC0 = 0x15900A2B
+MMACC_W_B_TR0_TR1_ACC0 = 0x19900A2B
 MSETTILEM_REG = 0x2205002B
 
 

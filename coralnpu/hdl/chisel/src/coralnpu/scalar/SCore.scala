@@ -91,11 +91,17 @@ class SCore(p: Parameters) extends Module {
 
     // matrix
     if (p.enableMatrix){
+        dispatch.io.matrixDone.get.valid := io.matrixcore.get.status.done
+        dispatch.io.matrixDone.get.bits := io.matrixcore.get.status.donePc
         rob_io.matrixComplete.get.valid := io.matrixcore.get.status.done
         rob_io.matrixComplete.get.bits := io.matrixcore.get.status.donePc
         
+        // 所有矩阵执行命令均等待 MatrixCore 返回完成 PC 后退休。
         rob_io.matrixInstr.get := VecInit(Seq.tabulate(p.instructionLanes) { i =>
-        if (i == 0) dispatch.io.matrix.get.fire else false.B
+            if (i == 0) {
+                dispatch.io.matrixMul.get.fire || dispatch.io.matrixMem.get.fire ||
+                dispatch.io.matrixZero.get.fire
+            } else false.B
         })
     }
 
@@ -234,19 +240,16 @@ class SCore(p: Parameters) extends Module {
     
     if (p.enableMatrix) {
         // matrix from dispatch to csr 
-        csr.io.matrixCfg.get.valid := dispatch.io.matrixCfg.valid
-        csr.io.matrixCfg.get.bits := dispatch.io.matrixCfg.bits
+        csr.io.matrixCfg.get.valid := dispatch.io.matrixCfg.get.valid
+        csr.io.matrixCfg.get.bits := dispatch.io.matrixCfg.get.bits
 
         // from matrixcore to csr
         io.matrixcore.get.csr <> csr.io.matrix.get
 
         // matrix instruction dispatch
-        io.matrixcore.get.cmd <> dispatch.io.matrix.get
+        io.matrixcore.get.cmd <> dispatch.io.matrixMul.get
 
-        // TODO: 接入 CPU 解码及依赖检查后的 mzero 发射通道。
-        // MatrixCoreWrapper 已支持独立 zero 握手；CPU 尚未提供该命令源。
-        io.matrixcore.get.zero.valid := false.B
-        io.matrixcore.get.zero.bits := 0.U.asTypeOf(io.matrixcore.get.zero.bits)
+        io.matrixcore.get.zero <> dispatch.io.matrixZero.get
 
         val matrixMemIsWhole = dispatch.io.matrixMem.get.bits.op.isOneOf(
             MatrixMemOp.LD_WHOLE,
@@ -278,7 +281,7 @@ class SCore(p: Parameters) extends Module {
     dmRs1.valid := true.B
     dmRs1.data := io.dm.csr_rs1
     val dispatchCsrLikeValid =
-        dispatch.io.csr.valid || (if (p.enableMatrix) { dispatch.io.matrixCfg.valid } else { false.B })
+        dispatch.io.csr.valid || dispatch.io.matrixCfg.map(_.valid).getOrElse(false.B)
 
     csr.io.rs1 := Mux(
         RegNext(dispatchCsrLikeValid, false.B),

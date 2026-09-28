@@ -1,22 +1,12 @@
-// Copyright 2023 Google LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+/*
+矩阵指令全部经过 slot0 发射，由于是顺序超标量核，一旦slot0阻塞会导致所有slot阻塞
+这样设计矩阵发射是否会影响性能？？
+
+后续根据性能可以给 矩阵发射 做一个单独的发射队列，
+decode 后直接进入 matrix issue fifo, 并认为矩阵指令已经发射成功
 
 
-// Decode: Contains decode logic to be forwarded to the appropriate functional
-// block. A serialization mechanism is introduced to stall a decoded instruction
-// from bring presented to the functional block until next cycle if the block has
-// already been presented with an instruction from another decoder.
+*/
 
 package coralnpu
 
@@ -25,8 +15,7 @@ import chisel3.util._
 import common._
 import coralnpu.float.{FloatInstruction, FloatOpcode}
 import coralnpu.rvv._
-import coralnpu.matrix.{MatrixInstCmd, MatrixInstOp, MatrixMemReq, MatrixMemOp}
-
+import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd, MatrixScoreboard}
 
 class DecodedInstruction(p: Parameters) extends Bundle {
     // The original encoding
@@ -126,120 +115,22 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     val flushat = Bool()
     val flushall = Bool()
 
-    // matrix
-    val msettilemi = Bool()
-    val msettilem = Bool()
-    val msettileki = Bool()
-    val msettilek = Bool()
-    val msettileni = Bool()
-    val msettilen = Bool()
-    val mmacc_w_b = Bool()
-    val mmaccu_w_b = Bool()
-    val mmaccus_w_b = Bool()
-    val mmaccsu_w_b = Bool()
-
-    // Matrix Load/Store Instructions
-    val mlae8 = Bool()
-    val mlae16 = Bool()
-    val mlae32 = Bool()
-    val mlae64 = Bool()
-    val mlbe8 = Bool()
-    val mlbe16 = Bool()
-    val mlbe32 = Bool()
-    val mlbe64 = Bool()
-    val mlce8 = Bool()
-    val mlce16 = Bool()
-    val mlce32 = Bool()
-    val mlce64 = Bool()
-
-    val msae8 = Bool()
-    val msae16 = Bool()
-    val msae32 = Bool()
-    val msae64 = Bool()
-    val msbe8 = Bool()
-    val msbe16 = Bool()
-    val msbe32 = Bool()
-    val msbe64 = Bool()
-    val msce8 = Bool()
-    val msce16 = Bool()
-    val msce32 = Bool()
-    val msce64 = Bool()
-
-    val mlme8 = Bool()
-    val mlme16 = Bool()
-    val mlme32 = Bool()
-    val mlme64 = Bool()
-
-    val msme8 = Bool()
-    val msme16 = Bool()
-    val msme32 = Bool()
-    val msme64 = Bool()
-
-    val mlate8 = Bool()
-    val mlate16 = Bool()
-    val mlate32 = Bool()
-    val mlate64 = Bool()
-    val mlbte8 = Bool()
-    val mlbte16 = Bool()
-    val mlbte32 = Bool()
-    val mlbte64 = Bool()
-    val mlcte8 = Bool()
-    val mlcte16 = Bool()
-    val mlcte32 = Bool()
-    val mlcte64 = Bool()
-
-    val msate8 = Bool()
-    val msate16 = Bool()
-    val msate32 = Bool()
-    val msate64 = Bool()
-    val msbte8 = Bool()
-    val msbte16 = Bool()
-    val msbte32 = Bool()
-    val msbte64 = Bool()
-    val mscte8 = Bool()
-    val mscte16 = Bool()
-    val mscte32 = Bool()
-    val mscte64 = Bool()
+    // Matrix instruction metadata follows the same optional Valid pattern as RVV.
+    val matrix = Option.when(p.enableMatrix)(Valid(new MatrixInstruction()))
 
     // rvv
     val rvv = Option.when(p.enableRvv)(Valid(new RvvCompressedInstruction()))
 
     val float = Option.when(p.enableFloat)(Valid(new FloatInstruction()))
 
-    // matrix
-    def isMatrixCfg(): Bool = {
-        msettileki || msettilek || msettilemi || msettilem || msettileni || msettilen
-    }
-    def isMatrixCfgImm(): Bool = { isMatrixCfg() && !inst(25) }
-    def isMatrixCfgReg(): Bool = { isMatrixCfg() &&  inst(25) }
-
-    def isMatrixMul(): Bool = {
-        mmacc_w_b || mmaccu_w_b || mmaccus_w_b || mmaccsu_w_b
-    }
-
-    def isMatrixStridedLoad(): Bool = {
-        mlae8 || mlae16 || mlae32 || mlae64 ||
-        mlbe8 || mlbe16 || mlbe32 || mlbe64 ||
-        mlce8 || mlce16 || mlce32 || mlce64 ||
-        mlate8 || mlate16 || mlate32 || mlate64 ||
-        mlbte8 || mlbte16 || mlbte32 || mlbte64 ||
-        mlcte8 || mlcte16 || mlcte32 || mlcte64 ||
-        mlme8 || mlme16 || mlme32 || mlme64
-    }
-
-    def isMatrixStridedStore(): Bool = {
-        msae8 || msae16 || msae32 || msae64 ||
-        msbe8 || msbe16 || msbe32 || msbe64 ||
-        msce8 || msce16 || msce32 || msce64 ||
-        msate8 || msate16 || msate32 || msate64 ||
-        msbte8 || msbte16 || msbte32 || msbte64 ||
-        mscte8 || mscte16 || mscte32 || mscte64 ||
-        msme8 || msme16 || msme32 || msme64
-    }
-
-    def isMatrixLoadStore(): Bool = {
-        isMatrixStridedLoad() || isMatrixStridedStore()
-    }
+    def isMatrixInstruction(): Bool = {if (p.enableMatrix) { matrix.get.valid } else { false.B }}
+    def isMatrixIllegal(): Bool = {if (p.enableMatrix) { matrix.get.bits.kind =/= MatrixInstKind.OTHER && !matrix.get.valid} else {false.B}}
+    def isMatrixCfg(): Bool = {if (p.enableMatrix) {matrix.get.valid && matrix.get.bits.isConfig()} else {false.B}}
+    def isMatrixCfgImm(): Bool = {if (p.enableMatrix) {isMatrixCfg() && !matrix.get.bits.readRs1} else {false.B}}
+    def isMatrixCfgReg(): Bool = {if (p.enableMatrix) {isMatrixCfg() && matrix.get.bits.readRs1} else {false.B}}
+    def isMatrixMul(): Bool = {if (p.enableMatrix) {matrix.get.valid && matrix.get.bits.isMatmul()} else {false.B}}
+    def isMatrixLoadStore(): Bool = {if (p.enableMatrix) {matrix.get.valid && matrix.get.bits.isMemory()} else {false.B}}
+    def isMatrixZero(): Bool = {if (p.enableMatrix) {matrix.get.valid && matrix.get.bits.isZero()} else {false.B}}
 
     def isAluImm(): Bool = {
         addi || slti || sltiu || xori || ori || andi || slli || srli || srai || rori 
@@ -279,7 +170,7 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     // dispatched on the same cycle.
     def forceSlot0Only(): Bool = {
         isFency() || isCsr() || isRvvConfig() ||
-        isMatrixCfg() || isMatrixMul() || isMatrixLoadStore()
+        isMatrixInstruction()
     }
 
     // Checks if an instruction is a jump or changes context switch. Instructions
@@ -296,30 +187,29 @@ class DecodedInstruction(p: Parameters) extends Bundle {
     def floatReadsRs3(): Bool = { float.map(f => f.valid && f.bits.uses_rs3).getOrElse(false.B) }
 
     def rvvWritesRd(): Bool = {
-    if (p.enableRvv) {
-        rvv.get.valid && rvv.get.bits.writesRd()
-    } else {
-        false.B
-    }
+        if (p.enableRvv) {
+            rvv.get.valid && rvv.get.bits.writesRd()
+        } else {
+            false.B
+        }
     }
 
     def readsRs1(): Bool = {
         isCondBr() || isAluReg() || isAluImm() || isAlu1Bit() || isAlu2Bit() ||
         isCsr() || isMul() || isDvu() || jalr || floatReadsScalarRs1() ||
         (if (p.enableRvv) { rvv.get.valid && rvv.get.bits.readsRs1() } else { false.B }) ||
-        isMatrixCfgReg() || isMatrixLoadStore()
+        (if (p.enableMatrix) { matrix.get.valid && matrix.get.bits.readRs1 } else { false.B })
     }
     def readsRs2(): Bool = {
         isCondBr() || isAluReg() || isAlu2Bit() || isScalarStore() || isCsrReg() ||
         isMul() || isDvu() ||
         (if (p.enableRvv) { rvv.get.valid && rvv.get.bits.readsRs2() } else { false.B }) ||
-        isMatrixLoadStore()
+        (if (p.enableMatrix) { matrix.get.valid && matrix.get.bits.readRs2 } else { false.B })
     }
 
     // Check if argument should be set by immediate value
     def rs1Set(): Bool = { auipc || isCsrImm() || isMatrixCfgImm()}
     def rs2Set(): Bool = { rs1Set() || isAluImm() || isAlu1Bit() || lui }
-
 
 }
 
@@ -345,8 +235,7 @@ class Dispatch(p: Parameters) extends Module {
         val jalrFault = Output(Vec(p.instructionLanes, Bool()))
         val bxxFault = Output(Vec(p.instructionLanes, Bool()))
         val undefFault = Output(Vec(p.instructionLanes, Bool()))
-        val rvvFault = Option.when(p.enableRvv)(
-            Output(Vec(p.instructionLanes, Bool())))
+        val rvvFault = Option.when(p.enableRvv)( Output(Vec(p.instructionLanes, Bool())))
         val bruTarget = Output(Vec(p.instructionLanes, UInt(32.W)))
         val jalrTarget = Input(Vec(p.instructionLanes, new RegfileBranchTargetIO))
 
@@ -374,12 +263,14 @@ class Dispatch(p: Parameters) extends Module {
         // CSR interface.
         val csr = Valid(new CsrCmd)
 
-        // matrix csr interface
-        val matrixCfg = Valid(new MatrixCfgCmd)
+        // Matrix CSR configuration interface.
+        val matrixCfg = Option.when(p.enableMatrix)(Valid(new MatrixCfgCmd))
 
-        // matrix interface
-        val matrix = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd(p)))
-        val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemReq(p)))
+        // Matrix execution interfaces.
+        val matrixMul = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd))
+        val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd))
+        val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
+        val matrixDone = Option.when(p.enableMatrix)(Flipped(Valid(UInt(32.W))))
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -392,8 +283,7 @@ class Dispatch(p: Parameters) extends Module {
         val dvu = Vec(p.instructionLanes, Decoupled(new DvuCmd))
 
         // Rvv interface.
-        val rvv = Option.when(p.enableRvv)(
-            Vec(p.instructionLanes, Decoupled(new RvvCompressedInstruction)))
+        val rvv = Option.when(p.enableRvv)( Vec(p.instructionLanes, Decoupled(new RvvCompressedInstruction)))
         val rvvState = Option.when(p.enableRvv)(Input(Valid(new RvvConfigState(p))))
         val rvvIdle = Option.when(p.enableRvv)(Input(Bool()))
         val rvvQueueCapacity = Option.when(p.enableRvv)(Input(UInt(4.W)))
@@ -421,7 +311,24 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
                             io.csrFrm.getOrElse(0.U))
     )
 
-    io.matrixCfg := MakeInvalid(new MatrixCfgCmd)
+    if (p.enableMatrix) { io.matrixCfg.get := MakeInvalid(new MatrixCfgCmd) }
+
+    val matrixScoreboard = if (p.enableMatrix) {
+        val matrixscoreboard = Module(new MatrixScoreboard(p.retirementBufferSize))
+        val matrixQuery = decodedInsts(0).matrix.get.bits
+        val matrixQueryValid = decodedInsts(0).isMatrixMul() ||
+            decodedInsts(0).isMatrixLoadStore() || decodedInsts(0).isMatrixZero()
+        matrixscoreboard.io.candidateValid := matrixQueryValid
+        matrixscoreboard.io.candidate := matrixQuery
+        matrixscoreboard.io.completed := io.matrixDone.get
+        val matrixIssue = io.matrixMul.get.fire || io.matrixMem.get.fire || io.matrixZero.get.fire
+        matrixscoreboard.io.issued.valid := matrixIssue
+        matrixscoreboard.io.issued.bits.pc := io.inst(0).bits.addr
+        matrixscoreboard.io.issued.bits.instruction := matrixQuery
+        Some(matrixscoreboard)
+    } else {
+        None
+    }
 
     // ---------------------------------------------------------------------------
     // Jumps
@@ -448,8 +355,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     // Scalar Scoreboard
     val rdAddr = io.inst.map(_.bits.inst(11,7))
     val writesRd = decodedInsts.map(d =>
-        (!d.isScalarStore() && !d.isCondBr() && 
-        !(d.isMatrixCfg() || d.isMatrixMul() || d.isMatrixLoadStore()) ) ||
+        (!d.isScalarStore() && !d.isCondBr() && !d.isMatrixInstruction()) ||
         (d.isFloat() && d.floatWritesRd()) ||
         d.rvvWritesRd()
     )
@@ -463,7 +369,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     val comb =  scoreboardScan.map(_ | io.scoreboard.comb)
     val rs1Addr = io.inst.map(_.bits.inst(19,15))
     val rs2Addr = io.inst.map(_.bits.inst(24,20))
-    val usesRs1Regd = decodedInsts.map(d => d.jalr || d.isLsu() ||  d.isMatrixLoadStore())
+    val usesRs1Regd = decodedInsts.map(d => d.jalr || d.isLsu() || d.isMatrixLoadStore())
     val usesRs2Regd = decodedInsts.map(d => d.isScalarStore() || d.isMatrixLoadStore())
     val readScoreboardRegd = (0 until p.instructionLanes).map(i =>
         MuxOR(usesRs1Regd(i), UIntToOH(rs1Addr(i), 32)) |
@@ -607,6 +513,16 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     // ---------------------------------------------------------------------------
     // Combine above rules. This variable represents which instructions can be
     // dispatched before in-orderness and back-pressure are considered.
+    val matrixScoreboardInterlock = (0 until p.instructionLanes).map { i =>
+        if (p.enableMatrix && i == 0) {
+            val hasMatrixRegisterCommand = decodedInsts(i).isMatrixMul() ||
+                decodedInsts(i).isMatrixLoadStore() || decodedInsts(i).isMatrixZero()
+            !hasMatrixRegisterCommand || matrixScoreboard.get.io.issueAllowed
+        } else {
+            true.B
+        }
+    }
+
     val canDispatch = (0 until p.instructionLanes).map(i =>
         !io.halted &&          // Don't dispatch if halted
         !io.interlock &&       // Don't dispatch when interlocked
@@ -624,6 +540,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // rvvLsuInterlock(i) &&  // Dispatch only one Rvv LsuOp
         lsuInterlock(i) && // Ensure lsu instructions can be dispatched into queue
         rvvInterlock(i) && // Ensure rvv instructions can be dispatched into queue
+        matrixScoreboardInterlock(i) && // Wait for conflicting matrix-register users
         !undefInterlock(i) &&     // Ensure undef is only dispatched from first slot
         (i.U < io.retirement_buffer_nSpace) && // Retirement buffer needs space for our slot
         !io.retirement_buffer_trap_pending && // Stall dispatch when a trap is pending
@@ -647,10 +564,10 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             // RV32IM
             (d.auipc || d.addi || d.add) -> MakeValid(true.B, AluOp.ADD),
             d.sub                        -> MakeValid(true.B, AluOp.SUB),
-            (d.slti || d.slt)            -> MakeValid(true.B, AluOp.SLT),
+            (d.slti  || d.slt)            -> MakeValid(true.B, AluOp.SLT),
             (d.sltiu || d.sltu)          -> MakeValid(true.B, AluOp.SLTU),
             (d.xori || d.xor)            -> MakeValid(true.B, AluOp.XOR),
-            (d.ori || d.or)              -> MakeValid(true.B, AluOp.OR),
+            (d.ori  || d.or)              -> MakeValid(true.B, AluOp.OR),
             (d.andi || d.and)            -> MakeValid(true.B, AluOp.AND),
             (d.slli || d.sll)            -> MakeValid(true.B, AluOp.SLL),
             (d.srli || d.srl)            -> MakeValid(true.B, AluOp.SRL),
@@ -814,106 +731,28 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         }
 
         // -------------------------------------------------------------------------
-        // Matrix
-        if (p.enableMatrix && i == 0) {  
-            // matrix configuration instructions issue
-            val matrixCfgValid = d.isMatrixCfg()   
-            io.matrixCfg.valid := tryDispatch && matrixCfgValid  
-            io.matrixCfg.bits.op := MuxCase(MatrixCfgOp.SET_M, Seq(
-                (d.msettileki || d.msettilek) -> MatrixCfgOp.SET_K,    
-                (d.msettilemi || d.msettilem) -> MatrixCfgOp.SET_M,    
-                (d.msettileni || d.msettilen) -> MatrixCfgOp.SET_N)) 
+        // Matrix metadata is formed once by DecodeInstruction.
+        if (p.enableMatrix && i == 0) {
+            io.matrixCfg.get.valid := tryDispatch && d.isMatrixCfg()
+            io.matrixCfg.get.bits.op := d.matrix.get.bits.cfgOp
 
-            // matrix computation instructions issue
-            val matrixValid = d.isMatrixMul()
-            io.matrix.get.valid := tryDispatch && matrixValid
-            io.matrix.get.bits.op := MuxCase(MatrixInstOp.MMACC_W_B, Seq(
-                d.mmacc_w_b   -> MatrixInstOp.MMACC_W_B,
-                d.mmaccu_w_b  -> MatrixInstOp.MMACCU_W_B,
-                d.mmaccus_w_b -> MatrixInstOp.MMACCUS_W_B,
-                d.mmaccsu_w_b -> MatrixInstOp.MMACCSU_W_B
-            ))
-            io.matrix.get.bits.ms2 := io.inst(i).bits.inst(22,20)
-            io.matrix.get.bits.ms1 := io.inst(i).bits.inst(17,15)
-            io.matrix.get.bits.md  := io.inst(i).bits.inst(9,7)
-            io.matrix.get.bits.pc := io.inst(i).bits.addr
+            io.matrixMul.get.valid := tryDispatch && d.isMatrixMul()
+            io.matrixMul.get.bits.op := d.matrix.get.bits.matmulOp
+            io.matrixMul.get.bits.ms2 := d.matrix.get.bits.ms2
+            io.matrixMul.get.bits.ms1 := d.matrix.get.bits.ms1
+            io.matrixMul.get.bits.md := d.matrix.get.bits.md
+            io.matrixMul.get.bits.pc := io.inst(i).bits.addr
 
-            // matrix load/store instructions issue
-            val matrixMemValid = d.isMatrixLoadStore()
-            io.matrixMem.get.valid := tryDispatch && matrixMemValid
-            io.matrixMem.get.bits.op := MuxCase(MatrixMemOp.LD_A, Seq(
-                d.mlae8  -> MatrixMemOp.LD_A,
-                d.mlae16 -> MatrixMemOp.LD_A,
-                d.mlae32 -> MatrixMemOp.LD_A,
-                d.mlae64 -> MatrixMemOp.LD_A,
-                d.mlbe8  -> MatrixMemOp.LD_B,
-                d.mlbe16 -> MatrixMemOp.LD_B,
-                d.mlbe32 -> MatrixMemOp.LD_B,
-                d.mlbe64 -> MatrixMemOp.LD_B,
-                d.mlce8  -> MatrixMemOp.LD_C,
-                d.mlce16 -> MatrixMemOp.LD_C,
-                d.mlce32 -> MatrixMemOp.LD_C,
-                d.mlce64 -> MatrixMemOp.LD_C,
-                d.msae8  -> MatrixMemOp.ST_A,
-                d.msae16 -> MatrixMemOp.ST_A,
-                d.msae32 -> MatrixMemOp.ST_A,
-                d.msae64 -> MatrixMemOp.ST_A,
-                d.msbe8  -> MatrixMemOp.ST_B,
-                d.msbe16 -> MatrixMemOp.ST_B,
-                d.msbe32 -> MatrixMemOp.ST_B,
-                d.msbe64 -> MatrixMemOp.ST_B,
-                d.msce8  -> MatrixMemOp.ST_C,
-                d.msce16 -> MatrixMemOp.ST_C,
-                d.msce32 -> MatrixMemOp.ST_C,
-                d.msce64 -> MatrixMemOp.ST_C,
-                d.mlme8  -> MatrixMemOp.LD_WHOLE,
-                d.mlme16 -> MatrixMemOp.LD_WHOLE,
-                d.mlme32 -> MatrixMemOp.LD_WHOLE,
-                d.mlme64 -> MatrixMemOp.LD_WHOLE,
-                d.msme8  -> MatrixMemOp.ST_WHOLE,
-                d.msme16 -> MatrixMemOp.ST_WHOLE,
-                d.msme32 -> MatrixMemOp.ST_WHOLE,
-                d.msme64 -> MatrixMemOp.ST_WHOLE,
-                d.mlate8  -> MatrixMemOp.LD_AT,
-                d.mlate16 -> MatrixMemOp.LD_AT,
-                d.mlate32 -> MatrixMemOp.LD_AT,
-                d.mlate64 -> MatrixMemOp.LD_AT,
-                d.mlbte8  -> MatrixMemOp.LD_BT,
-                d.mlbte16 -> MatrixMemOp.LD_BT,
-                d.mlbte32 -> MatrixMemOp.LD_BT,
-                d.mlbte64 -> MatrixMemOp.LD_BT,
-                d.mlcte8  -> MatrixMemOp.LD_CT,
-                d.mlcte16 -> MatrixMemOp.LD_CT,
-                d.mlcte32 -> MatrixMemOp.LD_CT,
-                d.mlcte64 -> MatrixMemOp.LD_CT,
-                d.msate8  -> MatrixMemOp.ST_AT,
-                d.msate16 -> MatrixMemOp.ST_AT,
-                d.msate32 -> MatrixMemOp.ST_AT,
-                d.msate64 -> MatrixMemOp.ST_AT,
-                d.msbte8  -> MatrixMemOp.ST_BT,
-                d.msbte16 -> MatrixMemOp.ST_BT,
-                d.msbte32 -> MatrixMemOp.ST_BT,
-                d.msbte64 -> MatrixMemOp.ST_BT,
-                d.mscte8  -> MatrixMemOp.ST_CT,
-                d.mscte16 -> MatrixMemOp.ST_CT,
-                d.mscte32 -> MatrixMemOp.ST_CT,
-                d.mscte64 -> MatrixMemOp.ST_CT
-            ))
-            io.matrixMem.get.bits.elemWidth := MuxCase("b00".U, Seq(
-                (d.mlae16 || d.mlbe16 || d.mlce16 || d.msae16 || d.msbe16 || d.msce16 ||
-                d.mlme16 || d.msme16 || d.mlate16 || d.mlbte16 || d.mlcte16 ||
-                d.msate16 || d.msbte16 || d.mscte16) -> "b01".U,
-
-                (d.mlae32 || d.mlbe32 || d.mlce32 || d.msae32 || d.msbe32 || d.msce32 ||
-                d.mlme32 || d.msme32 || d.mlate32 || d.mlbte32 || d.mlcte32 ||
-                d.msate32 || d.msbte32 || d.mscte32) -> "b10".U,
-
-                (d.mlae64 || d.mlbe64 || d.mlce64 || d.msae64 || d.msbe64 || d.msce64 ||
-                d.mlme64 || d.msme64 || d.mlate64 || d.mlbte64 || d.mlcte64 ||
-                d.msate64 || d.msbte64 || d.mscte64) -> "b11".U
-            ))
-            io.matrixMem.get.bits.reg := io.inst(i).bits.inst(9,7)
+            io.matrixMem.get.valid := tryDispatch && d.isMatrixLoadStore()
+            io.matrixMem.get.bits.op := d.matrix.get.bits.memOp
+            io.matrixMem.get.bits.elemWidth := d.matrix.get.bits.elemWidth
+            io.matrixMem.get.bits.reg := d.matrix.get.bits.md
             io.matrixMem.get.bits.pc := io.inst(i).bits.addr
+
+            io.matrixZero.get.valid := tryDispatch && d.isMatrixZero()
+            io.matrixZero.get.bits.pc := io.inst(i).bits.addr
+            io.matrixZero.get.bits.md := d.matrix.get.bits.md
+            io.matrixZero.get.bits.regCount := d.matrix.get.bits.miscCtrl
         } 
 
         // -------------------------------------------------------------------------
@@ -939,14 +778,16 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         val fenceValid = if (i == 0) { tryDispatch && d.fence } else { false.B }
 
         // Set next lastReady if dispatched.
-        val matrixIssued = io.matrix.map(_.fire).getOrElse(false.B)
+        val matrixCfgIssued = io.matrixCfg.map(_.valid).getOrElse(false.B)
+        val matrixIssued = io.matrixMul.map(_.fire).getOrElse(false.B)
+        val matrixZeroIssued = io.matrixZero.map(_.fire).getOrElse(false.B)
         val matrixMemIssued = io.matrixMem.map(_.fire).getOrElse(false.B)
 
         val dispatched = Seq(
             io.alu(i).fire, io.bru(i).fire, io.mlu(i).fire, io.dvu(i).fire, io.lsu(i).fire
             ) ++
             Option.when(i == 0)(Seq(
-                io.csr.valid, fenceValid, io.matrixCfg.valid, matrixIssued, matrixMemIssued
+                io.csr.valid, fenceValid, matrixCfgIssued, matrixIssued, matrixMemIssued, matrixZeroIssued
                 )).getOrElse(Seq()) ++
             Option.when(p.enableRvv)(Seq(
                 io.rvv.get(i).fire)).getOrElse(Seq()) ++
@@ -1050,82 +891,14 @@ object DecodeInstruction {
         d.immcsr := op(19,15)
         d.immst  := Cat(Fill(20, op(31)), op(31,25), op(11,7))
 
-        // Martix
-        // TODO 补 enableMatrix 
-        d.msettileki := op === BitPat("b0001_00_0_?????_?????_000_00000_0101011")
-        d.msettilek  := op === BitPat("b0001_00_1_00000_?????_000_00000_0101011")
-        d.msettilemi := op === BitPat("b0010_00_0_?????_?????_000_00000_0101011")
-        d.msettilem  := op === BitPat("b0010_00_1_00000_?????_000_00000_0101011")
-        d.msettileni := op === BitPat("b0011_00_0_?????_?????_000_00000_0101011")
-        d.msettilen  := op === BitPat("b0011_00_1_00000_?????_000_00000_0101011")
+        // 各槽保留类别信息供 slot0 interlock 使用；只有 slot0 连接执行端口。
+        if (p.enableMatrix) {
+            val matrixInstruction = MatrixDecode(op)
+            d.matrix.get.valid := matrixInstruction.kind =/= MatrixInstKind.OTHER &&
+                (!matrixInstruction.isZero() || matrixInstruction.isZeroLegal())
+            d.matrix.get.bits := matrixInstruction
+        }
 
-        d.mmacc_w_b     := op === BitPat("b0001_01_011_???_00_???_000_10_???_0101011")
-        d.mmaccu_w_b    := op === BitPat("b0001_01_000_???_00_???_000_10_???_0101011")
-        d.mmaccus_w_b   := op === BitPat("b0001_01_001_???_00_???_000_10_???_0101011")
-        d.mmaccsu_w_b   := op === BitPat("b0001_01_010_???_00_???_000_10_???_0101011")
-
-        d.mlae8  := op === BitPat("b0000_01_0_?????_?????_000_00_???_0101011")
-        d.mlae16 := op === BitPat("b0000_01_0_?????_?????_000_01_???_0101011")
-        d.mlae32 := op === BitPat("b0000_01_0_?????_?????_000_10_???_0101011")
-        d.mlae64 := op === BitPat("b0000_01_0_?????_?????_000_11_???_0101011")
-        d.mlbe8  := op === BitPat("b0001_01_0_?????_?????_000_00_???_0101011")
-        d.mlbe16 := op === BitPat("b0001_01_0_?????_?????_000_01_???_0101011")
-        d.mlbe32 := op === BitPat("b0001_01_0_?????_?????_000_10_???_0101011")
-        d.mlbe64 := op === BitPat("b0001_01_0_?????_?????_000_11_???_0101011")
-        d.mlce8  := op === BitPat("b0010_01_0_?????_?????_000_00_???_0101011")
-        d.mlce16 := op === BitPat("b0010_01_0_?????_?????_000_01_???_0101011")
-        d.mlce32 := op === BitPat("b0010_01_0_?????_?????_000_10_???_0101011")
-        d.mlce64 := op === BitPat("b0010_01_0_?????_?????_000_11_???_0101011")
-
-        d.msae8  := op === BitPat("b0000_01_1_?????_?????_000_00_???_0101011")
-        d.msae16 := op === BitPat("b0000_01_1_?????_?????_000_01_???_0101011")
-        d.msae32 := op === BitPat("b0000_01_1_?????_?????_000_10_???_0101011")
-        d.msae64 := op === BitPat("b0000_01_1_?????_?????_000_11_???_0101011")
-        d.msbe8  := op === BitPat("b0001_01_1_?????_?????_000_00_???_0101011")
-        d.msbe16 := op === BitPat("b0001_01_1_?????_?????_000_01_???_0101011")
-        d.msbe32 := op === BitPat("b0001_01_1_?????_?????_000_10_???_0101011")
-        d.msbe64 := op === BitPat("b0001_01_1_?????_?????_000_11_???_0101011")
-        d.msce8  := op === BitPat("b0010_01_1_?????_?????_000_00_???_0101011")
-        d.msce16 := op === BitPat("b0010_01_1_?????_?????_000_01_???_0101011")
-        d.msce32 := op === BitPat("b0010_01_1_?????_?????_000_10_???_0101011")
-        d.msce64 := op === BitPat("b0010_01_1_?????_?????_000_11_???_0101011")
-
-        d.mlme8  := op === BitPat("b0011_01_0_?????_?????_000_00_???_0101011")
-        d.mlme16 := op === BitPat("b0011_01_0_?????_?????_000_01_???_0101011")
-        d.mlme32 := op === BitPat("b0011_01_0_?????_?????_000_10_???_0101011")
-        d.mlme64 := op === BitPat("b0011_01_0_?????_?????_000_11_???_0101011")
-        d.msme8  := op === BitPat("b0011_01_1_?????_?????_000_00_???_0101011")
-        d.msme16 := op === BitPat("b0011_01_1_?????_?????_000_01_???_0101011")
-        d.msme32 := op === BitPat("b0011_01_1_?????_?????_000_10_???_0101011")
-        d.msme64 := op === BitPat("b0011_01_1_?????_?????_000_11_???_0101011")
-
-        d.mlate8  := op === BitPat("b0100_01_0_?????_?????_000_00_???_0101011")
-        d.mlate16 := op === BitPat("b0100_01_0_?????_?????_000_01_???_0101011")
-        d.mlate32 := op === BitPat("b0100_01_0_?????_?????_000_10_???_0101011")
-        d.mlate64 := op === BitPat("b0100_01_0_?????_?????_000_11_???_0101011")
-        d.mlbte8  := op === BitPat("b0101_01_0_?????_?????_000_00_???_0101011")
-        d.mlbte16 := op === BitPat("b0101_01_0_?????_?????_000_01_???_0101011")
-        d.mlbte32 := op === BitPat("b0101_01_0_?????_?????_000_10_???_0101011")
-        d.mlbte64 := op === BitPat("b0101_01_0_?????_?????_000_11_???_0101011")
-        d.mlcte8  := op === BitPat("b0110_01_0_?????_?????_000_00_???_0101011")
-        d.mlcte16 := op === BitPat("b0110_01_0_?????_?????_000_01_???_0101011")
-        d.mlcte32 := op === BitPat("b0110_01_0_?????_?????_000_10_???_0101011")
-        d.mlcte64 := op === BitPat("b0110_01_0_?????_?????_000_11_???_0101011")
-
-        d.msate8  := op === BitPat("b0100_01_1_?????_?????_000_00_???_0101011")
-        d.msate16 := op === BitPat("b0100_01_1_?????_?????_000_01_???_0101011")
-        d.msate32 := op === BitPat("b0100_01_1_?????_?????_000_10_???_0101011")
-        d.msate64 := op === BitPat("b0100_01_1_?????_?????_000_11_???_0101011")
-        d.msbte8  := op === BitPat("b0101_01_1_?????_?????_000_00_???_0101011")
-        d.msbte16 := op === BitPat("b0101_01_1_?????_?????_000_01_???_0101011")
-        d.msbte32 := op === BitPat("b0101_01_1_?????_?????_000_10_???_0101011")
-        d.msbte64 := op === BitPat("b0101_01_1_?????_?????_000_11_???_0101011")
-        d.mscte8  := op === BitPat("b0110_01_1_?????_?????_000_00_???_0101011")
-        d.mscte16 := op === BitPat("b0110_01_1_?????_?????_000_01_???_0101011")
-        d.mscte32 := op === BitPat("b0110_01_1_?????_?????_000_10_???_0101011")
-        d.mscte64 := op === BitPat("b0110_01_1_?????_?????_000_11_???_0101011")
-
-        // RV32I
         d.lui   := op === BitPat("b????????????????????_?????_0110111")
         d.auipc := op === BitPat("b????????????????????_?????_0010111")
         d.jal   := op === BitPat("b????????????????????_?????_1101111")
@@ -1238,80 +1011,6 @@ object DecodeInstruction {
             d.flushat  := false.B
             d.flushall := false.B
 
-            d.msettileki := false.B
-            d.msettilek  := false.B
-            d.msettilemi := false.B
-            d.msettilem  := false.B
-            d.msettileni := false.B
-            d.msettilen  := false.B
-
-            d.mmacc_w_b := false.B
-            d.mmaccu_w_b := false.B
-            d.mmaccus_w_b := false.B
-            d.mmaccsu_w_b := false.B
-
-            d.mlae8 := false.B
-            d.mlae16 := false.B
-            d.mlae32 := false.B
-            d.mlae64 := false.B
-            d.mlbe8 := false.B
-            d.mlbe16 := false.B
-            d.mlbe32 := false.B
-            d.mlbe64 := false.B
-            d.mlce8 := false.B
-            d.mlce16 := false.B
-            d.mlce32 := false.B
-            d.mlce64 := false.B
-
-            d.msae8 := false.B
-            d.msae16 := false.B
-            d.msae32 := false.B
-            d.msae64 := false.B
-            d.msbe8 := false.B
-            d.msbe16 := false.B
-            d.msbe32 := false.B
-            d.msbe64 := false.B
-            d.msce8 := false.B
-            d.msce16 := false.B
-            d.msce32 := false.B
-            d.msce64 := false.B
-
-            d.mlme8 := false.B
-            d.mlme16 := false.B
-            d.mlme32 := false.B
-            d.mlme64 := false.B
-
-            d.msme8 := false.B
-            d.msme16 := false.B
-            d.msme32 := false.B
-            d.msme64 := false.B
-
-            d.mlate8 := false.B
-            d.mlate16 := false.B
-            d.mlate32 := false.B
-            d.mlate64 := false.B
-            d.mlbte8 := false.B
-            d.mlbte16 := false.B
-            d.mlbte32 := false.B
-            d.mlbte64 := false.B
-            d.mlcte8 := false.B
-            d.mlcte16 := false.B
-            d.mlcte32 := false.B
-            d.mlcte64 := false.B
-
-            d.msate8 := false.B
-            d.msate16 := false.B
-            d.msate32 := false.B
-            d.msate64 := false.B
-            d.msbte8 := false.B
-            d.msbte16 := false.B
-            d.msbte32 := false.B
-            d.msbte64 := false.B
-            d.mscte8 := false.B
-            d.mscte16 := false.B
-            d.mscte32 := false.B
-            d.mscte64 := false.B
-
             if (p.enableFloat) {
                 d.float.get := MakeInvalid(new FloatInstruction)
             }
@@ -1340,18 +1039,11 @@ object DecodeInstruction {
                         d.mpause, d.mret, d.fencei, d.flushat, d.flushall,
                         d.rvv.map(_.valid).getOrElse(false.B),
                         d.float.map(_.valid).getOrElse(false.B),
-                        d.msettileki,d.msettilek ,d.msettilemi,d.msettilem ,d.msettileni,d.msettilen ,
-                        d.mmacc_w_b, d.mmaccu_w_b, d.mmaccus_w_b, d.mmaccsu_w_b,
-                        d.mlae8 , d.mlae16, d.mlae32, d.mlae64, d.mlbe8 , d.mlbe16, d.mlbe32, d.mlbe64, d.mlce8 , d.mlce16, d.mlce32, d.mlce64,
-                        d.msae8 , d.msae16, d.msae32, d.msae64, d.msbe8 , d.msbe16, d.msbe32, d.msbe64, d.msce8 , d.msce16, d.msce32, d.msce64,
-                        d.mlme8 , d.mlme16, d.mlme32, d.mlme64,
-                        d.msme8 , d.msme16, d.msme32, d.msme64,
-                        d.mlate8 , d.mlate16, d.mlate32, d.mlate64, d.mlbte8 , d.mlbte16, d.mlbte32, d.mlbte64, d.mlcte8 , d.mlcte16, d.mlcte32, d.mlcte64,
-                        d.msate8 , d.msate16, d.msate32, d.msate64, d.msbte8 , d.msbte16, d.msbte32, d.msbte64, d.mscte8 , d.mscte16, d.mscte32, d.mscte64
+                        d.isMatrixInstruction()
                         )
 
-        d.undef := decoded === 0.U
-
+        // 已识别但参数非法的矩阵指令也必须进入非法指令路径。
+        d.undef := (decoded === 0.U) || d.isMatrixIllegal()
         d
     }
 }
