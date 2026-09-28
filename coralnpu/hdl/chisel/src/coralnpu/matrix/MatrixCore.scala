@@ -51,13 +51,13 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val dmem_req_valid_o = Output(Bool())
     val dmem_req_write_o = Output(Bool())
     val dmem_req_addr_o = Output(UInt(p.axi2AddrBits.W))
-    val dmem_req_wdata_o = Output(UInt(p.axi2DataBits.W))
-    val dmem_req_wmask_o = Output(UInt((p.axi2DataBits / 8).W))
+    val dmem_req_wdata_o = Output(UInt(256.W))
+    val dmem_req_wmask_o = Output(UInt(32.W))
     val dmem_busy_i = Input(Bool())
     val dmem_rvalid_i = Input(Bool())
-    val dmem_rdata_i = Input(UInt(p.axi2DataBits.W))
+    val dmem_rdata_i = Input(UInt(256.W))
 
-    // Dedicated 256-bit AXI master used by MatrixDma for DDR accesses.
+    // MatrixDma 使用独立的 512-bit AXI master 访问 DDR。
     val m_axi_arvalid_o = Output(Bool())
     val m_axi_arready_i = Input(Bool())
     val m_axi_arid_o = Output(UInt(1.W))
@@ -68,7 +68,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val m_axi_rvalid_i = Input(Bool())
     val m_axi_rready_o = Output(Bool())
     val m_axi_rid_i = Input(UInt(1.W))
-    val m_axi_rdata_i = Input(UInt(256.W))
+    val m_axi_rdata_i = Input(UInt(p.matrixAxiDataBits.W))
     val m_axi_rresp_i = Input(UInt(2.W))
     val m_axi_rlast_i = Input(Bool())
     val m_axi_awvalid_o = Output(Bool())
@@ -80,8 +80,8 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val m_axi_awburst_o = Output(UInt(2.W))
     val m_axi_wvalid_o = Output(Bool())
     val m_axi_wready_i = Input(Bool())
-    val m_axi_wdata_o = Output(UInt(256.W))
-    val m_axi_wstrb_o = Output(UInt(32.W))
+    val m_axi_wdata_o = Output(UInt(p.matrixAxiDataBits.W))
+    val m_axi_wstrb_o = Output(UInt((p.matrixAxiDataBits / 8).W))
     val m_axi_wlast_o = Output(Bool())
     val m_axi_bvalid_i = Input(Bool())
     val m_axi_bready_o = Output(Bool())
@@ -112,13 +112,20 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
   addResource("hdl/verilog/matrix/MatrixDmaStore.sv")
   addResource("hdl/verilog/matrix/MatrixReadDataProcess.sv")
   addResource("hdl/verilog/matrix/MatrixCore.sv")
+  Seq(
+    "MatrixDmaLoad.sv", "AxiReadBurstCtrl.sv", "fifo.sv",
+    "ABMatrixReg.sv", "ABScaleReg.sv", "CMatrixReg.sv",
+    "pe_ctrl.sv", "matmul_tiling.sv", "pe_array.sv", "pe_ws.sv",
+    "FPPA.sv", "accumulaters.sv", "fp32_add.sv", "DW01_add.sv",
+    "sram_sp_2x32B.sv", "sram_sp_32x32B.sv", "sram_sp_64x1B.sv"
+  ).foreach(name => addResource(s"hdl/verilog/matrix/$name"))
 }
 
 class MatrixCoreWrapper(p: Parameters) extends Module {
   val io = IO(new Bundle {
     val core = new MatrixCoreIO(p)
     val dmem = new MatrixMemDirectIO(p)
-    val axi = new AxiMasterIO(32, 256, 1)
+    val axi = new AxiMasterIO(32, p.matrixAxiDataBits, 1)
   })
 
   val matrixCore = Module(new MatrixCoreBlackBox(p))
@@ -189,7 +196,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.dmem_rvalid_i := io.dmem.rvalid
   matrixCore.io.dmem_rdata_i := io.dmem.rdata
 
-  // Keep the matrix DMA as a separate 256-bit AXI master.  The scalar/RVV
+  // Keep the matrix DMA as a separate 512-bit AXI master.  The scalar/RVV
   // master may use a different width and is arbitrated elsewhere.
   io.axi.write.addr.valid := matrixCore.io.m_axi_awvalid_o
   io.axi.write.addr.bits.addr := matrixCore.io.m_axi_awaddr_o

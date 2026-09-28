@@ -191,7 +191,7 @@ chisel_library(
         "matrix/MatrixScoreboard.scala",
     ],
     resources = [
-        "//hdl/verilog/matrix:MatrixCore.sv",
+        "//hdl/verilog/matrix:matrix_rtl",
     ],
     deps = [
         ":coralnpu_base",

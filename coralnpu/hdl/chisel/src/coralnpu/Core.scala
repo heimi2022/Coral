@@ -56,8 +56,8 @@ class Core(p: Parameters, moduleName: String) extends Module with RequireAsyncRe
 
         // matrix direct memory path
         val matrixMem = Option.when(p.enableMatrix)(new MatrixMemDirectIO(p))
-        // Dedicated 256-bit AXI master for direct matrix-register DMA.
-        val matrixAxi = Option.when(p.enableMatrix)(new AxiMasterIO(32, 256, 1))
+        // Dedicated 512-bit AXI master for MatrixDma DDR accesses.
+        val matrixAxi = Option.when(p.enableMatrix)(new AxiMasterIO(32, p.matrixAxiDataBits, 1))
 
         val iflush = new IFlushIO(p)
         val dflush = new DFlushIO(p)

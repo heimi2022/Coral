@@ -36,6 +36,11 @@ class CoreTlul(p: Parameters, coreModuleName: String) extends RawModule {
         val boot_addr = Input(UInt(32.W))
         val te = Input(Bool())
 
+        // Dedicated MatrixDma AXI master. This is separate from the
+        // scalar/RVV memory AXI path and is 512 bits wide.
+        val matrix_axi_master = Option.when(p.enableMatrix)(
+            new AxiMasterIO(32, p.matrixAxiDataBits, 1))
+
         val dm = new DebugModuleIO(p)
     })
     dontTouch(io)
@@ -52,6 +57,10 @@ class CoreTlul(p: Parameters, coreModuleName: String) extends RawModule {
     io.wfi := coreAxi.io.wfi
     io.fault := coreAxi.io.fault
     io.halted := coreAxi.io.halted
+
+    if (p.enableMatrix) {
+        io.matrix_axi_master.get <> coreAxi.io.matrix_axi_master.get
+    }
 
     io.dm <> coreAxi.io.dm
     hostBridge.io.axi <> coreAxi.io.axi_master

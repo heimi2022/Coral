@@ -159,6 +159,10 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     def axi2DataBits: Int = { lsuDataBits } // vectorBits
     def axi2DataBytes: Int = { axi2DataBits / 8 }
 
+    // MatrixDma 使用独立的 512-bit AXI 数据通路，与 CPU/RVV 的 AXI2
+    // 数据宽度以及矩阵 direct dmem 接口相互独立。
+    val matrixAxiDataBits = 512
+
     // If set, itcmMemoryFile should contain a path to a Verilog mem file.
     // NB: Only used by CoreAxi
     val itcmMemoryFile = ""

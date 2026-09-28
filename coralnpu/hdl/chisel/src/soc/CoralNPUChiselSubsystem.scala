@@ -64,6 +64,9 @@ class CoralNPUChiselSubsystemIO(val hostParams: Seq[bus.TLULParameters], val dev
   // The output from the Xbar is 128-bits / 6-bits, and we instantiate
   // width and TL->AXI bridges elsewhere to adapt the interfaces.
   val ddr_mem_axi = new AxiMasterIO(32, 256, 1)
+  // Dedicated 512-bit AXI master for MatrixDma. The ordinary scalar/RVV
+  // DDR interface above remains 256 bits wide.
+  val matrix_axi_master = new AxiMasterIO(32, p.matrixAxiDataBits, 1)
 }
 
 import chisel3.experimental.BaseModule
@@ -121,6 +124,7 @@ class CoralNPUChiselSubsystem(val hostParams: Seq[bus.TLULParameters], val devic
           core_p.enableFetchL0 = p.enableFetchL0
           core_p.fetchDataBits = p.fetchDataBits
           core_p.enableFloat = p.enableFloat
+          core_p.enableMatrix = p.enableMatrix
           core_p.itcmSizeKBytes = itcmSize.kBytes
           core_p.dtcmSizeKBytes = dtcmSize.kBytes
           Module(new CoreTlul(core_p, config.name))
@@ -218,6 +222,17 @@ class CoralNPUChiselSubsystem(val hostParams: Seq[bus.TLULParameters], val devic
       val ioPort = io.async_ports_devices(domainName).asInstanceOf[ClockResetBundle]
       xbarPort.clock := ioPort.clock
       xbarPort.reset := ioPort.reset
+    }
+
+    // Export the dedicated matrix AXI master without passing it through the
+    // scalar/RVV DDR width bridge.
+    if (SoCChiselConfig(itcmSize, dtcmSize).modules.exists {
+      case ChiselModuleConfig("rvv_core", _, p: CoreTlulParameters, _, _, _) => p.enableMatrix
+      case _ => false
+    }) {
+      modulePorts("rvv_core.io.matrix_axi_master").asInstanceOf[AxiMasterIO] <> io.matrix_axi_master
+    } else {
+      io.matrix_axi_master.defaults()
     }
 
     // --- DDR AXI Interface ---
@@ -348,4 +363,3 @@ object CoralNPUChiselSubsystemEmitter extends App {
         StandardOpenOption.TRUNCATE_EXISTING)
   }
 }
-

@@ -43,6 +43,7 @@ case class CoreTlulParameters(
   enableFetchL0: Boolean,
   fetchDataBits: Int,
   enableFloat: Boolean,
+  enableMatrix: Boolean,
   memoryRegions: Seq[MemoryRegion],
 ) extends ModuleParameters
 
@@ -121,6 +122,7 @@ class SoCChiselConfig(itcmSize: MemorySize, dtcmSize: MemorySize) {
         enableFetchL0 = false,
         fetchDataBits = 128,
         enableFloat = true,
+        enableMatrix = true,
         memoryRegions = memoryRegions,
       ),
       hostConnections = Map("io.tl_host" -> "coralnpu_core"),
