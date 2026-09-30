@@ -546,6 +546,27 @@ chisel_cc_library(
     vopts = CORE_MINI_AXI_VOPTS,
 )
 
+# Separate output names keep matrix verification independent of CPU/RVV baselines.
+chisel_cc_library(
+    name = "matrix_core_axi_cc_library",
+    chisel_lib = ":coralnpu",
+    emit_class = "coralnpu.EmitCore",
+    module_name = "MatrixCoreMiniAxi",
+    extra_outs = ["VMatrixCoreMiniAxi_parameters.h", "MatrixCoreMiniAxi.zip"],
+    gen_flags = [
+        "--moduleName=MatrixCoreMini",
+        "--useAxi",
+        "--enableFetchL0=False",
+        "--fetchDataBits=128",
+        "--lsuDataBits=128",
+        "--enableMatrix=True",
+        "--enableRvv=True",
+        "--enableFloat=True",
+        "--enableVerification=True",
+    ],
+    vopts = CORE_MINI_AXI_VOPTS,
+)
+
 chisel_cc_library(
     name = "core_mini_itcm512kb_dtcm512kb_axi_cc_library",
     chisel_lib = ":coralnpu",

@@ -11,7 +11,7 @@ PE 控制模块
 3. `LoadWeight` 负责纯装权重，`Stream` 负责纯计算，`StreamPreloadWeight` 负责一边计算当前块一边预装下一块权重。
 4. 输出侧单独维护一条 metadata FIFO，记录每个输出 block 对应的 m / n / rd / last，并在 `psum_valid` 拉起时切到写回路径。
 5. 深度为 2 的 PC FIFO 保存已接收命令，最终写回后经完成握手出队；最多两条在途。
-6. 尽管 C reg 做了奇偶bank设计, 但是当矩阵乘负载的 M 为奇数时，仍然会出现 tile 边界的 bank 冲突。
+6. 尽管 C reg 做了奇偶bank设计, 但是当矩阵乘负载的 M 为偶数时(且M 大于28 左右)，仍然会出现 tile 边界的 bank 冲突。
     为避免冲突，在 tile 边界插入一个 bubble，暂停新的 rs1 读取，但不影响前一个 tile 已经进入阵列的数据。
     wjj 2026-09 decode 时,为带宽受限,bubble带来的延迟会完全被 weight block 的装载时间覆盖,因此不影响吞吐。
                 prefill 时, m 一般很大 , bubble 对吞吐影响也可以忽略。
@@ -27,6 +27,7 @@ PE 控制模块
 1. rs1/rs2/rd 的 ready/valid 协议
 2. 输出写回和外部 SRAM / buffer 的握手
 3. n > 32、多 tile 串行等更完整的尾块处理
+4. C reg 标志位为0时，PE阵列结果可以直接bypass到C reg 少几次 累加器的翻转
 
 
 只在脉动阵列最底部做了 MX 量化逻辑，由于目前MX量化分组为32个元素一组，脉动阵列大小刚好为32*32，因此这是正确的。
@@ -50,12 +51,12 @@ module pe_ctrl #(
     input  logic [2:0]                                  rs2_i                       ,
     input  logic [2:0]                                  rd_i                        ,
     input  logic                                        cmd_valid_i                 ,
-    input  logic [31:0]                                 cmd_pc_i,
-    output logic                                        cmd_ready_o,
-    output logic                                        busy_o,
-    output logic                                        done_valid_o,
-    input  logic                                        done_ready_i,
-    output logic [31:0]                                 done_pc_o,
+    input  logic [31:0]                                 cmd_pc_i                    ,
+    output logic                                        cmd_ready_o                 ,
+    output logic                                        busy_o                      ,
+    output logic                                        done_valid_o                ,
+    input  logic                                        done_ready_i                ,
+    output logic [31:0]                                 done_pc_o                   ,
 
     input  logic [TILE_COLS * MAX_ELEM_WIDTH - 1 : 0]   rs1_data_i                  ,
     input  logic                                        rs1_data_valid_i            ,
@@ -115,7 +116,7 @@ module pe_ctrl #(
     // 写回 metadata 按 block 保存 M、N、C reg 和 K block。
     localparam int WRITEBACK_META_WIDTH   = M_CNT_WIDTH + COL_CNT_WIDTH + 3 + 1 + 1;
     localparam int PE_ACC_WIDTH           = 2 * MAX_ELEM_WIDTH + $clog2(TILE_ROWS);  //  等于 2*8+5=21
-    localparam int ACCUM_PIPE_STAGES      = 3;
+    localparam int ACCUM_PIPE_STAGES      = 4;
     // block-head 在该位置有效时，下一拍将出现该 block 的首个累加结果。
     localparam int WRITEBACK_META_POP_INDEX = TILE_ROWS + ACCUM_PIPE_STAGES - 1;
 
@@ -147,6 +148,8 @@ module pe_ctrl #(
     logic                                       load_weight_ping;
     logic                                       load_weight_pong;
     logic                                       weight_bank_sel;
+    logic [TILE_COLS-1:0]                       act_return_col_mask_q;
+    logic [TILE_ROWS-1:0]                       act_return_row_mask_q;
     logic [TILE_ROWS * MAX_ELEM_WIDTH - 1 : 0]  weight_tile;
     logic [TILE_COLS-1:0]                       psum_top_valid;
     logic [TILE_COLS-1:0]                       act_top_valid;
@@ -169,11 +172,15 @@ module pe_ctrl #(
     logic                                       weight_read_last;
     logic                                       weight_write_last;
     logic                                       stream_last;
+    logic                                       stream_last_q;
+    logic                                       stream_pipe_done;
+    logic                                       stream_start_pending_q;
+    logic [2:0]                                 stream_start_age_q;
+    logic                                       next_stream_ready;
     logic                                       weight_overlap_done;
     logic                                       stream_overlap_done;
     logic                                       weight_done_now;
     logic                                       stream_done_now;
-    logic                                       compute_done_now;
     logic                                       cmd_accept;
     logic                                       cmd_retire;
     logic                                       enter_load_weight;
@@ -208,6 +215,7 @@ module pe_ctrl #(
     logic                                       output_nblock;
     logic                                       tiling_act_nblock;
     logic                                       rd_read_nblock;
+    logic                                       rd_read_last;
     logic                                       writeback_head_last;
     logic                                       rd_write_last;
     logic [2:0]                                 output_rd;
@@ -392,29 +400,32 @@ module pe_ctrl #(
 
     // `StreamPreloadWeight` 表示当前块计算和下一块装权同时进行。
     // 开始计算当前 block，同时预装载下一个 weight block
-    assign start_stream_preload = ((state == LoadWeight) && weight_read_last && !tiling_weight_empty) ||
-                                  ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
-                                   !tiling_weight_empty);
+    assign start_stream_preload = (((state == LoadWeight) && weight_done_now && !tiling_weight_empty) ||
+                                  ((state == StreamPreloadWeight) && stream_pipe_done && weight_done_now &&
+                                   !tiling_weight_empty));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             stream_overlap_done <= 1'b0;
             weight_overlap_done <= 1'b0;
-        end else if (start_stream_preload) begin
+        end else if (start_stream_preload || enter_load_weight) begin
             stream_overlap_done <= 1'b0;
             weight_overlap_done <= 1'b0;
         end else begin
-            if (stream_last)
+            if (stream_pipe_done)
                 stream_overlap_done <= 1'b1;
-            if (weight_read_last)
+            if (weight_load_active && weight_read_last)
                 weight_overlap_done <= 1'b1;
         end
     end
 
-    assign weight_done_now = weight_overlap_done || weight_read_last;
-    assign stream_done_now = stream_overlap_done || stream_last;
+    assign weight_done_now = weight_overlap_done || (weight_load_active && weight_read_last);
+    // stream_last means the final activation row was issued. The current
+    // weight bank remains in use until that row reaches the array bottom.
+    assign stream_pipe_done = psum_valid && stream_last_q;
+    assign stream_done_now = stream_overlap_done || stream_pipe_done;
 
-    assign weight_load_active = (state == LoadWeight) ||
+    assign weight_load_active = ((state == LoadWeight) && !weight_overlap_done) ||
                                   ((state == StreamPreloadWeight) && !weight_overlap_done);
 
     assign enter_load_weight = ((state == Idle) && !tiling_weight_empty) ||
@@ -422,10 +433,9 @@ module pe_ctrl #(
 
     assign weight_pop = enter_load_weight || start_stream_preload;
 
-    assign enter_stream = ((state == LoadWeight) && weight_read_last &&
-                           tiling_weight_empty) ||
+    assign enter_stream = (((state == LoadWeight) && weight_done_now && tiling_weight_empty) ||
                           ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
-                           tiling_weight_empty);
+                           tiling_weight_empty));
 
     assign stream_pop = enter_stream || start_stream_preload;
 
@@ -454,7 +464,7 @@ module pe_ctrl #(
         if (!rst_n)
             weight_write_last <= 1'b0;
         else
-            weight_write_last <= weight_read_last;
+            weight_write_last <= weight_load_active && weight_read_last;
     end
 
     always @* begin
@@ -477,19 +487,9 @@ module pe_ctrl #(
         end
     end
 
-    // 权重真正写入 PE 的脉冲单独组合产生。
-    always @* begin
-        case (state)
-            LoadWeight,StreamPreloadWeight: begin
-                load_weight_ping = !weight_load_bank_sel & rs2_data_valid_i;
-                load_weight_pong = weight_load_bank_sel & rs2_data_valid_i;
-            end
-            default: begin
-                load_weight_ping = 1'b0;
-                load_weight_pong = 1'b0;
-            end
-        endcase
-    end
+    // The final SRAM response can arrive after the request state has changed.
+    assign load_weight_ping = !weight_load_bank_sel && rs2_data_valid_i;
+    assign load_weight_pong =  weight_load_bank_sel && rs2_data_valid_i;
 
 /* 激活读取 */
     // C Reg 为单端口 SRAM 时，m 为奇数会导致相邻 tile 的边界出现
@@ -509,9 +509,39 @@ module pe_ctrl #(
     end
 
     assign stream_count_p1      = stream_count + 1'd1;
-    assign stream_issue_active  = stream_active && !stream_boundary_bubble_q;
+    assign stream_issue_active  = stream_active && !stream_boundary_bubble_q &&
+                                  (!stream_start_pending_q || next_stream_ready);
     assign stream_last          = stream_issue_active &&
                                    (stream_count_p1 == stream_m_rows);
+
+    // 当 m,n 太小, 会发生 前半段结果未写回 C reg，后半段就开始读 C reg 的情况, 故在此处设置一个 6 clk 的阈值
+    assign next_stream_ready = (stream_start_age_q == 3'd7);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            stream_start_age_q <= 3'd0;
+        else if (stream_issue_active && (stream_count == '0))
+            stream_start_age_q <= 3'd0;
+        else if (!next_stream_ready)
+            stream_start_age_q <= stream_start_age_q + 1'b1;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            stream_start_pending_q <= 1'b0;
+        else if (stream_pop && !next_stream_ready)
+            stream_start_pending_q <= 1'b1;
+        else if (stream_issue_active)
+            stream_start_pending_q <= 1'b0;
+    end
+
+    // rs1 SRAM has one cycle of read latency. The last request is therefore
+    // delayed to the cycle in which the last activation row enters the PE.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            stream_last_q <= 1'b0;
+        else
+            stream_last_q <= stream_last;
+    end
 
     // act/psum 行计数：一块计算里每消费一行加一，到最后一行自动回零。
     always @(posedge clk or negedge rst_n) begin
@@ -536,8 +566,18 @@ module pe_ctrl #(
     end
 
 /* 激活输入 & 输出累加预取触发 */
-    assign act_top_valid  = {TILE_COLS{rs1_data_valid_i}} & row_valid_mask;
-    assign psum_top_valid = {TILE_COLS{rs1_data_valid_i}} & col_valid_mask;
+    // Carry request metadata through the same one-cycle latency as SRAM data.
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            act_return_col_mask_q <= '0;
+            act_return_row_mask_q <= '0;
+        end else if (rs1_read_valid_o) begin
+            act_return_col_mask_q <= col_valid_mask;
+            act_return_row_mask_q <= row_valid_mask;
+        end
+    end
+    assign act_top_valid  = {TILE_COLS{rs1_data_valid_i}} & act_return_row_mask_q;
+    assign psum_top_valid = {TILE_COLS{rs1_data_valid_i}} & act_return_col_mask_q;
 
     assign act_top          = rs1_data_i;
 
@@ -560,15 +600,12 @@ module pe_ctrl #(
     end    
 
 /* 计算 bank 选择 */ 
-    assign compute_done_now      = ((state == StreamPreloadWeight) && stream_done_now && weight_done_now) ||
-                                   ((state == Stream) && stream_last);
-
     // weight_bank_sel=0 表示当前计算使用 ping bank，=1 表示当前计算使用 pong bank。
     // 这里按 K<=64 处理，因此最多只会有两段 K。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             weight_bank_sel <= 1'b0;
-        end else if (compute_done_now) begin
+        end else if (stream_last_q) begin
             weight_bank_sel <= ~weight_bank_sel;
         end else begin
             weight_bank_sel <= weight_bank_sel;
@@ -645,6 +682,7 @@ module pe_ctrl #(
             rd_read_rs1     <= '0;
             rs1_scale_kblock_q <= 1'b0;
             rd_read_nblock  <= 1'b0;
+            rd_read_last    <= 1'b0;
             rd_read_sel  <= '0;
             rd_zero_block_q <= 1'b0;
         end else if (output_meta_pop) begin
@@ -652,6 +690,7 @@ module pe_ctrl #(
             rd_read_rs1 <= output_rs1;
             rs1_scale_kblock_q <= output_kblock;
             rd_read_nblock <= output_nblock;
+            rd_read_last <= output_last;
             rd_read_sel <= output_rd;
             // 每个 N 区域的 K0 使用零初值；K1 必须读取 K0 的写回结果。
             // 整块保持，确保首次遍历的所有行都旁路为零。
@@ -801,7 +840,7 @@ module pe_ctrl #(
 
     assign writeback_head_m_rows = writeback_meta_rd_data[WRITEBACK_META_WIDTH-2 -: M_CNT_WIDTH];
     assign writeback_head_last = writeback_meta_rd_data[WRITEBACK_META_WIDTH-1];
-    assign writeback_head_n_cols = writeback_meta_rd_data[4 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
+    assign writeback_head_n_cols = writeback_meta_rd_data[3 + COL_CNT_WIDTH -: COL_CNT_WIDTH];
     assign writeback_head_rd = writeback_meta_rd_data[3:1];
     assign writeback_head_nblock = writeback_meta_rd_data[0];
 
@@ -843,15 +882,14 @@ module pe_ctrl #(
         rd_write_valid_o  = accum_valid;
     end
 
-    // 指令完成独立于清零状态；仅目标仍为逻辑零时才提交解除清零。
+    // C 的 zero 标志在最后一个矩阵分块完成最后一次 C 读取后解除。
+    // rd_read_last 表示当前读取的矩阵分块是整条 MATMUL 的最后一个分块。
     // 无效周期 mask 必须为零。
-    // 写口无 ready，依赖上游 scoreboard 保证该写回不被同目标 DMA 写阻塞。
     assign cmd_writeback_done = rd_write_valid_o && rd_write_last &&
                                  (rd_write_count_p1 == rd_write_m_rows);
-    assign c_reg_zero_release_valid_o = cmd_writeback_done &&
-                                        !c_reg_zero_n_i[rd_write_sel[1:0]];
-    assign c_reg_zero_release_mask_o = c_reg_zero_release_valid_o ?
-                                (4'b0001 << rd_write_sel[1:0]) : 4'b0;
+    assign c_reg_zero_release_valid_o = psum_pre_valid && (rd_read_count_p1 == rd_read_m_rows) &&
+                                        rd_read_last && !c_reg_zero_n_i[rd_read_sel[1:0]];
+    assign c_reg_zero_release_mask_o = c_reg_zero_release_valid_o ? (4'b0001 << rd_read_sel[1:0]) : 4'b0;
                                 
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
@@ -893,13 +931,11 @@ module pe_ctrl #(
             end
 
             LoadWeight: begin
-                if (weight_read_last) begin
+                if (weight_done_now) begin
                     if (!tiling_weight_empty)
                         next_state = StreamPreloadWeight;
-                    else if (!tiling_act_psum_empty)
+                    else 
                         next_state = Stream;
-                    else
-                        next_state = Idle;
                 end
             end
 
@@ -914,7 +950,7 @@ module pe_ctrl #(
 
             // Stream 状态下如果来了右矩阵应该也支持预装载右矩阵,现在该逻辑未实现
             Stream: begin
-                if (stream_last) begin
+                if (stream_pipe_done) begin
                     if (enter_load_weight)
                         next_state = LoadWeight;
                     else

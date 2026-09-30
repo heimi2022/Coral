@@ -22,7 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.RvvCoreIO
 import _root_.circt.stage.ChiselStage
-import coralnpu.matrix.{MatrixCoreIO, MatrixMemOp}
+import coralnpu.matrix.{MatrixCoreIO, MatrixMemExecReq, MatrixMemOp}
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -251,30 +251,33 @@ class SCore(p: Parameters) extends Module {
 
         io.matrixcore.get.zero <> dispatch.io.matrixZero.get
 
-        val matrixMemIsWhole = dispatch.io.matrixMem.get.bits.op.isOneOf(
+        // The scalar register file returns operands one cycle after dispatch.
+        // Reserve this entry at issue, then capture operands before presenting
+        // the complete command to MatrixCore. Later scalar reads cannot alter it.
+        val matrixMemOperandsPending = RegNext(dispatch.io.matrixMem.get.fire, false.B)
+        val matrixMemValid = RegInit(false.B)
+        val matrixMemCommand = Reg(new MatrixMemExecReq(p))
+        dispatch.io.matrixMem.get.ready := !matrixMemOperandsPending && !matrixMemValid
+
+        when(dispatch.io.matrixMem.get.fire) {
+            matrixMemCommand.req := dispatch.io.matrixMem.get.bits
+        }
+        val matrixMemIsWhole = matrixMemCommand.req.op.isOneOf(
             MatrixMemOp.LD_WHOLE,
             MatrixMemOp.ST_WHOLE
         )
-        io.matrixcore.get.mem.valid := dispatch.io.matrixMem.get.valid
-        io.matrixcore.get.mem.bits.req := dispatch.io.matrixMem.get.bits
-        io.matrixcore.get.mem.bits.base := regfile.io.readData(0).data
-        io.matrixcore.get.mem.bits.stride := Mux(matrixMemIsWhole, 0.U, regfile.io.readData(1).data)
-        dispatch.io.matrixMem.get.ready := io.matrixcore.get.mem.ready
+        when(matrixMemOperandsPending) {
+            matrixMemCommand.base := regfile.io.readData(0).data
+            matrixMemCommand.stride := Mux(matrixMemIsWhole, 0.U, regfile.io.readData(1).data)
+        }
+        when(matrixMemOperandsPending) {
+            matrixMemValid := true.B
+        }.elsewhen(io.matrixcore.get.mem.fire) {
+            matrixMemValid := false.B
+        }
+        io.matrixcore.get.mem.valid := matrixMemValid
+        io.matrixcore.get.mem.bits := matrixMemCommand
 
-        // debug
-        io.matrixcore.get.debug.tileWrite.enable := false.B
-        io.matrixcore.get.debug.tileWrite.reg := 0.U
-        io.matrixcore.get.debug.tileWrite.data := 0.U
-
-        io.matrixcore.get.debug.accWrite.enable := false.B
-        io.matrixcore.get.debug.accWrite.reg := 0.U
-        io.matrixcore.get.debug.accWrite.data := 0.U
-
-        io.matrixcore.get.debug.tileRead.enable := false.B
-        io.matrixcore.get.debug.tileRead.reg := 0.U
-
-        io.matrixcore.get.debug.accRead.enable := false.B
-        io.matrixcore.get.debug.accRead.reg := 0.U
     }
 
     val dmRs1 = Wire(new RegfileReadDataIO)

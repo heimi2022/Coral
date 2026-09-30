@@ -13,11 +13,23 @@ printf '%s\n' '[2/3] Check generated AXI ports and matrix modules'
 python3 tests/cocotb/check_matrix_rtl.py "$rtl" | tee "$log_dir/ports.log"
 
 printf '%s\n' '[3/3] Verilator hierarchy and connection lint'
-verilator_bin=${VERILATOR_BIN:-verilator}
+if [[ -n "${VERILATOR_BIN:-}" ]]; then
+    verilator_bin=$VERILATOR_BIN
+elif command -v verilator >/dev/null 2>&1; then
+    verilator_bin=$(command -v verilator)
+else
+    printf '%s\n' 'Using the repository Bazel Verilator toolchain'
+    bazel build @verilator//:verilator_bin @verilator//:verilator_lib "$@" 2>&1 | tee "$log_dir/verilator_build.log"
+    verilator_bin="$repo_dir/bazel-bin/external/verilator/verilator_bin"
+    verilator_real=$(readlink -f "$verilator_bin")
+    output_base=${verilator_real%%/execroot/*}
+    export VERILATOR_ROOT="$output_base/external/verilator"
+fi
 if ! command -v "$verilator_bin" >/dev/null 2>&1; then
-    printf '%s\n' 'Set VERILATOR_BIN to a Verilator executable and rerun.' >&2
+    printf 'Verilator not executable: %s\n' "$verilator_bin" >&2
     exit 1
 fi
+printf 'Using Verilator: %s\n' "$verilator_bin"
 "$verilator_bin" --lint-only --top-module CoralNPUChiselSubsystem \
     --Mdir "$log_dir/obj_dir" --timescale-override 1ns/1ps \
     -Wno-fatal -Werror-PINMISSING -Werror-PINNOTFOUND \

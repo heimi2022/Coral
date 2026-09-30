@@ -20,8 +20,10 @@ The script uses the matrix-enabled configuration in
    remain visible and require review, especially width and undriven warnings.
 
 Logs default to `/tmp/coral_matrix_rtl_check/{generate,ports,lint}.log`.
-Override the directory with `MATRIX_CHECK_LOG_DIR`. Set `VERILATOR_BIN` if
-Verilator is not on PATH. Additional script arguments are passed to Bazel.
+Override the directory with `MATRIX_CHECK_LOG_DIR`. The script uses
+`VERILATOR_BIN` when explicitly set, then Verilator on PATH, otherwise builds
+and uses the repository's Bazel Verilator toolchain. That build is logged to
+`verilator_build.log`. Additional script arguments are passed to Bazel.
 The script stops at the first failing step, including failures piped to tee.
 
 This is a structural check, not a cocotb functional simulation. It does not

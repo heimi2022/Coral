@@ -33,32 +33,6 @@ class MatrixZeroCmd extends Bundle {
     val regCount = UInt(3.W)
 }
 
-class MatrixDebugIO(p: Parameters) extends Bundle {
-    val tileWrite = new Bundle {
-        val enable = Input(Bool())
-        val reg = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-        val data = Input(UInt(p.matrixTlen.W))
-    }
-
-    val accWrite = new Bundle {
-        val enable = Input(Bool())
-        val reg = Input(UInt(log2Ceil(p.matrixAccRegCount).W))
-        val data = Input(UInt(p.matrixAlen.W))
-    }
-
-    val tileRead = new Bundle {
-        val enable = Input(Bool())
-        val reg = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-        val data = Output(UInt(p.matrixTlen.W))
-    }
-
-    val accRead = new Bundle {
-        val enable = Input(Bool())
-        val reg = Input(UInt(log2Ceil(p.matrixAccRegCount).W))
-        val data = Output(UInt(p.matrixAlen.W))
-    }
-}
-
 object MatrixMemOp extends ChiselEnum {
     val LD_A = Value
     val LD_B = Value
@@ -111,5 +85,4 @@ class MatrixCoreIO(p: Parameters) extends Bundle {
     val mem = Flipped(Decoupled(new MatrixMemExecReq(p)))
     val csr = Flipped(new CsrMatrixIO(p))
     val status = new MatrixStatusIO
-    val debug = new MatrixDebugIO(p)
 }

@@ -1,7 +1,6 @@
 package coralnpu.matrix
 
 import chisel3._
-import chisel3.util._
 import chisel3.util.HasBlackBoxResource
 import coralnpu.Parameters
 import bus.AxiMasterIO
@@ -88,18 +87,6 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val m_axi_bid_i = Input(UInt(1.W))
     val m_axi_bresp_i = Input(UInt(2.W))
 
-    val tile_dbg_wr_en_i = Input(Bool())
-    val tile_dbg_wr_reg_i = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-    val tile_dbg_wr_data_i = Input(UInt(p.matrixTlen.W))
-    val acc_dbg_wr_en_i = Input(Bool())
-    val acc_dbg_wr_reg_i = Input(UInt(log2Ceil(p.matrixAccRegCount).W))
-    val acc_dbg_wr_data_i = Input(UInt(p.matrixAlen.W))
-    val dbg_tile_rd_en_i = Input(Bool())
-    val dbg_tile_rd_reg_i = Input(UInt(log2Ceil(p.matrixTileRegCount).W))
-    val dbg_tile_rd_data_o = Output(UInt(p.matrixTlen.W))
-    val dbg_acc_rd_en_i = Input(Bool())
-    val dbg_acc_rd_reg_i = Input(UInt(log2Ceil(p.matrixAccRegCount).W))
-    val dbg_acc_rd_data_o = Output(UInt(p.matrixAlen.W))
   })
 
   addResource("hdl/verilog/matrix/sram_sp.sv")
@@ -171,22 +158,6 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.core.csr.xmfflags_set.valid := false.B
   io.core.csr.xmfflags_set.bits := 0.U(5.W)
 
-  matrixCore.io.tile_dbg_wr_en_i := io.core.debug.tileWrite.enable
-  matrixCore.io.tile_dbg_wr_reg_i := io.core.debug.tileWrite.reg
-  matrixCore.io.tile_dbg_wr_data_i := io.core.debug.tileWrite.data
-
-  matrixCore.io.acc_dbg_wr_en_i := io.core.debug.accWrite.enable
-  matrixCore.io.acc_dbg_wr_reg_i := io.core.debug.accWrite.reg
-  matrixCore.io.acc_dbg_wr_data_i := io.core.debug.accWrite.data
-
-  matrixCore.io.dbg_tile_rd_en_i := io.core.debug.tileRead.enable
-  matrixCore.io.dbg_tile_rd_reg_i := io.core.debug.tileRead.reg
-  io.core.debug.tileRead.data := matrixCore.io.dbg_tile_rd_data_o
-
-  matrixCore.io.dbg_acc_rd_en_i := io.core.debug.accRead.enable
-  matrixCore.io.dbg_acc_rd_reg_i := io.core.debug.accRead.reg
-  io.core.debug.accRead.data := matrixCore.io.dbg_acc_rd_data_o
-
   io.dmem.req.valid := matrixCore.io.dmem_req_valid_o
   io.dmem.req.bits.write := matrixCore.io.dmem_req_write_o
   io.dmem.req.bits.addr := matrixCore.io.dmem_req_addr_o
@@ -217,10 +188,10 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.axi.write.data.bits.last := matrixCore.io.m_axi_wlast_o
   matrixCore.io.m_axi_wready_i := io.axi.write.data.ready
 
-  io.axi.write.resp.valid := matrixCore.io.m_axi_bvalid_i
-  io.axi.write.resp.bits.id := matrixCore.io.m_axi_bid_i
-  io.axi.write.resp.bits.resp := matrixCore.io.m_axi_bresp_i
-  matrixCore.io.m_axi_bready_o := io.axi.write.resp.ready
+  matrixCore.io.m_axi_bvalid_i := io.axi.write.resp.valid
+  matrixCore.io.m_axi_bid_i := io.axi.write.resp.bits.id
+  matrixCore.io.m_axi_bresp_i := io.axi.write.resp.bits.resp
+  io.axi.write.resp.ready := matrixCore.io.m_axi_bready_o
 
   io.axi.read.addr.valid := matrixCore.io.m_axi_arvalid_o
   io.axi.read.addr.bits.addr := matrixCore.io.m_axi_araddr_o
@@ -235,10 +206,10 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.axi.read.addr.bits.region := 0.U
   matrixCore.io.m_axi_arready_i := io.axi.read.addr.ready
 
-  io.axi.read.data.valid := matrixCore.io.m_axi_rvalid_i
-  io.axi.read.data.bits.data := matrixCore.io.m_axi_rdata_i
-  io.axi.read.data.bits.id := matrixCore.io.m_axi_rid_i
-  io.axi.read.data.bits.resp := matrixCore.io.m_axi_rresp_i
-  io.axi.read.data.bits.last := matrixCore.io.m_axi_rlast_i
-  matrixCore.io.m_axi_rready_o := io.axi.read.data.ready
+  matrixCore.io.m_axi_rvalid_i := io.axi.read.data.valid
+  matrixCore.io.m_axi_rdata_i := io.axi.read.data.bits.data
+  matrixCore.io.m_axi_rid_i := io.axi.read.data.bits.id
+  matrixCore.io.m_axi_rresp_i := io.axi.read.data.bits.resp
+  matrixCore.io.m_axi_rlast_i := io.axi.read.data.bits.last
+  io.axi.read.data.ready := matrixCore.io.m_axi_rready_o
 }

@@ -222,6 +222,78 @@ cocotb_test_suite(
     },
 )
 
+verilator_cocotb_model(
+    name = "matrix_cpu_dma_model",
+    trace = True,
+    cflags = [flag for flag in VERILATOR_BUILD_ARGS if flag != "-DZVE32F_ON"] + ["-Wno-fatal"],
+    hdl_toplevel = "MatrixCoreMiniAxi",
+    verilog_source = "//hdl/chisel/src/coralnpu:MatrixCoreMiniAxi.sv",
+)
+
+genrule(
+    name = "pe_ctrl_standalone_rtl",
+    srcs = [
+        "//hdl/verilog/matrix:fifo.sv",
+        "//hdl/verilog/matrix:DW01_add.sv",
+        "//hdl/verilog/matrix:FPPA.sv",
+        "//hdl/verilog/matrix:accumulaters.sv",
+        "//hdl/verilog/matrix:pe_ws.sv",
+        "//hdl/verilog/matrix:pe_array.sv",
+        "//hdl/verilog/matrix:matmul_tiling.sv",
+        "//hdl/verilog/matrix:pe_ctrl.sv",
+    ],
+    outs = ["PeCtrlStandalone.sv"],
+    cmd = "cat $(SRCS) > $@",
+)
+
+verilator_cocotb_model(
+    name = "pe_ctrl_standalone_model",
+    trace = False,
+    cflags = VERILATOR_BUILD_ARGS + ["-Wno-fatal", "--public-flat-rw"],
+    hdl_toplevel = "pe_ctrl",
+    verilog_source = ":pe_ctrl_standalone_rtl",
+)
+
+cocotb_test_suite(
+    name = "pe_ctrl_standalone",
+    simulators = ["verilator"],
+    testcases = [
+        "pe_ctrl_m64_n3_k64_ideal_c",
+        "pe_ctrl_m64_n3_k64_c_bank_conflicts",
+        "pe_ctrl_m64_n33_k64_debug",
+    ],
+    verilator_model = ":pe_ctrl_standalone_model",
+    tests_kwargs = {
+        "hdl_toplevel": "pe_ctrl",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["pe_ctrl_standalone_test.py"],
+        "size": "medium",
+    },
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma",
+    simulators = ["verilator"],
+    testcases = [
+        "c_load_store", "c_load_store_backpressure",
+        "c_mzero_store", "c_mzero_store_backpressure",
+        "matmul_mx_k32", "matmul_mx_k64", "matmul_mx_accumulate",
+        "matmul_mx_m33_c2", "matmul_mx_n33_c3", "matmul_mx_m64_n33_k64",
+        "matmul_mx_m64_n33_k32", "matmul_mx_m64_n3_k32", "matmul_mx_m64_n3_k64",
+        "matmul_mx_m64_n33_k64_no_stall",
+    ],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": True,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "size": "large",
+    },
+)
+
 RVV_ASSEMBLY_TESTCASES = [
     "core_mini_rvv_load",
     "core_mini_rvv_add",

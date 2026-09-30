@@ -11,10 +11,11 @@
 // 其中中间的隐藏位由符号决定，因此存储时省略。零使用全零编码，
 // 不能参与隐藏位恢复或指数对齐。
 //
-// 数据通路为三拍：
+// 数据通路为四拍：
 //   第 1 拍：MX 点积规格化、C 解码和两个补码尾数对阶；
 //   第 2 拍：FPPA 同时产生未舍入结果和预加舍入位的结果，并选择结果；
-//   第 3 拍：补码规格化、补码尾数压缩和写回。
+//   第 3 拍：补码规格化、前导零检测和可变左移；
+//   第 4 拍：指数边界处理、结果格式压缩和写回。
 //
 // 本模块面向推理场景，只支持有限数和零，不处理次正规数、Inf、NaN。
 module accumulaters #(
@@ -52,6 +53,13 @@ module accumulaters #(
     logic                                         s2_valid_q;
     logic [TILE_COLS * 8 - 1 : 0]                 s2_exp_q;
     logic signed [TILE_COLS * 29 - 1 : 0]        s2_sum_q;
+
+    // 第 3 级：规格化后的尾数和指数，供第 4 级处理边界编码。
+    logic                                         s3_valid_q;
+    logic signed [TILE_COLS * 25 - 1 : 0]         s3_sig_q;
+    logic signed [TILE_COLS * EXP_CALC_WIDTH - 1 : 0] s3_exp_q;
+    logic [TILE_COLS-1:0]                        s3_zero_q;
+    logic [TILE_COLS-1:0]                        s3_sign_q;
 
     // 正数保持原值，负数先按位取反，再共用同一套前导零检测硬件。
     function automatic [4:0] leading_zero_count_24;
@@ -329,9 +337,11 @@ module accumulaters #(
         if (!rst_n) begin
             s1_valid_q <= 1'b0;
             s2_valid_q <= 1'b0;
+            s3_valid_q <= 1'b0;
         end else begin
             s1_valid_q <= valid_i;
             s2_valid_q <= s1_valid_q;
+            s3_valid_q <= s2_valid_q;
         end
     end
 
@@ -347,13 +357,7 @@ module accumulaters #(
             logic [5:0]         left_shift_w;
             logic signed [28:0] norm_sum_w;
             logic signed [EXP_CALC_WIDTH-1:0] norm_exp_w;
-            logic               negative_one_w;
             logic signed [24:0] normalized_sig_w;
-            logic signed [24:0] result_sig_w;
-            logic signed [EXP_CALC_WIDTH-1:0] result_exp_w;
-            logic               result_zero_w;
-            logic               result_overflow_w;
-            logic [31:0]        result_w;
 
             assign sum_value_w = $signed(s2_sum_q[pack_idx*29 +: 29]);
             assign sum_zero_w  = (sum_value_w == 29'sd0);
@@ -386,31 +390,54 @@ module accumulaters #(
             // 的有效补码尾数，避免再串接一个舍入加法器。
             assign normalized_sig_w = $signed(norm_sum_w[27:3]);
 
-            // -1.0 的补码尾数是 11.000...，无法直接压缩为 10.fraction。
-            // 将其改写为 -2.0，同时把指数减一，数值保持不变。
-            assign negative_one_w = sum_sign_w &&
-                                    (normalized_sig_w == 25'sh1800000);
-            assign result_sig_w = negative_one_w ?
-                                  25'sh1000000 : normalized_sig_w;
-            assign result_exp_w = norm_exp_w -
-                                  (negative_one_w ? 10'sd1 : 10'sd0);
+            // 第 3 拍寄存规格化结果，切断可变移位到边界编码的组合路径。
+            always @(posedge clk or negedge rst_n) begin
+                if (!rst_n) begin
+                    s3_sig_q[pack_idx*25 +: 25] <= '0;
+                    s3_exp_q[pack_idx*EXP_CALC_WIDTH +: EXP_CALC_WIDTH] <= '0;
+                    s3_zero_q[pack_idx] <= 1'b0;
+                    s3_sign_q[pack_idx] <= 1'b0;
+                end else if (s2_valid_q) begin
+                    s3_sig_q[pack_idx*25 +: 25] <= normalized_sig_w;
+                    s3_exp_q[pack_idx*EXP_CALC_WIDTH +: EXP_CALC_WIDTH] <= norm_exp_w;
+                    s3_zero_q[pack_idx] <= sum_zero_w;
+                    s3_sign_q[pack_idx] <= sum_sign_w;
+                end
+            end
+        end
+    endgenerate
 
-            // 不生成次正规数；指数下溢或精确抵消时统一写零。指数进入
-            // FP32 保留的 255 区间时，直接饱和到对应符号的最大有限值。
-            assign result_zero_w = sum_zero_w || (result_exp_w <= 10'sd0);
+    genvar result_idx;
+    generate
+        for (result_idx = 0; result_idx < TILE_COLS; result_idx = result_idx + 1) begin : g_stage4
+            logic [31:0] result_w;
+            logic negative_one_w;
+            logic signed [24:0] result_sig_w;
+            logic signed [EXP_CALC_WIDTH-1:0] result_exp_w;
+            logic result_zero_w;
+            logic result_overflow_w;
+
+            // -1.0 的补码尾数改写为 -2.0，指数减一以保持数值不变。
+            assign negative_one_w = s3_sign_q[result_idx] &&
+                                    (s3_sig_q[result_idx*25 +: 25] == 25'sh1800000);
+            assign result_sig_w = negative_one_w ?
+                                  25'sh1000000 : s3_sig_q[result_idx*25 +: 25];
+            assign result_exp_w = $signed(s3_exp_q[result_idx*EXP_CALC_WIDTH +: EXP_CALC_WIDTH]) -
+                                  (negative_one_w ? 10'sd1 : 10'sd0);
+            // 下溢或精确抵消写零，上溢饱和到最大有限值。
+            assign result_zero_w = s3_zero_q[result_idx] || (result_exp_w <= 10'sd0);
             assign result_overflow_w = (result_exp_w >= 10'sd255);
             assign result_w = result_zero_w ? 32'b0 :
                               result_overflow_w ?
                               (result_sig_w[24] ?
                                32'hfe800001 : 32'hfe7fffff) :
-                              {result_exp_w[7:0], result_sig_w[24],
-                               result_sig_w[22:0]};
+                              {result_exp_w[7:0], result_sig_w[24], result_sig_w[22:0]};
 
             always @(posedge clk or negedge rst_n) begin
                 if (!rst_n)
-                    sum_o[pack_idx*32 +: 32] <= '0;
-                else if (s2_valid_q)
-                    sum_o[pack_idx*32 +: 32] <= result_w;
+                    sum_o[result_idx*32 +: 32] <= '0;
+                else if (s3_valid_q)
+                    sum_o[result_idx*32 +: 32] <= result_w;
             end
         end
     endgenerate
@@ -419,7 +446,7 @@ module accumulaters #(
         if (!rst_n)
             valid_o <= 1'b0;
         else
-            valid_o <= s2_valid_q;
+            valid_o <= s3_valid_q;
     end
 
 endmodule

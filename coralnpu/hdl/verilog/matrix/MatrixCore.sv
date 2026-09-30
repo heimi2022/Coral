@@ -360,10 +360,6 @@ module MatrixCore (
     assign xmsat_set_valid_o = 1'b0;
     assign xmsat_set_bits_o = 1'b0;
 
-    // 当前调试端口尚未接入新的分 bank 矩阵寄存器。
-    assign dbg_tile_rd_data_o = '0;
-    assign dbg_acc_rd_data_o  = '0;
-
     // pe_ctrl 根据当前 K block 直接产生 col：
     // col=0 读取逻辑行低 32B，col=1 读取逻辑行高 32B。
     // 这两个信号不能再从地址位推导，因为 ABMatrixReg 的逻辑地址和半行选择已分离。

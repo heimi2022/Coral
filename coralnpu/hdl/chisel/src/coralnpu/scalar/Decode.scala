@@ -410,7 +410,11 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
     // ---------------------------------------------------------------------------
     // Fence interlock
-    val fence = decodedInsts.map(x => x.isFency() && (io.mactive || io.lsuActive))
+    // MatrixCore busy does not cover commands still awaiting scalar operands
+    // in SCore. Track issue through completion before allowing WFI/clock gating.
+    val matrixInFlight = matrixScoreboard.map(_.io.hasInFlight).getOrElse(false.B)
+    val fence = decodedInsts.map(x =>
+        x.isFency() && (matrixInFlight || io.mactive || io.lsuActive))
 
     // ---------------------------------------------------------------------------
     // Slot 0 interlock
