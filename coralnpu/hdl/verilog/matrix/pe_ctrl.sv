@@ -173,7 +173,6 @@ module pe_ctrl #(
     logic                                       weight_write_last;
     logic                                       stream_last;
     logic                                       stream_last_q;
-    logic                                       stream_pipe_done;
     logic                                       stream_start_pending_q;
     logic [2:0]                                 stream_start_age_q;
     logic                                       next_stream_ready;
@@ -181,6 +180,11 @@ module pe_ctrl #(
     logic                                       stream_overlap_done;
     logic                                       weight_done_now;
     logic                                       stream_done_now;
+    logic [1:0]                                 weight_banks_busy_q;
+    logic                                       stream_bank_release;
+    logic                                       weight_bank_available;
+    logic                                       weight_load_ongoing_q;
+    logic                                       weight_load_start;
     logic                                       cmd_accept;
     logic                                       cmd_retire;
     logic                                       enter_load_weight;
@@ -401,8 +405,32 @@ module pe_ctrl #(
     // `StreamPreloadWeight` 表示当前块计算和下一块装权同时进行。
     // 开始计算当前 block，同时预装载下一个 weight block
     assign start_stream_preload = (((state == LoadWeight) && weight_done_now && !tiling_weight_empty) ||
-                                  ((state == StreamPreloadWeight) && stream_pipe_done && weight_done_now &&
+                                  ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
                                    !tiling_weight_empty));
+
+    assign weight_bank_available = weight_banks_busy_q < 2;
+    assign weight_load_start = weight_load_active && !weight_load_ongoing_q;
+    assign stream_bank_release = psum_pre_valid && (rd_read_count_p1 == rd_read_m_rows);
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            weight_banks_busy_q <= '0;
+        end else begin
+            case ({weight_load_start, stream_bank_release})
+                2'b10: weight_banks_busy_q <= weight_banks_busy_q + 1'b1;
+                2'b01: weight_banks_busy_q <= weight_banks_busy_q - 1'b1;
+                default: ;
+            endcase
+        end
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            weight_load_ongoing_q <= 1'b0;
+        end else begin
+            if (weight_load_active)
+                weight_load_ongoing_q <= !weight_read_last;
+        end
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -412,7 +440,7 @@ module pe_ctrl #(
             stream_overlap_done <= 1'b0;
             weight_overlap_done <= 1'b0;
         end else begin
-            if (stream_pipe_done)
+            if (stream_last)
                 stream_overlap_done <= 1'b1;
             if (weight_load_active && weight_read_last)
                 weight_overlap_done <= 1'b1;
@@ -420,13 +448,11 @@ module pe_ctrl #(
     end
 
     assign weight_done_now = weight_overlap_done || (weight_load_active && weight_read_last);
-    // stream_last means the final activation row was issued. The current
-    // weight bank remains in use until that row reaches the array bottom.
-    assign stream_pipe_done = psum_valid && stream_last_q;
-    assign stream_done_now = stream_overlap_done || stream_pipe_done;
+    assign stream_done_now = stream_overlap_done || stream_last;
 
-    assign weight_load_active = ((state == LoadWeight) && !weight_overlap_done) ||
-                                  ((state == StreamPreloadWeight) && !weight_overlap_done);
+    assign weight_load_active = (((state == LoadWeight) || (state == StreamPreloadWeight)) &&
+                                 !weight_overlap_done &&
+                                 (weight_load_ongoing_q || weight_bank_available));
 
     assign enter_load_weight = ((state == Idle) && !tiling_weight_empty) ||
                                ((state == Stream) && stream_last && !tiling_weight_empty);
@@ -950,7 +976,7 @@ module pe_ctrl #(
 
             // Stream 状态下如果来了右矩阵应该也支持预装载右矩阵,现在该逻辑未实现
             Stream: begin
-                if (stream_pipe_done) begin
+                if (stream_last) begin
                     if (enter_load_weight)
                         next_state = LoadWeight;
                     else

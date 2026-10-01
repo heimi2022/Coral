@@ -282,6 +282,11 @@ cocotb_test_suite(
         "matmul_mx_m33_c2", "matmul_mx_n33_c3", "matmul_mx_m64_n33_k64",
         "matmul_mx_m64_n33_k32", "matmul_mx_m64_n3_k32", "matmul_mx_m64_n3_k64",
         "matmul_mx_m64_n33_k64_no_stall",
+        "matmul_mx_m1_n33_k64", "matmul_mx_m32_n33_k64",
+        "matmul_mx_m31_n33_k64_no_stall", "matmul_mx_m3_n33_k64_accumulate",
+        "matmul_mx_m2_n64_k64_no_stall", "matmul_mx_m63_n32_k64",
+        "matmul_mx_m64_n64_k64",
+        "matmul_mx_scalar_rvv_high_load",
     ],
     verilator_model = ":matrix_cpu_dma_model",
     tests_kwargs = {

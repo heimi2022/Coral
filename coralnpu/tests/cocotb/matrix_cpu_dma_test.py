@@ -366,7 +366,8 @@ async def c_mzero_store_backpressure(dut):
     await exercise(dut, True, zero=True)
 
 
-async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=4):
+async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=4,
+                          scalar_burst=0, rvv_burst=0):
     """MXINT8: S1.6 elements, one biased power-of-two scale per 32 K elements."""
     core = CoreMiniAxiInterface(dut)
     ram = MatrixMemory(dut, stalled)
@@ -390,7 +391,7 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
     for col in range(n):
         for group in range(groups):
             for lane in range(4):
-                b[col][32 * group + lane] = (-1 if (col + group) & 1 else 1) * (5 + col * 2 + lane * 2 + group)
+                b[col][32 * group + lane] = (-1 if (col + group) & 1 else 1) * (5 + (col * 2) % 112 + lane * 2 + group)
     sa = [[126 + (row + group) % 3 for row in range(m)] for group in range(groups)]
     sb = [[126 + (col + 2 * group) % 3 for col in range(n)] for group in range(groups)]
     expected_ar = []
@@ -447,6 +448,21 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
         # Signed MMACC.W.B, ms1=AB0, ms2=AB1, md=C0 (architectural id 4).
         command((1 << 28) | (2 << 26) | (3 << 23) | (1 << 20) |
                 (2 << 10) | (c_reg << 7) | 0x2B, f"MATMUL {index + 1}")
+
+    # Keep the scalar and RVV pipes busy after MATMUL has been accepted. The
+    # instructions use independent architectural state, so the test observes
+    # overlap without changing the matrix operands or result.
+    for index in range(max(scalar_burst, rvv_burst)):
+        if index < scalar_burst:
+            # addi x20, x20, 1
+            command((1 << 20) | (20 << 15) | (20 << 7) | 0x13,
+                    f"SCALAR ADDI {index + 1}")
+        if index < rvv_burst:
+            if index == 0:
+                # vsetivli x0, 16, e8, m1, ta, ma
+                command(0xCC087057, "RVV VSETIVLI")
+            # vadd.vv v3, v1, v2
+            command(0x021101D7, f"RVV VADD {index + 1}")
     li(12, dst)
     command((2 << 28) | (1 << 26) | (1 << 25) | (11 << 20) |
             (12 << 15) | (2 << 10) | (c_reg << 7) | 0x2B,
@@ -454,10 +470,31 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
     expected_words = list(words)
     words.extend([0x10500073, 0x0000006F])
     retired = []
+    cycle = 0
+    matrix_dispatch_cycle = None
+    matrix_retire_cycle = None
+    scalar_dispatched_before_matrix_retire = False
+    rvv_dispatched_before_matrix_retire = False
 
     async def monitor():
+        nonlocal cycle, matrix_dispatch_cycle, matrix_retire_cycle
+        nonlocal scalar_dispatched_before_matrix_retire
+        nonlocal rvv_dispatched_before_matrix_retire
         while len(retired) < len(expected_words):
             await RisingEdge(dut.io_aclk)
+            cycle += 1
+            for lane in range(4):
+                prefix = f"io_debug_dispatch_{lane}"
+                if not int(getattr(dut, prefix + "_instFire").value):
+                    continue
+                pc = int(getattr(dut, prefix + "_instAddr").value)
+                name = commands.get(pc, "")
+                if name.startswith("MATMUL") and matrix_dispatch_cycle is None:
+                    matrix_dispatch_cycle = cycle
+                elif name.startswith("SCALAR") and matrix_retire_cycle is None:
+                    scalar_dispatched_before_matrix_retire = True
+                elif name.startswith("RVV") and matrix_retire_cycle is None:
+                    rvv_dispatched_before_matrix_retire = True
             assert not int(dut.io_fault.value), f"CPU fault after {len(retired)} instructions"
             for lane in range(8):
                 prefix = f"io_debug_rb_inst_{lane}"
@@ -470,6 +507,8 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
                 assert pc == ENTRY + 4 * len(retired), f"Unexpected retirement {pc:#x}"
                 assert int(getattr(dut, prefix + "_bits_inst").value) == expected_words[len(retired)]
                 retired.append(pc)
+                if commands.get(pc, "").startswith("MATMUL"):
+                    matrix_retire_cycle = cycle
                 if pc in commands:
                     dut._log.info("RETIRED %s pc=%08x", commands[pc], pc)
 
@@ -489,6 +528,14 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
         raise
     await ClockCycles(dut.io_aclk, 20)
     assert not int(dut.io_fault.value)
+    assert matrix_dispatch_cycle is not None, "MATMUL was not dispatched"
+    assert matrix_retire_cycle is not None, "MATMUL did not retire"
+    assert scalar_dispatched_before_matrix_retire, (
+        "No scalar instruction dispatched before MATMUL retirement"
+    )
+    assert rvv_dispatched_before_matrix_retire, (
+        "No RVV instruction dispatched before MATMUL retirement"
+    )
     expected_aw = segments(dst, m, n, stride)
     assert ram.ar == expected_ar, f"Unexpected LOAD addresses/lengths: {ram.ar}"
     assert ram.aw == expected_aw, f"Unexpected STORE addresses/lengths: {ram.aw}"
@@ -568,3 +615,52 @@ async def matmul_mx_m64_n3_k64(dut):
 async def matmul_mx_m64_n33_k64_no_stall(dut):
     """Check whether the combined M/N/K case depends on AXI backpressure."""
     await exercise_matmul(dut, 64, stalled=False, m=64, n=33, c_reg=7)
+
+
+@cocotb.test()
+async def matmul_mx_m1_n33_k64(dut):
+    """Stress bank reuse when a one-row stream ends before weight preload."""
+    await exercise_matmul(dut, 64, stalled=True, m=1, n=33, c_reg=5)
+
+
+@cocotb.test()
+async def matmul_mx_m32_n33_k64(dut):
+    """Cover the exact 32-row boundary with both N and K tiling."""
+    await exercise_matmul(dut, 64, stalled=True, m=32, n=33, c_reg=6)
+
+
+@cocotb.test()
+async def matmul_mx_m31_n33_k64_no_stall(dut):
+    """Cover the odd-row boundary and bank reuse without AXI stalls."""
+    await exercise_matmul(dut, 64, stalled=False, m=31, n=33, c_reg=5)
+
+
+@cocotb.test()
+async def matmul_mx_m3_n33_k64_accumulate(dut):
+    """Repeat a short two-bank MATMUL before storing the same C register."""
+    await exercise_matmul(dut, 64, repetitions=2, stalled=True, m=3, n=33, c_reg=6)
+
+
+@cocotb.test()
+async def matmul_mx_m2_n64_k64_no_stall(dut):
+    """Stress repeated bank reuse across two full N tiles with short M."""
+    await exercise_matmul(dut, 64, stalled=False, m=2, n=64, c_reg=5)
+
+
+@cocotb.test()
+async def matmul_mx_m63_n32_k64(dut):
+    """Cover an odd M tail when N ends exactly at the first tile boundary."""
+    await exercise_matmul(dut, 64, stalled=True, m=63, n=32, c_reg=6)
+
+
+@cocotb.test()
+async def matmul_mx_m64_n64_k64(dut):
+    """Cover maximum M and N with two K groups and AXI backpressure."""
+    await exercise_matmul(dut, 64, stalled=True, m=64, n=64, c_reg=7)
+
+
+@cocotb.test()
+async def matmul_mx_scalar_rvv_high_load(dut):
+    """Run heavy scalar and RVV traffic while a maximum-size MATMUL executes."""
+    await exercise_matmul(dut, 64, stalled=True, m=64, n=64, c_reg=7,
+                          scalar_burst=96, rvv_burst=96)
