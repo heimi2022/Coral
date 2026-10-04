@@ -296,6 +296,36 @@ python3 tests/toolchain/collect_coral_matrix_manifest.py \
 manifest 中的 `dirty` 字段必须在发布前变为 `false`，并且应保存统一
 回归命令的通过结果。
 
+## 其他开发者配置工具链
+
+CoralNPU 主仓库不把完整 GCC 和 Binutils 源码复制进来。仓库内保存了
+两个固定基线上的 patch，因此其他开发者 clone 仓库后可以自动准备相同的
+工具链源码：
+
+```bash
+cd /path/to/coralnpu
+tests/toolchain/prepare_coral_matrix_sources.sh
+```
+
+脚本默认将源码放在 CoralNPU 同级的
+`riscv-matrix-extension-spec/xuantie-gnu-toolchain`，也可以指定位置：
+
+```bash
+export CORAL_TOOLCHAIN_SOURCE_ROOT=/path/to/xuantie-gnu-toolchain
+tests/toolchain/prepare_coral_matrix_sources.sh
+```
+
+脚本固定以下版本：
+
+- XuanTie GCC 分支 `xuantie-gcc-14.3.0` 加 Coral Matrix patch。
+- XuanTie Binutils 分支 `xuantie-binutils-gdb-2.42` 加 Coral Matrix patch。
+
+源码准备完成后，分别构建 RV64 和 RV32 Binutils，再构建对应 GCC。GCC
+的 `--with-as`、`--with-ld` 和 `--with-build-time-tools` 必须指向同一
+位宽的 Binutils 安装目录。构建完成后设置 `CORAL_RV64_CC`、
+`CORAL_RV64_CC_B`、`CORAL_RV64_BINUTILS`、`CORAL_RV32_CC`、
+`CORAL_RV32_CC_B` 和 `CORAL_RV32_BINUTILS`，然后运行统一回归。
+
 ## 外部 RV32 工具链生成可执行 ELF
 
 RV32 汇编和 C API 编码验证通过后，可使用独立脚本生成一份带最小启动代码

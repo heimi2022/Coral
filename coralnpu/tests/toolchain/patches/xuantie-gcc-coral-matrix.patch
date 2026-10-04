@@ -1,0 +1,130 @@
+From 103c87c5b42029198e83a3748759c7c696b0892b Mon Sep 17 00:00:00 2001
+From: jj <220256672@seu.edu.cn>
+Date: Sun, 4 Oct 2026 20:27:43 +0800
+Subject: [PATCH] riscv: add Coral Matrix extension
+
+---
+ gcc/common/config/riscv/riscv-common.cc   | 20 ++++++++++++++++++++
+ gcc/common/config/riscv/xuantie-common.cc |  4 +++-
+ gcc/config/riscv/riscv-c.cc               |  3 +++
+ gcc/config/riscv/riscv.h                  |  4 +++-
+ gcc/config/riscv/xuantie.opt              |  2 ++
+ 5 files changed, 31 insertions(+), 2 deletions(-)
+
+diff --git a/gcc/common/config/riscv/riscv-common.cc b/gcc/common/config/riscv/riscv-common.cc
+index a2609abc01d..1f73308798b 100644
+--- a/gcc/common/config/riscv/riscv-common.cc
++++ b/gcc/common/config/riscv/riscv-common.cc
+@@ -2063,6 +2063,26 @@ riscv_expand_arch (int argc ATTRIBUTE_UNUSED,
+     return "";
+ }
+ 
++/* Expand the architecture string for gas.
++
++   GCC accepts an omitted version for vendor extensions, while gas requires
++   an explicit version for them.  Keep the regular driver expansion
++   versionless and add versions only to the assembler command line.  */
++
++const char *
++riscv_expand_arch_for_asm (int argc ATTRIBUTE_UNUSED,
++			   const char **argv)
++{
++  gcc_assert (argc == 1);
++  location_t loc = UNKNOWN_LOCATION;
++  riscv_parse_arch_string (argv[0], NULL, loc);
++  const std::string arch = riscv_arch_str (true);
++  if (arch.length())
++    return xasprintf ("-march=%s", arch.c_str());
++  else
++    return "";
++}
++
+ /* Expand default -mtune option from -mcpu option, use default --with-tune value
+    if -mcpu don't have valid value.  */
+ 
+diff --git a/gcc/common/config/riscv/xuantie-common.cc b/gcc/common/config/riscv/xuantie-common.cc
+index 6af8198c719..bbbcfd8b2c1 100644
+--- a/gcc/common/config/riscv/xuantie-common.cc
++++ b/gcc/common/config/riscv/xuantie-common.cc
+@@ -63,6 +63,7 @@
+   {"xtheade", ISA_SPEC_CLASS_NONE, 1, 0},		\
+   {"xtheadfpp", ISA_SPEC_CLASS_NONE, 1, 0},		\
+   {"xtheadmatrix", ISA_SPEC_CLASS_NONE, 0, 3},		\
++  {"xcoralmatrix", ISA_SPEC_CLASS_NONE, 1, 0},		\
+   {"xtheadse", ISA_SPEC_CLASS_NONE, 1, 0},		\
+   {"xtheadvdot", ISA_SPEC_CLASS_NONE, 1, 0},		\
+   {"xtheadvsfa", ISA_SPEC_CLASS_NONE, 1, 0},		\
+@@ -142,6 +143,7 @@
+   RISCV_EXT_FLAG_ENTRY("xtheade",		x_riscv_xt_subext, MASK_XTHEADE),		\
+   RISCV_EXT_FLAG_ENTRY("xtheadfpp",		x_riscv_xt_subext, MASK_XTHEADFPP),		\
+   RISCV_EXT_FLAG_ENTRY("xtheadmatrix",		x_riscv_xt_subext, MASK_XTHEADMATRIX),	\
++  RISCV_EXT_FLAG_ENTRY("xcoralmatrix",		x_riscv_xt_subext, MASK_XCORALMATRIX),	\
+   RISCV_EXT_FLAG_ENTRY("xtheadse",		x_riscv_xt_subext, MASK_XTHEADSE),		\
+   RISCV_EXT_FLAG_ENTRY("xtheadvdot",		x_riscv_xt_subext, MASK_XTHEADVDOT),	\
+   RISCV_EXT_FLAG_ENTRY("xtheadvsfa",		x_riscv_xt_subext, MASK_XTHEADVSFA),	\
+@@ -377,4 +379,4 @@ xt_compute_multilib_os (
+ }
+ 
+ #undef TARGET_COMPUTE_MULTILIB_OS
+-#define TARGET_COMPUTE_MULTILIB_OS xt_compute_multilib_os
+\ No newline at end of file
++#define TARGET_COMPUTE_MULTILIB_OS xt_compute_multilib_os
+diff --git a/gcc/config/riscv/riscv-c.cc b/gcc/config/riscv/riscv-c.cc
+index dd06169bd8b..a67602b5d9a 100644
+--- a/gcc/config/riscv/riscv-c.cc
++++ b/gcc/config/riscv/riscv-c.cc
+@@ -60,6 +60,9 @@ riscv_cpu_cpp_builtins (cpp_reader *pfile)
+   if (TARGET_XTHEADMATRIX)
+     builtin_define ("__riscv_matrix");
+ 
++  if (TARGET_XCORALMATRIX)
++    builtin_define ("__riscv_xcoralmatrix");
++
+ #ifdef THEAD_VERSION_NUMBER
+ #define STR(a) #a
+ #define XSTR(a) STR(a)
+diff --git a/gcc/config/riscv/riscv.h b/gcc/config/riscv/riscv.h
+index 0d2bc6714e2..12a3daf2855 100644
+--- a/gcc/config/riscv/riscv.h
++++ b/gcc/config/riscv/riscv.h
+@@ -48,6 +48,7 @@ along with GCC; see the file COPYING3.  If not see
+ #endif
+ 
+ extern const char *riscv_expand_arch (int argc, const char **argv);
++extern const char *riscv_expand_arch_for_asm (int argc, const char **argv);
+ extern const char *riscv_expand_arch_from_cpu (int argc, const char **argv);
+ extern const char *riscv_default_mtune (int argc, const char **argv);
+ extern const char *riscv_multi_lib_check (int argc, const char **argv);
+@@ -55,6 +56,7 @@ extern const char *riscv_arch_help (int argc, const char **argv);
+ 
+ # define EXTRA_SPEC_FUNCTIONS						\
+   { "riscv_expand_arch", riscv_expand_arch },				\
++  { "riscv_expand_arch_for_asm", riscv_expand_arch_for_asm },		\
+   { "riscv_expand_arch_from_cpu", riscv_expand_arch_from_cpu },		\
+   { "riscv_default_mtune", riscv_default_mtune },			\
+   { "riscv_multi_lib_check", riscv_multi_lib_check },			\
+@@ -115,7 +117,7 @@ extern const char *riscv_arch_help (int argc, const char **argv);
+ #define ASM_SPEC "\
+ %(subtarget_asm_debugging_spec) \
+ %{" FPIE_OR_FPIC_SPEC ":-fpic} \
+-%{march=*} \
++%{march=*:%:riscv_expand_arch_for_asm(%*)} \
+ %{mabi=*} \
+ %{mno-relax} \
+ %{mbig-endian} \
+diff --git a/gcc/config/riscv/xuantie.opt b/gcc/config/riscv/xuantie.opt
+index 15517cf659d..a541d18842d 100644
+--- a/gcc/config/riscv/xuantie.opt
++++ b/gcc/config/riscv/xuantie.opt
+@@ -203,6 +203,8 @@ Mask(XTHEADFPP)     Var(riscv_xt_subext)
+ 
+ Mask(XTHEADMATRIX)  Var(riscv_xt_subext)
+ 
++Mask(XCORALMATRIX)  Var(riscv_xt_subext)
++
+ Mask(XTHEADSE)      Var(riscv_xt_subext)
+ 
+ Mask(XTHEADVDOT)    Var(riscv_xt_subext)
+-- 
+2.25.1
+

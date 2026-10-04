@@ -1,0 +1,428 @@
+From ec857d9cd0909c5b3cba58e0d5ac861669fe7eeb Mon Sep 17 00:00:00 2001
+From: jj <220256672@seu.edu.cn>
+Date: Sun, 4 Oct 2026 20:28:12 +0800
+Subject: [PATCH] riscv: add Coral Matrix assembler and disassembler
+
+---
+ bfd/elfxx-riscv-xt.h            |   1 +
+ gas/config/tc-riscv-xt.inc      |  48 ++++++++++
+ include/opcode/riscv-opc-xt.def | 154 ++++++++++++++++++++++++++++++++
+ include/opcode/riscv-xt.h       |   1 +
+ opcodes/riscv-dis-xt.inc        |  29 ++++++
+ opcodes/riscv-opc-xt.def        |  74 ++++++++++++++-
+ opcodes/riscv-opc.c             |   8 ++
+ 7 files changed, 313 insertions(+), 2 deletions(-)
+
+diff --git a/bfd/elfxx-riscv-xt.h b/bfd/elfxx-riscv-xt.h
+index 8bb119bb530..be4259e8f74 100644
+--- a/bfd/elfxx-riscv-xt.h
++++ b/bfd/elfxx-riscv-xt.h
+@@ -60,6 +60,7 @@ xuantie_check_implicit_matrix0p3 (const char *implicit ATTRIBUTE_UNUSED,
+   M ("xtheadvfofp6min", INSN_CLASS_XTHEADVFOFP6MIN, 0, 2, 0)                  \
+   M ("xtheadvsfb", INSN_CLASS_XTHEADVSFB, 0, 2, 0)                            \
+   M ("xtheadcrc", INSN_CLASS_XTHEADCRC, 0, 1, 0)                              \
++  M ("xcoralmatrix", INSN_CLASS_XCORALMATRIX, 1, 0, 0)                         \
+   M ("xxtcsrcacherpl", INSN_CLASS_XXTCSRCACHERPL, 1, 0, 0)
+ 
+ #define XUANTIE_M_riscv_supported_vendor_x_ext(xstring, class, r, p, s) \
+diff --git a/gas/config/tc-riscv-xt.inc b/gas/config/tc-riscv-xt.inc
+index bd4c2b6460f..059a847cebd 100644
+--- a/gas/config/tc-riscv-xt.inc
++++ b/gas/config/tc-riscv-xt.inc
+@@ -83,6 +83,24 @@ riscv_xuantie_use_bits (const char **poparg, insn_t *used_bits)
+ 	  break;
+ 	default:
+ 	  break;
++	  }
++      break;
++    case 'C': /* CoralNPU matrix register fields.  */
++      if (*++oparg != 'M')
++	return false;
++      switch (*++oparg)
++	{
++	case 'd': /* Coral md.  */
++	  USE_BITS (OP_MASK_CORAL_MD, OP_SH_CORAL_MD);
++	  break;
++	case 's': /* Coral ms1.  */
++	  USE_BITS (OP_MASK_CORAL_MS1, OP_SH_CORAL_MS1);
++	  break;
++	case 't': /* Coral ms2.  */
++	  USE_BITS (OP_MASK_CORAL_MS2, OP_SH_CORAL_MS2);
++	  break;
++	default:
++	  return false;
+ 	}
+       break;
+     case 'P':
+@@ -179,6 +197,36 @@ riscv_xuantie_parsing_args (const char **poparg, char **pasarg,
+ 	  goto err_out;
+ 	}
+       break;
++    case 'C': /* CoralNPU matrix register fields.  */
++      if (*++oparg != 'M')
++	goto err_out;
++      switch (*++oparg)
++	{
++	case 'd': /* Coral md.  */
++	  if (reg_lookup (&asarg, RCLASS_MR, &regno))
++	    {
++	      INSERT_OPERAND (CORAL_MD, *ip, regno);
++	      break;
++	    }
++	  goto err_out;
++	case 's': /* Coral ms1.  */
++	  if (reg_lookup (&asarg, RCLASS_MR, &regno))
++	    {
++	      INSERT_OPERAND (CORAL_MS1, *ip, regno);
++	      break;
++	    }
++	  goto err_out;
++	case 't': /* Coral ms2.  */
++	  if (reg_lookup (&asarg, RCLASS_MR, &regno))
++	    {
++	      INSERT_OPERAND (CORAL_MS2, *ip, regno);
++	      break;
++	    }
++	  goto err_out;
++	default:
++	  goto err_out;
++	}
++      break;
+ 
+     case 'P':
+       switch (*++oparg)
+diff --git a/include/opcode/riscv-opc-xt.def b/include/opcode/riscv-opc-xt.def
+index 01d3abe3c0b..f03a2b15e2d 100644
+--- a/include/opcode/riscv-opc-xt.def
++++ b/include/opcode/riscv-opc-xt.def
+@@ -937,6 +937,153 @@
+ #define MATCH_TH_MST8ME64 0x2a700c2b
+ #define MASK_TH_MST8ME64 0xfff07c7f
+ 
++/* CoralNPU frozen matrix extension.  */
++#define MATCH_CORAL_MSETTILEKI 0x1000002b
++#define MASK_CORAL_MSETTILEKI 0xfe007fff
++#define MATCH_CORAL_MSETTILEMI 0x2000002b
++#define MASK_CORAL_MSETTILEMI 0xfe007fff
++#define MATCH_CORAL_MSETTILENI 0x3000002b
++#define MASK_CORAL_MSETTILENI 0xfe007fff
++#define MATCH_CORAL_MSETTILEK 0x1200002b
++#define MASK_CORAL_MSETTILEK 0xfff07fff
++#define MATCH_CORAL_MSETTILEM 0x2200002b
++#define MASK_CORAL_MSETTILEM 0xfff07fff
++#define MATCH_CORAL_MSETTILEN 0x3200002b
++#define MASK_CORAL_MSETTILEN 0xfff07fff
++
++#define MATCH_CORAL_MZERO 0x0c00002b
++#define MASK_CORAL_MZERO 0xfffffc7f
++#define MATCH_CORAL_MZERO2R 0x0c80002b
++#define MASK_CORAL_MZERO2R 0xfffffc7f
++#define MATCH_CORAL_MZERO4R 0x0d80002b
++#define MASK_CORAL_MZERO4R 0xfffffc7f
++#define MATCH_CORAL_MZERO8R 0x0f80002b
++#define MASK_CORAL_MZERO8R 0xfffffc7f
++
++#define MATCH_CORAL_MMACC_W_B 0x1980002b
++#define MASK_CORAL_MMACC_W_B 0xff8c7c7f
++#define MATCH_CORAL_MMACC_U_W_B 0x1800002b
++#define MASK_CORAL_MMACC_U_W_B 0xff8c7c7f
++#define MATCH_CORAL_MMACC_US_W_B 0x1880002b
++#define MASK_CORAL_MMACC_US_W_B 0xff8c7c7f
++#define MATCH_CORAL_MMACC_SU_W_B 0x1900002b
++#define MASK_CORAL_MMACC_SU_W_B 0xff8c7c7f
++
++/* CoralNPU matrix load/store instructions.
++   uop=01, func3=000, and bits 11:10 select 8/16/32/64-bit elements.  */
++#define MATCH_CORAL_MLAE8 0x0400002b
++#define MASK_CORAL_MLAE8 0xfe007c7f
++#define MATCH_CORAL_MLAE16 0x0400042b
++#define MASK_CORAL_MLAE16 0xfe007c7f
++#define MATCH_CORAL_MLAE32 0x0400082b
++#define MASK_CORAL_MLAE32 0xfe007c7f
++#define MATCH_CORAL_MLAE64 0x04000c2b
++#define MASK_CORAL_MLAE64 0xfe007c7f
++#define MATCH_CORAL_MSAE8 0x0600002b
++#define MASK_CORAL_MSAE8 0xfe007c7f
++#define MATCH_CORAL_MSAE16 0x0600042b
++#define MASK_CORAL_MSAE16 0xfe007c7f
++#define MATCH_CORAL_MSAE32 0x0600082b
++#define MASK_CORAL_MSAE32 0xfe007c7f
++#define MATCH_CORAL_MSAE64 0x06000c2b
++#define MASK_CORAL_MSAE64 0xfe007c7f
++#define MATCH_CORAL_MLBE8 0x1400002b
++#define MASK_CORAL_MLBE8 0xfe007c7f
++#define MATCH_CORAL_MLBE16 0x1400042b
++#define MASK_CORAL_MLBE16 0xfe007c7f
++#define MATCH_CORAL_MLBE32 0x1400082b
++#define MASK_CORAL_MLBE32 0xfe007c7f
++#define MATCH_CORAL_MLBE64 0x14000c2b
++#define MASK_CORAL_MLBE64 0xfe007c7f
++#define MATCH_CORAL_MSBE8 0x1600002b
++#define MASK_CORAL_MSBE8 0xfe007c7f
++#define MATCH_CORAL_MSBE16 0x1600042b
++#define MASK_CORAL_MSBE16 0xfe007c7f
++#define MATCH_CORAL_MSBE32 0x1600082b
++#define MASK_CORAL_MSBE32 0xfe007c7f
++#define MATCH_CORAL_MSBE64 0x16000c2b
++#define MASK_CORAL_MSBE64 0xfe007c7f
++#define MATCH_CORAL_MLCE8 0x2400002b
++#define MASK_CORAL_MLCE8 0xfe007c7f
++#define MATCH_CORAL_MLCE16 0x2400042b
++#define MASK_CORAL_MLCE16 0xfe007c7f
++#define MATCH_CORAL_MLCE32 0x2400082b
++#define MASK_CORAL_MLCE32 0xfe007c7f
++#define MATCH_CORAL_MLCE64 0x24000c2b
++#define MASK_CORAL_MLCE64 0xfe007c7f
++#define MATCH_CORAL_MSCE8 0x2600002b
++#define MASK_CORAL_MSCE8 0xfe007c7f
++#define MATCH_CORAL_MSCE16 0x2600042b
++#define MASK_CORAL_MSCE16 0xfe007c7f
++#define MATCH_CORAL_MSCE32 0x2600082b
++#define MASK_CORAL_MSCE32 0xfe007c7f
++#define MATCH_CORAL_MSCE64 0x26000c2b
++#define MASK_CORAL_MSCE64 0xfe007c7f
++#define MATCH_CORAL_MLME8 0x3400002b
++#define MASK_CORAL_MLME8 0xfe007c7f
++#define MATCH_CORAL_MLME16 0x3400042b
++#define MASK_CORAL_MLME16 0xfe007c7f
++#define MATCH_CORAL_MLME32 0x3400082b
++#define MASK_CORAL_MLME32 0xfe007c7f
++#define MATCH_CORAL_MLME64 0x34000c2b
++#define MASK_CORAL_MLME64 0xfe007c7f
++#define MATCH_CORAL_MSME8 0x3600002b
++#define MASK_CORAL_MSME8 0xfe007c7f
++#define MATCH_CORAL_MSME16 0x3600042b
++#define MASK_CORAL_MSME16 0xfe007c7f
++#define MATCH_CORAL_MSME32 0x3600082b
++#define MASK_CORAL_MSME32 0xfe007c7f
++#define MATCH_CORAL_MSME64 0x36000c2b
++#define MASK_CORAL_MSME64 0xfe007c7f
++#define MATCH_CORAL_MLATE8 0x4400002b
++#define MASK_CORAL_MLATE8 0xfe007c7f
++#define MATCH_CORAL_MLATE16 0x4400042b
++#define MASK_CORAL_MLATE16 0xfe007c7f
++#define MATCH_CORAL_MLATE32 0x4400082b
++#define MASK_CORAL_MLATE32 0xfe007c7f
++#define MATCH_CORAL_MLATE64 0x44000c2b
++#define MASK_CORAL_MLATE64 0xfe007c7f
++#define MATCH_CORAL_MSATE8 0x4600002b
++#define MASK_CORAL_MSATE8 0xfe007c7f
++#define MATCH_CORAL_MSATE16 0x4600042b
++#define MASK_CORAL_MSATE16 0xfe007c7f
++#define MATCH_CORAL_MSATE32 0x4600082b
++#define MASK_CORAL_MSATE32 0xfe007c7f
++#define MATCH_CORAL_MSATE64 0x46000c2b
++#define MASK_CORAL_MSATE64 0xfe007c7f
++#define MATCH_CORAL_MLBTE8 0x5400002b
++#define MASK_CORAL_MLBTE8 0xfe007c7f
++#define MATCH_CORAL_MLBTE16 0x5400042b
++#define MASK_CORAL_MLBTE16 0xfe007c7f
++#define MATCH_CORAL_MLBTE32 0x5400082b
++#define MASK_CORAL_MLBTE32 0xfe007c7f
++#define MATCH_CORAL_MLBTE64 0x54000c2b
++#define MASK_CORAL_MLBTE64 0xfe007c7f
++#define MATCH_CORAL_MSBTE8 0x5600002b
++#define MASK_CORAL_MSBTE8 0xfe007c7f
++#define MATCH_CORAL_MSBTE16 0x5600042b
++#define MASK_CORAL_MSBTE16 0xfe007c7f
++#define MATCH_CORAL_MSBTE32 0x5600082b
++#define MASK_CORAL_MSBTE32 0xfe007c7f
++#define MATCH_CORAL_MSBTE64 0x56000c2b
++#define MASK_CORAL_MSBTE64 0xfe007c7f
++#define MATCH_CORAL_MLCTE8 0x6400002b
++#define MASK_CORAL_MLCTE8 0xfe007c7f
++#define MATCH_CORAL_MLCTE16 0x6400042b
++#define MASK_CORAL_MLCTE16 0xfe007c7f
++#define MATCH_CORAL_MLCTE32 0x6400082b
++#define MASK_CORAL_MLCTE32 0xfe007c7f
++#define MATCH_CORAL_MLCTE64 0x64000c2b
++#define MASK_CORAL_MLCTE64 0xfe007c7f
++#define MATCH_CORAL_MSCTE8 0x6600002b
++#define MASK_CORAL_MSCTE8 0xfe007c7f
++#define MATCH_CORAL_MSCTE16 0x6600042b
++#define MASK_CORAL_MSCTE16 0xfe007c7f
++#define MATCH_CORAL_MSCTE32 0x6600082b
++#define MASK_CORAL_MSCTE32 0xfe007c7f
++#define MATCH_CORAL_MSCTE64 0x66000c2b
++#define MASK_CORAL_MSCTE64 0xfe007c7f
++
+ /* Xuantie Matrix 0.3.  */
+ #define MATCH_TH_FMMACC_H 0x1000042b
+ #define MASK_TH_FMMACC_H 0xff007fff
+@@ -2444,6 +2591,13 @@ DECLARE_CSR_ALIAS(mintstatus, CSR_MINTSTATUS_OLD, CSR_CLASS_XTHEAD, PRIV_SPEC_CL
+ #define OP_SH_MS3               7
+ #define OP_MASK_MATRIX_NF       0x7
+ #define OP_SH_MATRIX_NF         20
++/* CoralNPU matrix fields.  */
++#define OP_MASK_CORAL_MD        0x7
++#define OP_SH_CORAL_MD          7
++#define OP_MASK_CORAL_MS1       0x7
++#define OP_SH_CORAL_MS1         15
++#define OP_MASK_CORAL_MS2       0x7
++#define OP_SH_CORAL_MS2         20
+ /* Only x0-x7  */
+ #define OP_SH_TH_RS1L           7
+ #define OP_MASK_TH_RS1L         7
+diff --git a/include/opcode/riscv-xt.h b/include/opcode/riscv-xt.h
+index c9d14d8816c..c7a1bac5b22 100644
+--- a/include/opcode/riscv-xt.h
++++ b/include/opcode/riscv-xt.h
+@@ -35,6 +35,7 @@
+   INSN_CLASS_XXTCSRCACHERPL, \
+   \
+   INSN_CLASS_XTHEAD_END, \
++  INSN_CLASS_XCORALMATRIX, \
+ 
+ 
+ #endif
+diff --git a/opcodes/riscv-dis-xt.inc b/opcodes/riscv-dis-xt.inc
+index b130643307d..63c478d2650 100644
+--- a/opcodes/riscv-dis-xt.inc
++++ b/opcodes/riscv-dis-xt.inc
+@@ -71,6 +71,35 @@ riscv_xuantie_print_args (const char **oparg, insn_t l, bfd_vma pc ATTRIBUTE_UNU
+ 
+   switch (*arg)
+     {
++    case 'C': /* CoralNPU matrix register fields.  */
++      if (*++arg != 'M')
++	{
++	  ret = false;
++	  break;
++	}
++      switch (*++arg)
++	{
++	case 'd':
++	  print (info->stream, dis_style_register, "%s",
++		 riscv_xuantie_mr_names_numeric[EXTRACT_BITS
++		   (l, OP_MASK_CORAL_MD, OP_SH_CORAL_MD)]);
++	  break;
++	case 's':
++	  print (info->stream, dis_style_register, "%s",
++		 riscv_xuantie_mr_names_numeric[EXTRACT_BITS
++		   (l, OP_MASK_CORAL_MS1, OP_SH_CORAL_MS1)]);
++	  break;
++	case 't':
++	  print (info->stream, dis_style_register, "%s",
++		 riscv_xuantie_mr_names_numeric[EXTRACT_BITS
++		   (l, OP_MASK_CORAL_MS2, OP_SH_CORAL_MS2)]);
++	  break;
++	default:
++	  ret = false;
++	  break;
++	}
++      break;
++
+     case 'M': /* Matrix.  */
+       switch (*++arg)
+ 	{
+diff --git a/opcodes/riscv-opc-xt.def b/opcodes/riscv-opc-xt.def
+index 77222186534..30b301cfb5f 100644
+--- a/opcodes/riscv-opc-xt.def
++++ b/opcodes/riscv-opc-xt.def
+@@ -477,6 +477,78 @@
+ {"msubr32",     0, INSN_CLASS_P_OR_ZPN,  "XtPd,XtPs,XtPt", MATCH_MSUBR32, MASK_MSUBR32, match_opcode, 0}, \
+  \
+ /* Xuantie Matrix 0.3.  */ \
++/* CoralNPU frozen matrix extension.  */ \
++{"coral.msettileki", 0, INSN_CLASS_XCORALMATRIX, "Xtu10@15", MATCH_CORAL_MSETTILEKI, MASK_CORAL_MSETTILEKI, match_opcode, 0 }, \
++{"coral.msettilemi", 0, INSN_CLASS_XCORALMATRIX, "Xtu10@15", MATCH_CORAL_MSETTILEMI, MASK_CORAL_MSETTILEMI, match_opcode, 0 }, \
++{"coral.msettileni", 0, INSN_CLASS_XCORALMATRIX, "Xtu10@15", MATCH_CORAL_MSETTILENI, MASK_CORAL_MSETTILENI, match_opcode, 0 }, \
++{"coral.msettilek", 0, INSN_CLASS_XCORALMATRIX, "s", MATCH_CORAL_MSETTILEK, MASK_CORAL_MSETTILEK, match_opcode, 0 }, \
++{"coral.msettilem", 0, INSN_CLASS_XCORALMATRIX, "s", MATCH_CORAL_MSETTILEM, MASK_CORAL_MSETTILEM, match_opcode, 0 }, \
++{"coral.msettilen", 0, INSN_CLASS_XCORALMATRIX, "s", MATCH_CORAL_MSETTILEN, MASK_CORAL_MSETTILEN, match_opcode, 0 }, \
++{"coral.mzero", 0, INSN_CLASS_XCORALMATRIX, "XtCMd", MATCH_CORAL_MZERO, MASK_CORAL_MZERO, match_opcode, 0 }, \
++{"coral.mzero2r", 0, INSN_CLASS_XCORALMATRIX, "XtCMd", MATCH_CORAL_MZERO2R, MASK_CORAL_MZERO2R, match_opcode, 0 }, \
++{"coral.mzero4r", 0, INSN_CLASS_XCORALMATRIX, "XtCMd", MATCH_CORAL_MZERO4R, MASK_CORAL_MZERO4R, match_opcode, 0 }, \
++{"coral.mzero8r", 0, INSN_CLASS_XCORALMATRIX, "XtCMd", MATCH_CORAL_MZERO8R, MASK_CORAL_MZERO8R, match_opcode, 0 }, \
++{"coral.mmacc.w.b", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,XtCMt,XtCMs", MATCH_CORAL_MMACC_W_B, MASK_CORAL_MMACC_W_B, match_opcode, 0 }, \
++{"coral.mmaccu.w.b", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,XtCMt,XtCMs", MATCH_CORAL_MMACC_U_W_B, MASK_CORAL_MMACC_U_W_B, match_opcode, 0 }, \
++{"coral.mmaccus.w.b", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,XtCMt,XtCMs", MATCH_CORAL_MMACC_US_W_B, MASK_CORAL_MMACC_US_W_B, match_opcode, 0 }, \
++{"coral.mmaccsu.w.b", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,XtCMt,XtCMs", MATCH_CORAL_MMACC_SU_W_B, MASK_CORAL_MMACC_SU_W_B, match_opcode, 0 }, \
++/* CoralNPU matrix load/store instructions.  */ \
++{"coral.mlae8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLAE8, MASK_CORAL_MLAE8, match_opcode, 0 }, \
++{"coral.mlae16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLAE16, MASK_CORAL_MLAE16, match_opcode, 0 }, \
++{"coral.mlae32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLAE32, MASK_CORAL_MLAE32, match_opcode, 0 }, \
++{"coral.mlae64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLAE64, MASK_CORAL_MLAE64, match_opcode, 0 }, \
++{"coral.msae8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSAE8, MASK_CORAL_MSAE8, match_opcode, 0 }, \
++{"coral.msae16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSAE16, MASK_CORAL_MSAE16, match_opcode, 0 }, \
++{"coral.msae32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSAE32, MASK_CORAL_MSAE32, match_opcode, 0 }, \
++{"coral.msae64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSAE64, MASK_CORAL_MSAE64, match_opcode, 0 }, \
++{"coral.mlbe8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBE8, MASK_CORAL_MLBE8, match_opcode, 0 }, \
++{"coral.mlbe16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBE16, MASK_CORAL_MLBE16, match_opcode, 0 }, \
++{"coral.mlbe32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBE32, MASK_CORAL_MLBE32, match_opcode, 0 }, \
++{"coral.mlbe64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBE64, MASK_CORAL_MLBE64, match_opcode, 0 }, \
++{"coral.msbe8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBE8, MASK_CORAL_MSBE8, match_opcode, 0 }, \
++{"coral.msbe16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBE16, MASK_CORAL_MSBE16, match_opcode, 0 }, \
++{"coral.msbe32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBE32, MASK_CORAL_MSBE32, match_opcode, 0 }, \
++{"coral.msbe64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBE64, MASK_CORAL_MSBE64, match_opcode, 0 }, \
++{"coral.mlce8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCE8, MASK_CORAL_MLCE8, match_opcode, 0 }, \
++{"coral.mlce16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCE16, MASK_CORAL_MLCE16, match_opcode, 0 }, \
++{"coral.mlce32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCE32, MASK_CORAL_MLCE32, match_opcode, 0 }, \
++{"coral.mlce64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCE64, MASK_CORAL_MLCE64, match_opcode, 0 }, \
++{"coral.msce8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCE8, MASK_CORAL_MSCE8, match_opcode, 0 }, \
++{"coral.msce16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCE16, MASK_CORAL_MSCE16, match_opcode, 0 }, \
++{"coral.msce32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCE32, MASK_CORAL_MSCE32, match_opcode, 0 }, \
++{"coral.msce64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCE64, MASK_CORAL_MSCE64, match_opcode, 0 }, \
++{"coral.mlme8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLME8, MASK_CORAL_MLME8, match_coral_whole, 0 }, \
++{"coral.mlme16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLME16, MASK_CORAL_MLME16, match_coral_whole, 0 }, \
++{"coral.mlme32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLME32, MASK_CORAL_MLME32, match_coral_whole, 0 }, \
++{"coral.mlme64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLME64, MASK_CORAL_MLME64, match_coral_whole, 0 }, \
++{"coral.msme8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSME8, MASK_CORAL_MSME8, match_coral_whole, 0 }, \
++{"coral.msme16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSME16, MASK_CORAL_MSME16, match_coral_whole, 0 }, \
++{"coral.msme32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSME32, MASK_CORAL_MSME32, match_coral_whole, 0 }, \
++{"coral.msme64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSME64, MASK_CORAL_MSME64, match_coral_whole, 0 }, \
++{"coral.mlate8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLATE8, MASK_CORAL_MLATE8, match_opcode, 0 }, \
++{"coral.mlate16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLATE16, MASK_CORAL_MLATE16, match_opcode, 0 }, \
++{"coral.mlate32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLATE32, MASK_CORAL_MLATE32, match_opcode, 0 }, \
++{"coral.mlate64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLATE64, MASK_CORAL_MLATE64, match_opcode, 0 }, \
++{"coral.msate8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSATE8, MASK_CORAL_MSATE8, match_opcode, 0 }, \
++{"coral.msate16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSATE16, MASK_CORAL_MSATE16, match_opcode, 0 }, \
++{"coral.msate32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSATE32, MASK_CORAL_MSATE32, match_opcode, 0 }, \
++{"coral.msate64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSATE64, MASK_CORAL_MSATE64, match_opcode, 0 }, \
++{"coral.mlbte8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBTE8, MASK_CORAL_MLBTE8, match_opcode, 0 }, \
++{"coral.mlbte16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBTE16, MASK_CORAL_MLBTE16, match_opcode, 0 }, \
++{"coral.mlbte32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBTE32, MASK_CORAL_MLBTE32, match_opcode, 0 }, \
++{"coral.mlbte64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLBTE64, MASK_CORAL_MLBTE64, match_opcode, 0 }, \
++{"coral.msbte8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBTE8, MASK_CORAL_MSBTE8, match_opcode, 0 }, \
++{"coral.msbte16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBTE16, MASK_CORAL_MSBTE16, match_opcode, 0 }, \
++{"coral.msbte32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBTE32, MASK_CORAL_MSBTE32, match_opcode, 0 }, \
++{"coral.msbte64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSBTE64, MASK_CORAL_MSBTE64, match_opcode, 0 }, \
++{"coral.mlcte8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCTE8, MASK_CORAL_MLCTE8, match_opcode, 0 }, \
++{"coral.mlcte16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCTE16, MASK_CORAL_MLCTE16, match_opcode, 0 }, \
++{"coral.mlcte32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCTE32, MASK_CORAL_MLCTE32, match_opcode, 0 }, \
++{"coral.mlcte64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MLCTE64, MASK_CORAL_MLCTE64, match_opcode, 0 }, \
++{"coral.mscte8", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCTE8, MASK_CORAL_MSCTE8, match_opcode, 0 }, \
++{"coral.mscte16", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCTE16, MASK_CORAL_MSCTE16, match_opcode, 0 }, \
++{"coral.mscte32", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCTE32, MASK_CORAL_MSCTE32, match_opcode, 0 }, \
++{"coral.mscte64", 0, INSN_CLASS_XCORALMATRIX, "XtCMd,t,0(s)", MATCH_CORAL_MSCTE64, MASK_CORAL_MSCTE64, match_opcode, 0 }, \
+ /* Element-wise instructions.  */ \
+ {"th.madd.d.mm",        0, INSN_CLASS_XTHEADMATRIX0P3, "XtMd,XtMt,XtMs",          MATCH_TH_MADD_D_MM,        MASK_TH_MADD_D_MM,        match_opcode, 0 }, \
+ {"th.madd.d.mv.i",      0, INSN_CLASS_XTHEADMATRIX0P3, "XtMd,XtMt,XtMs[Xtu3@7]",   MATCH_TH_MADD_D_MV_I,      MASK_TH_MADD_D_MV_I,      match_opcode, 0 }, \
+@@ -1033,5 +1105,3 @@
+ /* XuanTie(THead), CRC32 extensions.  */ \
+ {"th.crc32c.w", 0, INSN_CLASS_XTHEADCRC, "d,s,t", MATCH_TH_CRC32C_W, MASK_TH_CRC32C_W, match_opcode, 0}, \
+ {"th.crc32c.d", 0, INSN_CLASS_XTHEADCRC, "d,s,t", MATCH_TH_CRC32C_D, MASK_TH_CRC32C_D, match_opcode, 0}, \
+-
+-
+diff --git a/opcodes/riscv-opc.c b/opcodes/riscv-opc.c
+index 4f810eb292b..ef03ee2b1fa 100644
+--- a/opcodes/riscv-opc.c
++++ b/opcodes/riscv-opc.c
+@@ -213,6 +213,14 @@ match_opcode (const struct riscv_opcode *op, insn_t insn, unsigned xlen, int che
+   return ((insn ^ op->match) & op->mask) == 0;
+ }
+ 
++static int
++match_coral_whole (const struct riscv_opcode *op, insn_t insn,
++                   unsigned xlen, int check_constraints, const char **error)
++{
++  return match_opcode (op, insn, xlen, check_constraints, error)
++         && ((insn & MASK_RS2) == 0);
++}
++
+ static int
+ match_rs1_eq_rs2 (const struct riscv_opcode *op, insn_t insn, unsigned xlen, int check_constraints, const char **error)
+ {
+-- 
+2.25.1
+
