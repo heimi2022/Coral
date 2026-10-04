@@ -26,9 +26,9 @@ async def core_mini_axi_matrix_csr(dut):
     rdata = (await core_mini_axi.read(outputs_addr, 34 * 4)).view(np.uint32)
     expected = np.array([
         0x00000002,  # xmisa
-        0x00000020,  # xtlenb
-        0x00000008,  # xtrlenb
-        0x00000040,  # xalenb
+        0x00000800,  # xtlenb
+        0x00000040,  # xtrlenb
+        0x00001000,  # xalenb
         0, 0, 0, 0, 0, 0,  # initial xmxrm/xmsat/xmfflags/xmfrm/xmsaten/xmcsr
         3, 1, 18, 4, 1, 0x00000C97,
         1, 0, 26, 3, 1, 0x00000BD1,

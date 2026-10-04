@@ -48,7 +48,7 @@ COCOTB_TEST_BINARY_TARGETS = glob(["**/*.elf"]) + glob(["**/*.o"]) + [
 verilator_cocotb_model(
     name = "core_mini_axi_model",
     trace = False,
-    cflags = VERILATOR_BUILD_ARGS,
+    cflags = VERILATOR_BUILD_ARGS + ["-Wno-fatal"],
     hdl_toplevel = "CoreMiniAxi",
     verilog_source = "//hdl/chisel/src/coralnpu:CoreMiniAxi.sv",
 )
@@ -259,7 +259,7 @@ cocotb_test_suite(
     simulators = ["verilator"],
     testcases = [
         "pe_ctrl_m64_n3_k64_ideal_c",
-        "pe_ctrl_m64_n3_k64_c_bank_conflicts",
+        "pe_ctrl_m64_n3_k64_c_bank_conflict_free",
         "pe_ctrl_m64_n33_k64_debug",
     ],
     verilator_model = ":pe_ctrl_standalone_model",
@@ -274,10 +274,16 @@ cocotb_test_suite(
 
 cocotb_test_suite(
     name = "matrix_cpu_dma",
-    simulators = ["verilator"],
+    simulators = [
+        "verilator",
+        "vcs",
+    ],
     testcases = [
         "c_load_store", "c_load_store_backpressure",
         "c_mzero_store", "c_mzero_store_backpressure",
+        "c_api_elf_c_load_store",
+        "c_api_elf_matmul",
+        "c_api_elf_gemm",
         "matmul_mx_k32", "matmul_mx_k64", "matmul_mx_accumulate",
         "matmul_mx_m33_c2", "matmul_mx_n33_c3", "matmul_mx_m64_n33_k64",
         "matmul_mx_m64_n33_k32", "matmul_mx_m64_n3_k32", "matmul_mx_m64_n3_k64",
@@ -295,8 +301,72 @@ cocotb_test_suite(
         "seed": "42",
         "test_module": ["matrix_cpu_dma_test.py"],
         "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_dma_program", ":matrix_c_api_matmul_program",
+                 ":matrix_c_api_gemm_program"],
         "size": "large",
     },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_c_api_dma_program",
+        ":matrix_c_api_matmul_program",
+        ":matrix_c_api_gemm_program",
+        ":coverage_exclude.cfg",
+        ":xprop.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = [
+        "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
+    ],
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_external_rv32",
+    simulators = [
+        "verilator",
+        "vcs",
+    ],
+    testcases = [
+        "c_api_external_rv32_elf_matmul",
+        "c_api_external_rv32_elf_rvv_matmul",
+    ],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": True,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "size": "large",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":coverage_exclude.cfg",
+        ":xprop.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = [
+        "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_dma_program",
+    srcs = ["matrix_c_api_dma_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_matmul_program",
+    srcs = ["matrix_c_api_matmul_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_gemm_program",
+    srcs = ["matrix_c_api_gemm_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
 )
 
 RVV_ASSEMBLY_TESTCASES = [

@@ -55,6 +55,7 @@ MATRIX_MMACC_ROB_TESTCASES = [
 # BEGIN_TESTCASES_FOR_matrix_mmacc_arith
 MATRIX_MMACC_ARITH_TESTCASES = [
     "core_mini_axi_matrix_mmacc_arith",
+    "core_mini_axi_matrix_mmacc_arith_backpressure",
 ]
 # END_TESTCASES_FOR_matrix_mmacc_arith
 
@@ -222,7 +223,7 @@ cocotb_test_suite(
     testcases_vname = "MATRIX_MMACC_ARITH_TESTCASES",
     tests_kwargs = {
         "waves": False,
-        "hdl_toplevel": "CoreMiniAxi",
+        "hdl_toplevel": "MatrixCoreMiniAxi",
         "seed": "42",
         "test_module": ["matrix_mmacc_arith.py"],
         "deps": [
@@ -230,7 +231,7 @@ cocotb_test_suite(
             "@rules_python//python/runfiles",
         ],
         "data": [":matrix_mmacc_arith_program"],
-        "size": "small",
+        "size": "large",
     },
     vcs_build_args = VCS_BUILD_ARGS,
     vcs_data = [
@@ -239,8 +240,8 @@ cocotb_test_suite(
     ],
     vcs_defines = VCS_DEFINES,
     vcs_test_args = VCS_TEST_ARGS,
-    vcs_verilog_sources = ["//hdl/chisel/src/coralnpu:core_mini_axi_cc_library_verilog"],
-    verilator_model = "//tests/cocotb:core_mini_axi_model",
+    vcs_verilog_sources = ["//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog"],
+    verilator_model = "//tests/cocotb:matrix_cpu_dma_model",
 )
 
 coralnpu_v2_binary(
@@ -251,21 +252,25 @@ coralnpu_v2_binary(
 coralnpu_v2_binary(
     name = "matrix_cfg_program",
     srcs = ["matrix_cfg_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
 )
 
 coralnpu_v2_binary(
     name = "matrix_csr_program",
     srcs = ["matrix_csr_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
 )
 
 coralnpu_v2_binary(
     name = "matrix_mmacc_rob_program",
     srcs = ["matrix_mmacc_rob_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
 )
 
 coralnpu_v2_binary(
     name = "matrix_mmacc_arith_program",
     srcs = ["matrix_mmacc_arith_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
 )
 
 coralnpu_v2_binary(

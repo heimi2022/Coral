@@ -23,6 +23,10 @@ __pycache__/
 # External reference repository; keep it local and do not add it to this repo.
 /riscv-attached-matrix-extension/
 
+# Locally configured GCC/Binutils build and install trees.
+/xuantie-*-build/
+/xuantie-*-install/
+
 .codex
 
 /coralnpu/hdl/verilog/SIM/*

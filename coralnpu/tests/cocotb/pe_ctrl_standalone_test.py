@@ -33,7 +33,7 @@ def custom_c_bits(value):
     return (exponent << 24) | (sign << 23) | fraction
 
 
-async def run_m64_n3_k64(dut, reject_c_bank_conflicts, n_override=None, debug=False):
+async def run_m64_n3_k64(dut, check_c_bank_conflicts, n_override=None, debug=False):
     """Isolate K/N block accumulation using the system regression data."""
     m, n, k = 64, n_override or 3, 64
     a = [[0] * k for _ in range(m)]
@@ -165,7 +165,7 @@ async def run_m64_n3_k64(dut, reject_c_bank_conflicts, n_override=None, debug=Fa
             wr_addr = value(dut.rd_write_addr_o)
             wr_nblock = value(dut.rd_write_nblock_o)
             conflict = (
-                reject_c_bank_conflicts
+                check_c_bank_conflicts
                 and rd_req
                 and wr_req
                 and rd_reg == wr_reg
@@ -254,7 +254,7 @@ async def run_m64_n3_k64(dut, reject_c_bank_conflicts, n_override=None, debug=Fa
 
     dut._log.info(
         "pe_ctrl boundary summary: conflict_model=%s C reads=%d writes=%d denied=%d examples=%s scale=%s",
-        reject_c_bank_conflicts, len(c_read_events), len(c_write_events), len(denied_reads),
+        check_c_bank_conflicts, len(c_read_events), len(c_write_events), len(denied_reads),
         denied_reads[:8], sorted(set(scale_events)),
     )
     expected_blocks = 2 if n <= 32 else 4
@@ -265,36 +265,23 @@ async def run_m64_n3_k64(dut, reject_c_bank_conflicts, n_override=None, debug=Fa
         f"Expected {(1 if n <= 32 else 2) * m} K1 C reads, got {len(c_read_events)}"
     )
 
-    if reject_c_bank_conflicts:
-        assert len(denied_reads) == m, f"Expected {m} same-bank conflicts, got {len(denied_reads)}"
-        # With every K1 C read rejected, the final values contain only K1's contribution.
-        k1_mismatches = []
-        for row in range(m):
-            for col in range(n):
-                dot = sum(a[row][idx] * b[col][idx] for idx in range(32, 64))
-                only_k1 = math.ldexp(dot, a_scale[1][row] + b_scale[1][col] - 254 - 12)
-                want_bits = custom_c_bits(only_k1)
-                nblock = col // 32
-                lane = col % 32
-                if c_mem[3][nblock][row][lane] != want_bits:
-                    k1_mismatches.append(f"C[{row},{col}] did not match isolated K1 result")
-        assert not k1_mismatches, "Conflict model did not reproduce K1-only accumulation"
-        assert mismatches, "Expected rejected C reads to lose the K0 contribution"
-    else:
+    if check_c_bank_conflicts:
+        # This schedule must avoid same-register, same-parity C read/write
+        # overlap. The model observes conflicts; it does not create them.
         assert not denied_reads, f"Unexpected C read/write conflicts: {denied_reads[:8]}"
-        assert not mismatches, "Standalone pe_ctrl result mismatch:\n" + "\n".join(mismatches[:20])
+    assert not mismatches, "Standalone pe_ctrl result mismatch:\n" + "\n".join(mismatches[:20])
 
 
 @cocotb.test()
 async def pe_ctrl_m64_n3_k64_ideal_c(dut):
-    await run_m64_n3_k64(dut, reject_c_bank_conflicts=False)
+    await run_m64_n3_k64(dut, check_c_bank_conflicts=False)
 
 
 @cocotb.test()
-async def pe_ctrl_m64_n3_k64_c_bank_conflicts(dut):
-    await run_m64_n3_k64(dut, reject_c_bank_conflicts=True)
+async def pe_ctrl_m64_n3_k64_c_bank_conflict_free(dut):
+    await run_m64_n3_k64(dut, check_c_bank_conflicts=True)
 
 
 @cocotb.test()
 async def pe_ctrl_m64_n33_k64_debug(dut):
-    await run_m64_n3_k64(dut, reject_c_bank_conflicts=False, n_override=33, debug=True)
+    await run_m64_n3_k64(dut, check_c_bank_conflicts=False, n_override=33, debug=True)

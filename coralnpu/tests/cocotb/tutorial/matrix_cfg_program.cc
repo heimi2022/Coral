@@ -1,48 +1,10 @@
+#include "include/coral_matrix.h"
 #include <stdint.h>
 
 volatile uint32_t output_buffer[21] __attribute__((section(".data")));
 
 static inline void gap(void) {
     asm volatile("nop; nop; nop" ::: "memory");
-}
-
-static inline void msettilemi_4(void) {
-    asm volatile(".word 0x2002002b" ::: "memory");
-}
-
-static inline void msettileki_8(void) {
-    asm volatile(".word 0x1004002b" ::: "memory");
-}
-
-static inline void msettileni_16(void) {
-    asm volatile(".word 0x3008002b" ::: "memory");
-}
-
-static inline void msettilem_reg(uint32_t value) {
-    asm volatile(
-        "mv a0, %0\n\t"
-        ".word 0x2205002b"
-        :
-        : "r"(value)
-        : "a0", "memory");
-}
-
-static inline void msettilek_reg(uint32_t value) {
-    asm volatile(
-        "mv a0, %0\n\t"
-        ".word 0x1205002b"
-        :
-        : "r"(value)
-        : "a0", "memory");
-}
-
-static inline void msettilen_reg(uint32_t value) {
-    asm volatile(
-        "mv a0, %0\n\t"
-        ".word 0x3205002b"
-        :
-        : "r"(value)
-        : "a0", "memory");
 }
 
 static inline uint32_t read_xtilem(void) {
@@ -73,27 +35,27 @@ int main(int argc, char **argv) {
     gap();
     snapshot(output_buffer, 0);
 
-    msettilemi_4();
+    coral_msettilemi(4);
     gap();
     snapshot(output_buffer, 3);
 
-    msettilem_reg(7);
+    coral_msettilem(7);
     gap();
     snapshot(output_buffer, 6);
 
-    msettileki_8();
+    coral_msettileki(8);
     gap();
     snapshot(output_buffer, 9);
 
-    msettilek_reg(9);
+    coral_msettilek(9);
     gap();
     snapshot(output_buffer, 12);
 
-    msettileni_16();
+    coral_msettileni(16);
     gap();
     snapshot(output_buffer, 15);
 
-    msettilen_reg(11);
+    coral_msettilen(11);
     gap();
     snapshot(output_buffer, 18);
 

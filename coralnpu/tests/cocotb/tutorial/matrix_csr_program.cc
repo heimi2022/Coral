@@ -1,3 +1,4 @@
+#include "include/coral_matrix.h"
 #include <stdint.h>
 
 volatile uint32_t output_buffer[34] __attribute__((section(".data")));
@@ -14,45 +15,6 @@ volatile uint32_t output_buffer[34] __attribute__((section(".data")));
 
 static inline void gap(void) {
   asm volatile("nop; nop; nop" ::: "memory");
-}
-
-static inline void msettilemi_4(void) {
-  asm volatile(".word 0x2002002b" ::: "memory");
-}
-
-static inline void msettileki_8(void) {
-  asm volatile(".word 0x1004002b" ::: "memory");
-}
-
-static inline void msettileni_16(void) {
-  asm volatile(".word 0x3008002b" ::: "memory");
-}
-
-static inline void msettilem_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x2205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
-}
-
-static inline void msettilek_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x1205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
-}
-
-static inline void msettilen_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x3205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
 }
 
 static inline void snapshot_matrix_ctrl(volatile uint32_t *out, int base) {
@@ -94,9 +56,9 @@ int main(int argc, char **argv) {
 
   snapshot_tile_shape(output_buffer, 22);
 
-  msettilemi_4();
-  msettileki_8();
-  msettileni_16();
+  coral_msettilemi(4);
+  coral_msettileki(8);
+  coral_msettileni(16);
   gap();
   snapshot_tile_shape(output_buffer, 25);
 
@@ -106,9 +68,9 @@ int main(int argc, char **argv) {
   gap();
   snapshot_tile_shape(output_buffer, 28);
 
-  msettilem_reg(7U);
-  msettilek_reg(9U);
-  msettilen_reg(11U);
+  coral_msettilem(7U);
+  coral_msettilek(9U);
+  coral_msettilen(11U);
   gap();
   snapshot_tile_shape(output_buffer, 31);
 

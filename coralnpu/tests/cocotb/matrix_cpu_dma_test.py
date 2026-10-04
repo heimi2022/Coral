@@ -6,11 +6,13 @@ to IEEE FP32. Expected results are constructed independently as Python floats.
 
 from collections import deque
 import math
+import os
 import struct
 
 import cocotb
 import numpy as np
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge, with_timeout
+from bazel_tools.tools.python.runfiles import runfiles
 from coralnpu_test_utils.core_mini_axi_interface import CoreMiniAxiInterface
 
 
@@ -164,7 +166,14 @@ class MatrixMemory:
             ("write_addr", ("addr", "len", "size", "burst", "id", "prot", "lock", "cache", "qos", "region")),
             ("write_data", ("data", "strb", "last")),
         ):
-            valid = self.get(channel, "valid")
+            valid_value = self.sig(channel, "valid").value
+            if not valid_value.is_resolvable:
+                self.held.pop(channel, None)
+                continue
+            valid = int(valid_value)
+            if not valid:
+                self.held.pop(channel, None)
+                continue
             bits = tuple(self.get(channel, "bits_" + field) for field in fields)
             if channel in self.held:
                 assert valid and bits == self.held[channel], f"{channel} changed under backpressure"
@@ -366,6 +375,478 @@ async def c_mzero_store_backpressure(dut):
     await exercise(dut, True, zero=True)
 
 
+@cocotb.test()
+async def c_api_elf_c_load_store(dut):
+    """Execute C API-generated matrix instructions from a linked ELF."""
+    core = CoreMiniAxiInterface(dut)
+    ram = MatrixMemory(dut, stalled=True)
+    rows, cols, stride = 3, 5, 64
+    src, dst = BASE, BASE + 0x1000
+
+    expected_ar = segments(src, rows, cols, stride)
+    expected_aw = segments(dst, rows, cols, stride)
+    expected_written = set()
+    expected_memory = bytearray(ram.data)
+    for row in range(rows):
+        for col in range(cols):
+            raw, value = sample(row * cols + col)
+            offset = src - BASE + row * stride + col * 4
+            ram.data[offset:offset + 4] = struct.pack("<I", raw)
+            expected_memory[offset:offset + 4] = struct.pack("<I", raw)
+            out_addr = dst + row * stride + col * 4
+            expected_memory[out_addr - BASE:out_addr - BASE + 4] = struct.pack("<f", value)
+            expected_written.update(range(out_addr, out_addr + 4))
+
+    r = runfiles.Create()
+    elf_path = r.Rlocation("coralnpu_hw/tests/cocotb/matrix_c_api_dma_program.elf")
+    await core.init()
+    await core.reset()
+    cocotb.start_soon(core.clock.start())
+    cocotb.start_soon(ram.run())
+    with open(elf_path, "rb") as elf:
+        entry = await core.load_elf(elf)
+
+    matrix_retirements = []
+
+    async def monitor_matrix_retirement():
+        while not int(dut.io_halted.value):
+            await RisingEdge(dut.io_aclk)
+            assert not int(dut.io_fault.value), "CPU fault while executing C API ELF"
+            for lane in range(8):
+                prefix = f"io_debug_rb_inst_{lane}"
+                if not int(getattr(dut, prefix + "_valid").value):
+                    continue
+                pc = int(getattr(dut, prefix + "_bits_pc").value)
+                inst = int(getattr(dut, prefix + "_bits_inst").value)
+                if (inst & 0x7F) == 0x2B and ((inst >> 26) & 0x3) == 1:
+                    assert not int(getattr(dut, prefix + "_bits_trap").value), (
+                        f"Matrix memory instruction trapped at {pc:#x}: {inst:#010x}"
+                    )
+                    matrix_retirements.append((pc, inst))
+                    if (inst >> 25) & 1:
+                        assert ram.b_finished == expected_aw, (
+                            f"C STORE retired before AXI B completions: {ram.b_finished}"
+                        )
+                    else:
+                        assert ram.r_finished == expected_ar, (
+                            f"C LOAD retired before AXI R completions: {ram.r_finished}"
+                        )
+
+    retirement_task = cocotb.start_soon(monitor_matrix_retirement())
+    await core.execute_from(entry)
+    await core.wait_for_halted(timeout_cycles=100_000)
+    await retirement_task
+    await ClockCycles(dut.io_aclk, 10)
+
+    assert len(matrix_retirements) == 2, matrix_retirements
+    assert [((inst >> 25) & 1) for _, inst in matrix_retirements] == [0, 1]
+    for _, inst in matrix_retirements:
+        assert ((inst >> 28) & 0xF) == 2, f"Unexpected matrix family: {inst:#010x}"
+        assert ((inst >> 10) & 0x3) == 2, f"Unexpected matrix width: {inst:#010x}"
+        assert (inst & 0x380) == (4 << 7), f"Expected C0 field: {inst:#010x}"
+    assert ram.ar == expected_ar, f"Unexpected ELF C-load AXI bursts: {ram.ar}"
+    assert ram.aw == expected_aw, f"Unexpected ELF C-store AXI bursts: {ram.aw}"
+    assert ram.r_finished == expected_ar and ram.b_finished == expected_aw
+    assert ram.written == expected_written
+    assert ram.data == expected_memory
+    assert not int(dut.io_fault.value)
+
+
+@cocotb.test()
+async def c_api_elf_matmul(dut):
+    """Execute the repository-built C API ELF through matrix DMA and MMACC."""
+    r = runfiles.Create()
+    elf_path = r.Rlocation("coralnpu_hw/tests/cocotb/matrix_c_api_matmul_program.elf")
+    await _run_c_api_matmul_elf(dut, elf_path)
+
+
+async def _run_c_api_matmul_elf(dut, elf_path):
+    """Run one linked C API MatMul ELF and check execution and AXI effects."""
+    core = CoreMiniAxiInterface(dut)
+    ram = MatrixMemory(dut, stalled=True)
+    a_addr = BASE
+    b_addr = BASE + 0x1000
+    a_scale_addr = BASE + 0x2000
+    b_scale_addr = BASE + 0x3000
+    c_addr = BASE + 0x4000
+    dst_addr = BASE + 0x5000
+
+    a_values = [1, 2, 3, 4] + [0] * 28
+    b_values = [5, 6, 7, 8] + [0] * 28
+    dot = sum(a * b for a, b in zip(a_values, b_values))
+    expected_value = math.ldexp(dot, 127 + 127 - 254 - 12)
+    expected_ar = [(a_addr, 1), (b_addr, 1), (a_scale_addr, 1),
+                   (b_scale_addr, 1), (c_addr, 1)]
+    expected_aw = [(dst_addr, 1)]
+
+    ram.data[a_addr - BASE:a_addr - BASE + len(a_values)] = bytes(a_values)
+    ram.data[b_addr - BASE:b_addr - BASE + len(b_values)] = bytes(b_values)
+    ram.data[a_scale_addr - BASE] = 127
+    ram.data[b_scale_addr - BASE] = 127
+    ram.data[c_addr - BASE:c_addr - BASE + 4] = b"\x00\x00\x00\x00"
+    expected_memory = bytearray(ram.data)
+    expected_bytes = struct.pack("<f", expected_value)
+    expected_memory[dst_addr - BASE:dst_addr - BASE + 4] = expected_bytes
+    expected_written = set(range(dst_addr, dst_addr + 4))
+
+    await core.init()
+    await core.reset()
+    cocotb.start_soon(core.clock.start())
+    cocotb.start_soon(ram.run())
+    with open(elf_path, "rb") as elf:
+        entry = await core.load_elf(elf)
+
+    matrix_retirements = []
+    dispatched = []
+    retired = []
+    diagnostic = {
+        "cycles": 0,
+        "fault_cycle": None,
+        "mpause_dispatch": None,
+        "mpause_retire": None,
+    }
+    expected_kinds = ["LOAD A", "LOAD B", "LOAD A SCALE", "LOAD B SCALE",
+                      "LOAD C", "MATMUL", "STORE C"]
+
+    async def monitor_matrix_retirement():
+        while not int(dut.io_halted.value):
+            await RisingEdge(dut.io_aclk)
+            diagnostic["cycles"] += 1
+            if int(dut.io_fault.value):
+                diagnostic["fault_cycle"] = diagnostic["cycles"]
+                return
+            for lane in range(4):
+                prefix = f"io_debug_dispatch_{lane}"
+                if not int(getattr(dut, prefix + "_instFire").value):
+                    continue
+                pc = int(getattr(dut, prefix + "_instAddr").value)
+                inst = int(getattr(dut, prefix + "_instInst").value)
+                dispatched.append((pc, inst))
+                if inst == 0x08000073 and diagnostic["mpause_dispatch"] is None:
+                    diagnostic["mpause_dispatch"] = (diagnostic["cycles"], pc)
+            for lane in range(8):
+                prefix = f"io_debug_rb_inst_{lane}"
+                if not int(getattr(dut, prefix + "_valid").value):
+                    continue
+                pc = int(getattr(dut, prefix + "_bits_pc").value)
+                inst = int(getattr(dut, prefix + "_bits_inst").value)
+                retired.append((pc, inst))
+                if inst == 0x08000073 and diagnostic["mpause_retire"] is None:
+                    diagnostic["mpause_retire"] = (diagnostic["cycles"], pc)
+                if (inst & 0x7F) != 0x2B:
+                    continue
+
+                uop = (inst >> 26) & 0x3
+                func = (inst >> 28) & 0xF
+                if uop == 1:
+                    store = (inst >> 25) & 1
+                    if store:
+                        kind = "STORE C"
+                        assert ram.b_finished == expected_aw, (
+                            f"C STORE retired before AXI B completion at {pc:#x}"
+                        )
+                    else:
+                        load_kinds = {0: "LOAD A", 1: "LOAD B", 2: "LOAD C",
+                                      4: "LOAD A SCALE", 5: "LOAD B SCALE"}
+                        kind = load_kinds.get(func, f"LOAD func={func}")
+                        assert ram.r_finished == expected_ar[:len(ram.r_finished)]
+                        assert len(ram.r_finished) >= len(matrix_retirements) + 1, (
+                            f"{kind} retired before AXI R completion at {pc:#x}"
+                        )
+                    matrix_retirements.append((kind, pc, inst))
+                elif uop == 2 and func == 1:
+                    matrix_retirements.append(("MATMUL", pc, inst))
+
+    retirement_task = cocotb.start_soon(monitor_matrix_retirement())
+    await core.execute_from(entry)
+    halted = False
+    for _ in range(100_000):
+        if int(dut.io_halted.value):
+            halted = True
+            break
+        await ClockCycles(dut.io_aclk, 1)
+    if not halted:
+        dut._log.error(
+            "External ELF timeout: cycles=%d halted=%s wfi=%s fault=%s fault_cycle=%s",
+            diagnostic["cycles"], dut.io_halted.value, dut.io_wfi.value,
+            dut.io_fault.value, diagnostic["fault_cycle"],
+        )
+        dut._log.error(
+            "External ELF dispatch count=%d tail=%s",
+            len(dispatched), [(hex(pc), f"{inst:#010x}") for pc, inst in dispatched[-16:]],
+        )
+        dut._log.error(
+            "External ELF retirement count=%d tail=%s",
+            len(retired), [(hex(pc), f"{inst:#010x}") for pc, inst in retired[-16:]],
+        )
+        dut._log.error(
+            "External ELF mpause dispatch=%s retire=%s matrix_retirements=%s",
+            diagnostic["mpause_dispatch"], diagnostic["mpause_retire"],
+            [(hex(pc), f"{inst:#010x}") for pc, inst in matrix_retirements],
+        )
+        dut._log.error(
+            "External ELF AXI ar=%s aw=%s r_finished=%s b_finished=%s",
+            ram.ar, ram.aw, ram.r_finished, ram.b_finished,
+        )
+        dut._log.error(
+            "External ELF AXI current ar=%s/%s aw=%s/%s r=%s/%s b=%s/%s",
+            ram.get("read_addr", "valid"), ram.get("read_addr", "ready"),
+            ram.get("write_addr", "valid"), ram.get("write_addr", "ready"),
+            ram.get("read_data", "valid"), ram.get("read_data", "ready"),
+            ram.get("write_resp", "valid"), ram.get("write_resp", "ready"),
+        )
+        retirement_task.kill()
+        raise AssertionError("External RV32 ELF did not reach mpause within 100000 cycles")
+    await retirement_task
+    await ClockCycles(dut.io_aclk, 10)
+
+    assert [kind for kind, _, _ in matrix_retirements] == expected_kinds, matrix_retirements
+    for kind, _, inst in matrix_retirements:
+        if kind.startswith("LOAD") or kind == "STORE C":
+            expected_width = 2 if kind.endswith("C") else 0
+            expected_reg = {
+                "LOAD A": 0,
+                "LOAD B": 1,
+                "LOAD A SCALE": 0,
+                "LOAD B SCALE": 1,
+                "LOAD C": 4,
+                "STORE C": 4,
+            }[kind]
+            assert ((inst >> 10) & 0x3) == expected_width, (
+                f"Unexpected element width for {kind}: {inst:#010x}"
+            )
+            assert ((inst >> 7) & 0x7) == expected_reg, (
+                f"Unexpected matrix register for {kind}: {inst:#010x}"
+            )
+        if kind == "MATMUL":
+            assert ((inst >> 26) & 0x3) == 2, f"MMACC is not uop=10: {inst:#010x}"
+            assert ((inst >> 23) & 0x7) == 3, f"Unexpected MMACC size: {inst:#010x}"
+            assert ((inst >> 20) & 0x7) == 1, f"Unexpected ms2: {inst:#010x}"
+            assert ((inst >> 15) & 0x7) == 0, f"Unexpected ms1: {inst:#010x}"
+            assert ((inst >> 7) & 0x7) == 4, f"Unexpected md: {inst:#010x}"
+    assert ram.ar == expected_ar, f"Unexpected C API MMACC reads: {ram.ar}"
+    assert ram.aw == expected_aw, f"Unexpected C API MMACC writes: {ram.aw}"
+    assert ram.r_finished == expected_ar and ram.b_finished == expected_aw
+    assert ram.written == expected_written
+    assert ram.data == expected_memory
+    got = bytes(ram.data[dst_addr - BASE:dst_addr - BASE + 4])
+    assert got == expected_bytes, (
+        f"C[0,0] got={struct.unpack('<f', got)[0]} expected={expected_value} "
+        f"bits={int.from_bytes(got, 'little'):08x}/{int.from_bytes(expected_bytes, 'little'):08x}"
+    )
+
+
+@cocotb.test()
+async def c_api_external_rv32_elf_matmul(dut):
+    """Run the externally-built RV32 Coral ELF through MatrixCoreMiniAxi."""
+    elf_path = os.environ.get("CORAL_RV32_ELF")
+    assert elf_path, (
+        "CORAL_RV32_ELF must point to the externally-built RV32 ELF; "
+        "build it with tests/toolchain/build_coral_matrix_rv32_elf.py"
+    )
+    assert os.path.isfile(elf_path), f"CORAL_RV32_ELF does not exist: {elf_path}"
+    await _run_c_api_matmul_elf(dut, elf_path)
+
+
+@cocotb.test()
+async def c_api_external_rv32_elf_rvv_matmul(dut):
+    """Run an externally-built ELF containing RVV and Matrix instructions."""
+    elf_path = os.environ.get("CORAL_RV32_RVV_ELF")
+    assert elf_path, (
+        "CORAL_RV32_RVV_ELF must point to the externally-built RV32 RVV + "
+        "Matrix ELF"
+    )
+    assert os.path.isfile(elf_path), (
+        f"CORAL_RV32_RVV_ELF does not exist: {elf_path}"
+    )
+    await _run_c_api_matmul_elf(dut, elf_path)
+
+
+@cocotb.test()
+async def c_api_elf_gemm(dut):
+    """Run two public C API MMACC commands for one K-split GEMM."""
+    core = CoreMiniAxiInterface(dut)
+    ram = MatrixMemory(dut, stalled=True)
+    m, n, k = 2, 33, 64
+    block_k = 32
+    row_stride = 64
+    dst_stride = 192
+    a_addr = BASE
+    b_addr = BASE + 0x2000
+    a_scale_addr = BASE + 0x4000
+    b_scale_addr = BASE + 0x5000
+    dst_addr = BASE + 0x6000
+
+    # Keep the nonzero products small and sparse so every expected result is
+    # exactly representable after the two power-of-two scale factors.
+    a = [[0] * k for _ in range(m)]
+    b = [[0] * k for _ in range(n)]
+    for row in range(m):
+        for group in range(2):
+            for lane in range(4):
+                a[row][group * block_k + lane] = (
+                    -1 if (row + group + lane) & 1 else 1
+                ) * (3 + row + group + lane)
+    for col in range(n):
+        for group in range(2):
+            for lane in range(4):
+                b[col][group * block_k + lane] = (
+                    -1 if (col + group) & 1 else 1
+                ) * (2 + (col % 5) + group + lane)
+
+    for row in range(m):
+        for index, value in enumerate(a[row]):
+            ram.data[a_addr - BASE + row * row_stride + index] = value & 0xFF
+    for col in range(n):
+        for index, value in enumerate(b[col]):
+            ram.data[b_addr - BASE + col * row_stride + index] = value & 0xFF
+    for group in range(2):
+        for row in range(m):
+            ram.data[a_scale_addr - BASE + group * BEAT + row] = 127
+        for col in range(n):
+            ram.data[b_scale_addr - BASE + group * BEAT + col] = 127
+
+    def row_bursts(base, rows, row_bytes, stride):
+        bursts = []
+        for row in range(rows):
+            address = base + row * stride
+            first_beat = address & ~(BEAT - 1)
+            beats = (address % BEAT + row_bytes + BEAT - 1) // BEAT
+            bursts.append((first_beat, beats))
+        return bursts
+
+    expected_ar = []
+    for base, rows, row_bytes in (
+        (a_addr, m, block_k),
+        (b_addr, n, block_k),
+        (a_scale_addr, 1, m),
+        (b_scale_addr, 1, n),
+        (a_addr + block_k, m, block_k),
+        (b_addr + block_k, n, block_k),
+        (a_scale_addr + BEAT, 1, m),
+        (b_scale_addr + BEAT, 1, n),
+    ):
+        expected_ar.extend(row_bursts(base, rows, row_bytes, row_stride))
+    expected_aw = segments(dst_addr, m, n, dst_stride)
+
+    expected_memory = bytearray(ram.data)
+    expected_writes = set()
+    for row in range(m):
+        for col in range(n):
+            value = 0.0
+            for group in range(2):
+                start = group * block_k
+                dot = sum(a[row][idx] * b[col][idx]
+                          for idx in range(start, start + block_k))
+                value += math.ldexp(dot, -12)
+            address = dst_addr + row * dst_stride + col * 4
+            expected_memory[address - BASE:address - BASE + 4] = struct.pack(
+                "<f", value
+            )
+            expected_writes.update(range(address, address + 4))
+
+    r = runfiles.Create()
+    elf_path = r.Rlocation("coralnpu_hw/tests/cocotb/matrix_c_api_gemm_program.elf")
+    await core.init()
+    await core.reset()
+    cocotb.start_soon(core.clock.start())
+    cocotb.start_soon(ram.run())
+    with open(elf_path, "rb") as elf:
+        entry = await core.load_elf(elf)
+
+    expected_kinds = [
+        "CONFIG M", "CONFIG N", "CONFIG K", "MZERO",
+        "LOAD A", "LOAD B", "LOAD A SCALE", "LOAD B SCALE", "MATMUL",
+        "LOAD A", "LOAD B", "LOAD A SCALE", "LOAD B SCALE", "MATMUL",
+        "STORE C",
+    ]
+    expected_config_funcs = [2, 3, 1]
+    load_read_counts = {
+        "LOAD A": m,
+        "LOAD B": n,
+        "LOAD A SCALE": 1,
+        "LOAD B SCALE": 1,
+    }
+    load_funcs = {"LOAD A": 0, "LOAD B": 1,
+                  "LOAD A SCALE": 4, "LOAD B SCALE": 5}
+    load_regs = {"LOAD A": 0, "LOAD B": 1,
+                 "LOAD A SCALE": 0, "LOAD B SCALE": 1}
+    matrix_retirements = []
+    read_cursor = 0
+
+    async def monitor_matrix_retirement():
+        nonlocal read_cursor
+        while not int(dut.io_halted.value):
+            await RisingEdge(dut.io_aclk)
+            assert not int(dut.io_fault.value), "CPU fault while executing C API GEMM ELF"
+            for lane in range(8):
+                prefix = f"io_debug_rb_inst_{lane}"
+                if not int(getattr(dut, prefix + "_valid").value):
+                    continue
+                pc = int(getattr(dut, prefix + "_bits_pc").value)
+                inst = int(getattr(dut, prefix + "_bits_inst").value)
+                if (inst & 0x7F) != 0x2B:
+                    continue
+                assert not int(getattr(dut, prefix + "_bits_trap").value), (
+                    f"Matrix instruction trapped at {pc:#x}: {inst:#010x}"
+                )
+
+                uop = (inst >> 26) & 0x3
+                func = (inst >> 28) & 0xF
+                if uop == 0 and func in (1, 2, 3):
+                    kind = {1: "CONFIG K", 2: "CONFIG M", 3: "CONFIG N"}[func]
+                    assert ((inst >> 15) & 0x3FF) in (2, 32, 33), (
+                        f"Unexpected config immediate: {inst:#010x}"
+                    )
+                elif uop == 3:
+                    kind = "MZERO"
+                elif uop == 1:
+                    store = (inst >> 25) & 1
+                    kind = "STORE C" if store else {
+                        0: "LOAD A", 1: "LOAD B", 4: "LOAD A SCALE",
+                        5: "LOAD B SCALE",
+                    }.get(func, f"LOAD func={func}")
+                    if kind == "STORE C":
+                        assert ((inst >> 10) & 0x3) == 2
+                        assert ((inst >> 7) & 0x7) == 4
+                        assert ram.b_finished == expected_aw, (
+                            f"C STORE retired before AXI B completion at {pc:#x}"
+                        )
+                    else:
+                        assert func == load_funcs[kind]
+                        assert ((inst >> 10) & 0x3) == 0
+                        assert ((inst >> 7) & 0x7) == load_regs[kind]
+                        read_cursor += load_read_counts[kind]
+                        assert ram.r_finished == expected_ar[:read_cursor], (
+                            f"{kind} retired with unexpected AXI reads at {pc:#x}: "
+                            f"{ram.r_finished}"
+                        )
+                elif uop == 2 and func == 1:
+                    kind = "MATMUL"
+                    assert ((inst >> 23) & 0x7) == 3
+                    assert ((inst >> 20) & 0x7) == 1
+                    assert ((inst >> 15) & 0x7) == 0
+                    assert ((inst >> 7) & 0x7) == 4
+                else:
+                    continue
+                matrix_retirements.append(kind)
+
+    retirement_task = cocotb.start_soon(monitor_matrix_retirement())
+    await core.execute_from(entry)
+    await core.wait_for_halted(timeout_cycles=100_000)
+    await retirement_task
+    await ClockCycles(dut.io_aclk, 10)
+
+    assert matrix_retirements == expected_kinds, matrix_retirements
+    assert ram.ar == expected_ar, f"Unexpected C API GEMM reads: {ram.ar}"
+    assert ram.aw == expected_aw, f"Unexpected C API GEMM writes: {ram.aw}"
+    assert ram.r_finished == expected_ar and ram.b_finished == expected_aw
+    assert ram.written == expected_writes
+    assert ram.data == expected_memory
+    assert not ram.reads and not ram.writes and not ram.responses
+    assert not int(dut.io_fault.value)
+
+
 async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=4,
                           scalar_burst=0, rvv_burst=0):
     """MXINT8: S1.6 elements, one biased power-of-two scale per 32 K elements."""
@@ -530,12 +1011,14 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
     assert not int(dut.io_fault.value)
     assert matrix_dispatch_cycle is not None, "MATMUL was not dispatched"
     assert matrix_retire_cycle is not None, "MATMUL did not retire"
-    assert scalar_dispatched_before_matrix_retire, (
-        "No scalar instruction dispatched before MATMUL retirement"
-    )
-    assert rvv_dispatched_before_matrix_retire, (
-        "No RVV instruction dispatched before MATMUL retirement"
-    )
+    if scalar_burst:
+        assert scalar_dispatched_before_matrix_retire, (
+            "No scalar instruction dispatched before MATMUL retirement"
+        )
+    if rvv_burst:
+        assert rvv_dispatched_before_matrix_retire, (
+            "No RVV instruction dispatched before MATMUL retirement"
+        )
     expected_aw = segments(dst, m, n, stride)
     assert ram.ar == expected_ar, f"Unexpected LOAD addresses/lengths: {ram.ar}"
     assert ram.aw == expected_aw, f"Unexpected STORE addresses/lengths: {ram.aw}"

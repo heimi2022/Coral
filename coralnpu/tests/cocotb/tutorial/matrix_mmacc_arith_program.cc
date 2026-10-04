@@ -1,80 +1,24 @@
+#include "include/coral_matrix.h"
 #include <stdint.h>
 
-volatile uint32_t output_buffer[4] __attribute__((section(".data")));
-volatile uint32_t start_flag __attribute__((section(".data")));
+int main(void) {
+  const uintptr_t a = 0x80000000U;
+  const uintptr_t b = 0x80001000U;
+  const uintptr_t a_scale = 0x80002000U;
+  const uintptr_t b_scale = 0x80003000U;
+  const uintptr_t c = 0x80004000U;
+  const uintptr_t dst = 0x80005000U;
 
-static inline void gap(void) {
-  asm volatile("nop; nop; nop" ::: "memory");
-}
+  coral_msettilemi(1);
+  coral_msettileki(32);
+  coral_msettileni(1);
 
-static inline void msettilem_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x2205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
-}
-
-static inline void msettilek_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x1205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
-}
-
-static inline void msettilen_reg(uint32_t value) {
-  asm volatile(
-      "mv a0, %0\n\t"
-      ".word 0x3205002b"
-      :
-      : "r"(value)
-      : "a0", "memory");
-}
-
-static inline void mmacc_w_b_tr0_tr1_acc0(void) {
-  asm volatile(".word 0x19900a2b" ::: "memory");
-}
-
-static inline uint32_t read_xtilem(void) {
-  uint32_t out;
-  asm volatile("csrr %0, 0x803" : "=r"(out));
-  return out;
-}
-
-static inline uint32_t read_xtilek(void) {
-  uint32_t out;
-  asm volatile("csrr %0, 0x805" : "=r"(out));
-  return out;
-}
-
-static inline uint32_t read_xtilen(void) {
-  uint32_t out;
-  asm volatile("csrr %0, 0x804" : "=r"(out));
-  return out;
-}
-
-int main(int argc, char **argv) {
-  start_flag = 0;
-
-  msettilem_reg(2U);
-  msettilek_reg(4U);
-  msettilen_reg(3U);
-  gap();
-
-  output_buffer[0] = read_xtilem();
-  output_buffer[1] = read_xtilek();
-  output_buffer[2] = read_xtilen();
-
-  while (start_flag == 0U) {
-    asm volatile("nop" ::: "memory");
-  }
-
-  mmacc_w_b_tr0_tr1_acc0();
-  gap();
-
-  output_buffer[3] = 0xACCE5501U;
+  coral_mlae8(CORAL_A0, (const void *)a, 64);
+  coral_mlbe8(CORAL_B1, (const void *)b, 64);
+  coral_mlate8(CORAL_A0, (const void *)a_scale, 64);
+  coral_mlbte8(CORAL_B1, (const void *)b_scale, 64);
+  coral_mlce32(CORAL_C0, (const void *)c, 64);
+  coral_mmacc_w_b(CORAL_C0, CORAL_B1, CORAL_A0);
+  coral_msce32(CORAL_C0, (void *)dst, 64);
   return 0;
 }

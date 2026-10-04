@@ -15,7 +15,7 @@ PE 控制模块
     为避免冲突，在 tile 边界插入一个 bubble，暂停新的 rs1 读取，但不影响前一个 tile 已经进入阵列的数据。
     wjj 2026-09 decode 时,为带宽受限,bubble带来的延迟会完全被 weight block 的装载时间覆盖,因此不影响吞吐。
                 prefill 时, m 一般很大 , bubble 对吞吐影响也可以忽略。
-
+7. 在6的基础上，C reg 从数据读出到数据写回 一定要为 奇数个 周期， 否则这套方案会有问题
 默认假设：
 1. rs2_data_i 每拍提供一行权重，直接送到 pe_array 的 `weight_tile`。
 2. rs1_data_i 每拍提供一拍激活向量，直接送到 pe_array 的 `act_top`。
