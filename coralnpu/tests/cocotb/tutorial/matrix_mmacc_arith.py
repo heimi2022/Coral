@@ -5,7 +5,9 @@ from collections import deque
 import cocotb
 from bazel_tools.tools.python.runfiles import runfiles
 from cocotb.triggers import ClockCycles, FallingEdge, RisingEdge
-from coralnpu_test_utils.core_mini_axi_interface import CoreMiniAxiInterface
+from coralnpu_test_utils.core_mini_axi_interface import (
+    CoreMiniAxiInterface, retirement_lane_indices,
+)
 
 
 BASE = 0x80000000
@@ -204,10 +206,11 @@ async def run_matrix_mmacc_arith(dut, backpressure):
                       "LOAD C", "MATMUL", "STORE C"]
 
     async def monitor_retirement():
+        retirement_lanes = retirement_lane_indices(dut)
         while not int(dut.io_halted.value):
             await RisingEdge(dut.io_aclk)
             assert not int(dut.io_fault.value), "CPU fault during matrix arithmetic test"
-            for lane in range(8):
+            for lane in retirement_lanes:
                 prefix = f"io_debug_rb_inst_{lane}"
                 if not int(getattr(dut, prefix + "_valid").value):
                     continue

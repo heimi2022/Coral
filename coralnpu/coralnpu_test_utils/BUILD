@@ -61,11 +61,18 @@ py_library(
         "core_mini_axi_interface.py",
     ],
     deps = [
+        ":dramsim3",
         requirement("cocotb"),
         requirement("numpy"),
         requirement("pyelftools"),
     ],
     visibility = [ "//visibility:public" ],
+)
+
+py_library(
+    name = "dramsim3",
+    srcs = ["dramsim3.py"],
+    visibility = ["//visibility:public"],
 )
 
 py_library(

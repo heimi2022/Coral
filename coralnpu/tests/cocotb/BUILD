@@ -222,9 +222,46 @@ cocotb_test_suite(
     },
 )
 
+genrule(
+    name = "matmul_tiling_standalone_rtl",
+    srcs = [
+        "//hdl/verilog/matrix:fifo.sv",
+        "//hdl/verilog/matrix:matmul_tiling.sv",
+    ],
+    outs = ["matmul_tiling_standalone.sv"],
+    cmd = "cat $(SRCS) > $@",
+)
+
+verilator_cocotb_model(
+    name = "matmul_tiling_standalone_model",
+    trace = False,
+    cflags = ["-Wno-fatal", "--public-flat-rw"],
+    hdl_toplevel = "matmul_tiling",
+    verilog_source = ":matmul_tiling_standalone_rtl",
+)
+
+cocotb_test_suite(
+    name = "matmul_tiling_backpressure",
+    simulators = ["verilator"],
+    testcases = [
+        "act_fifo_full",
+        "weight_fifo_full",
+        "single_last_block_full",
+    ],
+    verilator_model = ":matmul_tiling_standalone_model",
+    tests_kwargs = {
+        "hdl_toplevel": "matmul_tiling",
+        "waves": False,
+        "test_module": ["matmul_tiling_backpressure_test.py"],
+    },
+)
+
 verilator_cocotb_model(
     name = "matrix_cpu_dma_model",
     trace = True,
+    # Favor build time and memory over host simulation speed for this large model.
+    make_args = ["OPT_FAST=-O0"],
+    make_jobs = 4,
     cflags = [flag for flag in VERILATOR_BUILD_ARGS if flag != "-DZVE32F_ON"] + ["-Wno-fatal"],
     hdl_toplevel = "MatrixCoreMiniAxi",
     verilog_source = "//hdl/chisel/src/coralnpu:MatrixCoreMiniAxi.sv",
@@ -260,7 +297,13 @@ cocotb_test_suite(
     testcases = [
         "pe_ctrl_m64_n3_k64_ideal_c",
         "pe_ctrl_m64_n3_k64_c_bank_conflict_free",
+        "pe_ctrl_m1_n1_k64_c_dependency",
         "pe_ctrl_m64_n33_k64_debug",
+        "pe_ctrl_stream_weight_prefetch_early",
+        "pe_ctrl_stream_weight_prefetch_last_row",
+        "pe_ctrl_stream_weight_prefetch_weight_wait",
+        "pe_ctrl_stream_weight_prefetch_bank_wait",
+        "pe_ctrl_same_cycle_c_zero_release",
     ],
     verilator_model = ":pe_ctrl_standalone_model",
     tests_kwargs = {
@@ -293,6 +336,8 @@ cocotb_test_suite(
         "matmul_mx_m2_n64_k64_no_stall", "matmul_mx_m63_n32_k64",
         "matmul_mx_m64_n64_k64",
         "matmul_mx_scalar_rvv_high_load",
+        "matrix_cfg_overlap", "matrix_cfg_overlap_backpressure",
+        "matrix_cfg_overlap_n_boundary",
     ],
     verilator_model = ":matrix_cpu_dma_model",
     tests_kwargs = {
@@ -318,6 +363,116 @@ cocotb_test_suite(
     vcs_verilog_sources = [
         "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
     ],
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_multicreg",
+    simulators = [
+        "verilator",
+        "vcs",
+    ],
+    testcases = [
+        "c_api_elf_multicreg_gemm",
+        "c_api_elf_multicreg_smoke",
+        "c_api_elf_multicreg_tail",
+        "c_api_elf_multicreg_n65",
+        "c_api_elf_multicreg_n129",
+        "c_api_elf_multicreg_n255",
+        "c_api_elf_multicreg_n257",
+        "c_api_elf_multicreg_m65_n257_k128",
+        "c_api_elf_multicreg_m65_n257_k128_backpressure",
+    ],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_multicreg_gemm_program",
+                 ":matrix_c_api_multicreg_smoke_program",
+                 ":matrix_c_api_multicreg_tail_program",
+                 ":matrix_c_api_multicreg_n65_program",
+                 ":matrix_c_api_multicreg_n129_program",
+                 ":matrix_c_api_multicreg_n255_program",
+                 ":matrix_c_api_multicreg_n257_program",
+                 ":matrix_c_api_multicreg_m65_n257_k128_program"],
+        "size": "large",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_c_api_multicreg_gemm_program",
+        ":matrix_c_api_multicreg_smoke_program",
+        ":matrix_c_api_multicreg_tail_program",
+        ":matrix_c_api_multicreg_n65_program",
+        ":matrix_c_api_multicreg_n129_program",
+        ":matrix_c_api_multicreg_n255_program",
+        ":matrix_c_api_multicreg_n257_program",
+        ":matrix_c_api_multicreg_m65_n257_k128_program",
+        ":coverage_exclude.cfg",
+        ":xprop.cfg",
+    ],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = [
+        "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
+    ],
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_gemm_wave",
+    simulators = ["verilator"],
+    testcases = ["c_api_elf_multicreg_gemm"],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": True,
+        "test_args": [
+            "--trace-file",
+            "$TEST_UNDECLARED_OUTPUTS_DIR/gemm_m512_n512_k128.vcd",
+        ],
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_multicreg_gemm_program"],
+        "size": "large",
+    },
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_gemm_packed_b",
+    simulators = ["verilator"],
+    testcases = ["c_api_elf_multicreg_gemm_packed_b"],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_multicreg_gemm_packed_b_program"],
+        "size": "large",
+    },
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_gemm_packed_b_wave",
+    simulators = ["verilator"],
+    testcases = ["c_api_elf_multicreg_gemm_packed_b"],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": True,
+        "test_args": [
+            "--trace-file",
+            "$TEST_UNDECLARED_OUTPUTS_DIR/gemm_m512_n512_k128.vcd",
+        ],
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_multicreg_gemm_packed_b_program"],
+        "size": "large",
+    },
 )
 
 cocotb_test_suite(
@@ -367,6 +522,186 @@ coralnpu_v2_binary(
     name = "matrix_c_api_gemm_program",
     srcs = ["matrix_c_api_gemm_program.cc"],
     hdrs = ["//include:coral_matrix.h"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_gemm_program",
+    srcs = ["matrix_c_api_multicreg_gemm_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_gemm_packed_b_program",
+    srcs = ["matrix_c_api_multicreg_gemm_packed_b_program.cc"],
+    hdrs = ["//include:coral_matrix.h"],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_smoke_program",
+    srcs = ["matrix_c_api_multicreg_smoke_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_tail_program",
+    srcs = ["matrix_c_api_multicreg_tail_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_n65_program",
+    srcs = ["matrix_c_api_multicreg_n65_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_n129_program",
+    srcs = ["matrix_c_api_multicreg_n129_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_n255_program",
+    srcs = ["matrix_c_api_multicreg_n255_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_n257_program",
+    srcs = ["matrix_c_api_multicreg_n257_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_multicreg_m65_n257_k128_program",
+    srcs = ["matrix_c_api_multicreg_m65_n257_k128_program.cc"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+GEMM_ANY_SHAPES = [
+    (1, 1, 1),
+    (3, 65, 31),
+    (33, 129, 33),
+    (65, 257, 65),
+    (3, 193, 127),
+    (3, 65, 129),
+    (3, 512, 128),
+    (65, 256, 128),
+]
+
+[
+    coralnpu_v2_binary(
+        name = "matrix_c_api_gemm_m%d_n%d_k%d_program" % (m, n, k),
+        srcs = ["matrix_c_api_gemm_any_program.cc"],
+        defines = ["GEMM_M=%d" % m, "GEMM_N=%d" % n, "GEMM_K=%d" % k],
+        hdrs = [
+            "//include:coral_matrix.h",
+            "//include:coral_matrix_gemm.h",
+            "//include:coral_matrix_tiling.h",
+        ],
+    )
+    for m, n, k in GEMM_ANY_SHAPES
+]
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_gemm_any",
+    simulators = ["verilator", "vcs"],
+    testcases = [
+        "c_api_elf_gemm_m%d_n%d_k%d" % (m, n, k)
+        for m, n, k in GEMM_ANY_SHAPES
+    ] + [
+        "c_api_elf_gemm_m65_n257_k65_backpressure",
+        "c_api_elf_gemm_m65_n256_k128_backpressure",
+    ],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [
+            ":matrix_c_api_gemm_m%d_n%d_k%d_program" % (m, n, k)
+            for m, n, k in GEMM_ANY_SHAPES
+        ],
+        "size": "large",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [
+        ":matrix_c_api_gemm_m%d_n%d_k%d_program" % (m, n, k)
+        for m, n, k in GEMM_ANY_SHAPES
+    ] + [":coverage_exclude.cfg", ":xprop.cfg"],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = [
+        "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
+    ],
+)
+
+coralnpu_v2_binary(
+    name = "matrix_c_api_gemm_m256_n512_k128_program",
+    srcs = ["matrix_c_api_gemm_any_program.cc"],
+    defines = ["GEMM_M=256", "GEMM_N=512", "GEMM_K=128"],
+    hdrs = [
+        "//include:coral_matrix.h",
+        "//include:coral_matrix_gemm.h",
+        "//include:coral_matrix_tiling.h",
+    ],
+)
+
+cocotb_test_suite(
+    name = "matrix_cpu_dma_gemm_rect",
+    simulators = ["verilator", "vcs"],
+    testcases = ["c_api_elf_gemm_m256_n512_k128"],
+    verilator_model = ":matrix_cpu_dma_model",
+    tests_kwargs = {
+        "hdl_toplevel": "MatrixCoreMiniAxi",
+        "waves": False,
+        "seed": "42",
+        "test_module": ["matrix_cpu_dma_test.py"],
+        "deps": ["//coralnpu_test_utils:core_mini_axi_sim_interface"],
+        "data": [":matrix_c_api_gemm_m256_n512_k128_program"],
+        "size": "large",
+    },
+    vcs_build_args = VCS_BUILD_ARGS,
+    vcs_data = [":matrix_c_api_gemm_m256_n512_k128_program", ":coverage_exclude.cfg", ":xprop.cfg"],
+    vcs_defines = VCS_DEFINES,
+    vcs_test_args = VCS_TEST_ARGS,
+    vcs_verilog_sources = [
+        "//hdl/chisel/src/coralnpu:matrix_core_axi_cc_library_verilog",
+    ],
 )
 
 RVV_ASSEMBLY_TESTCASES = [

@@ -1,0 +1,63 @@
+diff --git a/src/controller.cc b/src/controller.cc
+index a582dcc..621eb64 100644
+--- a/src/controller.cc
++++ b/src/controller.cc
+@@ -26,7 +26,8 @@ Controller::Controller(int channel, const Config &config, const Timing &timing)
+                           ? RowBufPolicy::CLOSE_PAGE
+                           : RowBufPolicy::OPEN_PAGE),
+       last_trans_clk_(0),
+-      write_draining_(0) {
++      write_draining_(0),
++      read_turn_(false) {
+     if (is_unified_queue_) {
+         unified_queue_.reserve(config_.trans_queue_size);
+     } else {
+@@ -195,18 +196,23 @@ bool Controller::AddTransaction(Transaction trans) {
+ }
+ 
+ void Controller::ScheduleTransaction() {
++    constexpr int kWriteDrainBatchLimit = 16;
++    const bool serve_waiting_read = read_turn_ && !read_queue_.empty();
+     // determine whether to schedule read or write
+-    if (write_draining_ == 0 && !is_unified_queue_) {
++    if (write_draining_ == 0 && !is_unified_queue_ && !serve_waiting_read) {
+         // we basically have a upper and lower threshold for write buffer
+         if ((write_buffer_.size() >= write_buffer_.capacity()) ||
+             (write_buffer_.size() > 8 && cmd_queue_.QueueEmpty())) {
+-            write_draining_ = write_buffer_.size();
++            write_draining_ = std::min<int>(write_buffer_.size(),
++                                            kWriteDrainBatchLimit);
+         }
+     }
+ 
+     std::vector<Transaction> &queue =
+         is_unified_queue_ ? unified_queue_
+-                          : write_draining_ > 0 ? write_buffer_ : read_queue_;
++                          : write_draining_ > 0 && !serve_waiting_read
++                                ? write_buffer_
++                                : read_queue_;
+     for (auto it = queue.begin(); it != queue.end(); it++) {
+         auto cmd = TransToCommand(*it);
+         if (cmd_queue_.WillAcceptCommand(cmd.Rank(), cmd.Bankgroup(),
+@@ -218,6 +224,9 @@ void Controller::ScheduleTransaction() {
+                     break;
+                 }
+                 write_draining_ -= 1;
++                if (write_draining_ == 0) read_turn_ = true;
++            } else if (!is_unified_queue_) {
++                read_turn_ = false;
+             }
+             cmd_queue_.AddCommand(cmd);
+             queue.erase(it);
+diff --git a/src/controller.h b/src/controller.h
+index 77bd6af..469974b 100644
+--- a/src/controller.h
++++ b/src/controller.h
+@@ -76,6 +76,7 @@ class Controller {
+ 
+     // transaction queueing
+     int write_draining_;
++    bool read_turn_;
+     void ScheduleTransaction();
+     void IssueCommand(const Command &tmp_cmd);
+     Command TransToCommand(const Transaction &trans);

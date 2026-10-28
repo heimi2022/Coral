@@ -17,10 +17,21 @@ package common
 import chisel3._
 import chisel3.util._
 
+object CircularBufferMulti {
+  // The pointer is below capacity and the increment is at most capacity.
+  def advance(ptr: UInt, count: UInt, capacity: Int): UInt = {
+    val width = math.max(1, log2Ceil(capacity))
+    val sum = ptr +& count
+    if (isPow2(capacity)) {
+      sum(width - 1, 0)
+    } else {
+      Mux(sum >= capacity.U, sum - capacity.U, sum)(width - 1, 0)
+    }
+  }
+}
+
 class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module {
-  // For the time being, restrict to powers of 2
-  assert(isPow2(n))
-  assert(isPow2(capacity))
+  require(n > 0 && n <= capacity)
   val io = IO(new Bundle {
     val enqValid = Input(UInt(log2Ceil(n + 1).W))
     val enqData = Input(Vec(n, t))
@@ -44,10 +55,15 @@ class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module
   assert(io.enqValid <= (capacity.U -& io.nEnqueued))
 
   assert(io.deqReady <= io.nEnqueued)
+  assert(io.enqValid <= n.U)
+  assert(io.deqReady <= n.U)
 
   val buffer = RegInit(VecInit.fill(capacity)(0.U.asTypeOf(t)))
-  val enqPtr = RegInit(0.U(log2Ceil(capacity).W))
-  val deqPtr = RegInit(0.U(log2Ceil(capacity).W))
+  val ptrWidth = math.max(1, log2Ceil(capacity))
+  val enqPtr = RegInit(0.U(ptrWidth.W))
+  val deqPtr = RegInit(0.U(ptrWidth.W))
+  assert(enqPtr < capacity.U)
+  assert(deqPtr < capacity.U)
 
   val expandedInput = Wire(Vec(capacity, Valid(t)))
   for (i <- 0 until capacity) {
@@ -64,8 +80,8 @@ class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module
   }
 
   var nEnqueued = RegInit(0.U(io.nEnqueued.getWidth.W))
-  enqPtr    := Mux(io.flush, 0.U, enqPtr + io.enqValid)
-  deqPtr    := Mux(io.flush, 0.U, deqPtr + io.deqReady)
+  enqPtr    := Mux(io.flush, 0.U, CircularBufferMulti.advance(enqPtr, io.enqValid, capacity))
+  deqPtr    := Mux(io.flush, 0.U, CircularBufferMulti.advance(deqPtr, io.deqReady, capacity))
   nEnqueued := Mux(io.flush, 0.U, nEnqueued + io.enqValid - io.deqReady)
 
   io.nEnqueued := nEnqueued

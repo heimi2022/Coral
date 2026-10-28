@@ -258,6 +258,8 @@ class SCore(p: Parameters) extends Module {
         val matrixMemValid = RegInit(false.B)
         val matrixMemCommand = Reg(new MatrixMemExecReq(p))
         dispatch.io.matrixMem.get.ready := !matrixMemOperandsPending && !matrixMemValid
+        // MatrixCore snapshots dimensions at mem.fire, after CPU operand staging.
+        dispatch.io.matrixMemPending.get := matrixMemOperandsPending || matrixMemValid
 
         when(dispatch.io.matrixMem.get.fire) {
             matrixMemCommand.req := dispatch.io.matrixMem.get.bits

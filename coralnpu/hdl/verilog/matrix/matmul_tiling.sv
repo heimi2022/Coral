@@ -127,6 +127,8 @@ module matmul_tiling #(
     logic [WEIGHT_DESC_WIDTH-1:0] weight_queue_rd_data;
     logic [ACT_PSUM_DESC_WIDTH-1:0] act_psum_queue_wr_data;
     logic [ACT_PSUM_DESC_WIDTH-1:0] act_psum_queue_rd_data;
+    logic weight_queue_full;
+    logic act_psum_queue_full;
 
     assign cfg_k_gt32 = (cfg_k_i[5] && (|cfg_k_i[4:0])) || cfg_k_i[6];
     assign cfg_n_gt32 = (cfg_n_i[5] && (|cfg_n_i[4:0])) || cfg_n_i[6];
@@ -186,7 +188,9 @@ module matmul_tiling #(
         end
     end
 
-    assign block_queue_wr_en = (state == StateFill);
+    // Keep the paired descriptors together; a full queue stalls this block.
+    assign block_queue_wr_en = (state == StateFill) &&
+                              !weight_queue_full && !act_psum_queue_full;
 
 // 右矩阵分块逻辑
     // A 和 B 的 K block 使用同一个 col：低 32B 对应 K0，高 32B 对应 K1。
@@ -216,7 +220,7 @@ module matmul_tiling #(
         .rst_n (rst_n),
         .wr_en_i (block_queue_wr_en),
         .wr_data_i (weight_queue_wr_data),
-        .full_o (),
+        .full_o (weight_queue_full),
         .rd_en_i (weight_pop_i),
         .rd_data_o (weight_queue_rd_data),
         .empty_o (weight_empty_o)
@@ -255,7 +259,7 @@ module matmul_tiling #(
         .rst_n (rst_n),
         .wr_en_i (block_queue_wr_en),
         .wr_data_i (act_psum_queue_wr_data),
-        .full_o (),
+        .full_o (act_psum_queue_full),
         .rd_en_i (stream_pop_i),
         .rd_data_o (act_psum_queue_rd_data),
         .empty_o (act_psum_empty_o)
@@ -282,7 +286,7 @@ module matmul_tiling #(
         next_state = state;
         case (state)
             StateIdle: if (start_i) next_state = StateFill;
-            StateFill: if (fill_block_last) next_state = StateIdle;
+            StateFill: if (block_queue_wr_en && fill_block_last) next_state = StateIdle;
             default: next_state = StateIdle;
         endcase
     end

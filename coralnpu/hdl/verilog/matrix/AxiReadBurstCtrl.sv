@@ -6,7 +6,6 @@
 由于非对齐传输，本模块在数据返回时同步给出 burst 起始 offset 和本拍有效字节数，
 上层据此完成跨 beat 拼接。
 
-如果是端到端 是否要支持非对齐传输？？？  后续看实际情况调整
 */
 
 
@@ -28,6 +27,7 @@ module AxiReadBurstCtrl #(
     input           [AXI_ADDR_WIDTH - 1 : 0]        burst_addr_i                ,   // 单个 burst 请求的起始地址
     input           [BURST_BYTE_NUM_WIDTH - 1 : 0]  burst_byte_num_i            ,   // 单个 burst 请求的有效字节数
     input                                           burst_valid_i               ,   // 单个 burst 请求有效
+    input                                           burst_cmd_last_i            ,   // 本 burst 是所属 LOAD 的最后一个
     input                                           r_pause_i                   ,   // 上层要求当前拍后暂停继续接收 R beat
 // 输出信号
     output  wire                                    r_req_busy_o                ,   // 当前不能再接收新的 burst 请求
@@ -35,6 +35,7 @@ module AxiReadBurstCtrl #(
     output  reg                                     r_beat_valid_o              ,   // 当前返回 beat 有效
     output  reg                                     r_beat_first_o              ,   // 当前返回 beat 是本 burst 首拍
     output  reg                                     r_beat_last_o               ,   // 当前返回 beat 是本 burst 尾拍
+    output  reg                                     r_cmd_last_o                ,   // 当前有效 beat 是所属 LOAD 的尾拍
     output  reg     [$clog2(AXI_DATA_WIDTH/8)-1:0]  r_burst_start_offset_o      ,   // 当前 burst 起始地址在 beat 内的字节偏移
     output  reg     [$clog2(AXI_DATA_WIDTH/8):0]    r_beat_byte_count_o         ,   // 当前返回 beat 的有效字节数
     output  wire    [AXI_DATA_WIDTH - 1 : 0]        r_beat_data_o               ,   // 当前返回 beat 的数据
@@ -67,7 +68,7 @@ module AxiReadBurstCtrl #(
     // 传输一个数据的字节数位宽
     localparam integer AXI_BEAT_LG2 = $clog2(AXI_BEAT_BYTES);  // 6
     localparam integer AXI_BEAT_COUNT_W = AXI_BEAT_LG2 + 1;    // 7，可表达 64B
-    localparam integer READ_META_WIDTH = AXI_BEAT_LG2 + AXI_BEAT_COUNT_W;
+    localparam integer READ_META_WIDTH = 1 + AXI_BEAT_LG2 + AXI_BEAT_COUNT_W;
 
 
 // AXI4LITE signals
@@ -97,6 +98,7 @@ module AxiReadBurstCtrl #(
     wire                                    meta_pop_w              ;
     wire    [AXI_BEAT_LG2 - 1 : 0]          resp_start_offset_w     ;
     wire    [AXI_BEAT_COUNT_W - 1 : 0]      resp_end_offset_w       ;
+    wire                                    resp_cmd_last_w         ;
 
 // I/O Connections assignments
 
@@ -179,15 +181,12 @@ module AxiReadBurstCtrl #(
     // FIFO 记录的是“已经被上层接受的 burst”，而不是仅记录 AR 已握手的 burst。
     // 这样 issue_valid 中尚未发到 AXI 的那一条也占用 FIFO 空间，避免
     // issue buffer + metadata FIFO 形成额外的一条隐含 outstanding。
-    assign meta_wr_data_w = {
-        start_offset_w,
-        end_offset_w
-    };
+    assign meta_wr_data_w = { burst_cmd_last_i, start_offset_w, end_offset_w };
     assign meta_push_w = req_accept_w;
     assign meta_pop_w = r_last_fire_w;
-    assign resp_start_offset_w =
-        meta_rd_data_w[READ_META_WIDTH - 1 -: AXI_BEAT_LG2];
+    assign resp_start_offset_w = meta_rd_data_w[AXI_BEAT_COUNT_W +: AXI_BEAT_LG2];
     assign resp_end_offset_w = meta_rd_data_w[AXI_BEAT_COUNT_W - 1 : 0];
+    assign resp_cmd_last_w = meta_rd_data_w[READ_META_WIDTH - 1];
 
     fifo #(
         .DATA_WIDTH ( READ_META_WIDTH          ),
@@ -254,6 +253,13 @@ module AxiReadBurstCtrl #(
 
     always @(posedge clk) begin
         r_beat_valid_o <= r_fire_w;
+    end
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            r_cmd_last_o <= 1'b0;
+        else
+            r_cmd_last_o <= r_last_fire_w && resp_cmd_last_w;
     end
 
     always @(posedge clk) begin

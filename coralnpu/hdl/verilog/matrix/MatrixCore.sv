@@ -1,3 +1,14 @@
+/*
+2026-10-15 m/n负载为64时，当前设计从 ddr load A/B 至 AB Reg 至少需要64周期,
+            从 AB Reg 至 pe_ctrl 进行计算也需要64周期，直觉上看起来访存单元和计算单元的时间
+            刚好可以重叠起来，但是由于指令的相关性 RAW, 即计算指令必须要在load指令结束后才能发出
+            因此 从 load 结束 到 load指令退休 ,再到 计算指令 发射，中间会经历 一些周期，导致PE
+            利用率达不到峰值。 
+
+
+*/
+
+
 module MatrixCore (
     input  logic         clk,
     input  logic         rst_n,

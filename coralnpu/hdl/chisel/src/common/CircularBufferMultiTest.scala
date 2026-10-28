@@ -19,6 +19,113 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
 class CircularBufferMultiSpec extends AnyFreeSpec with ChiselSim {
+  for (capacity <- Seq(48, 64)) {
+    s"$capacity-entry ROB buffer matches a queue across wrap and flush" in {
+      simulate(new CircularBufferMulti(UInt(16.W), capacity, capacity)) { dut =>
+        val expected = scala.collection.mutable.Queue.empty[Int]
+        val random = new scala.util.Random(capacity)
+        var nextValue = 1
+        dut.io.flush.poke(false.B)
+        dut.io.enqValid.poke(0.U)
+        dut.io.deqReady.poke(0.U)
+        for (i <- 0 until capacity) dut.io.enqData(i).poke(0.U)
+
+        def check(): Unit = {
+          dut.io.nEnqueued.expect(expected.size.U)
+          dut.io.nSpace.expect((capacity - expected.size).U)
+          expected.zipWithIndex.foreach { case (value, i) =>
+            dut.io.dataOut(i).expect(value.U)
+          }
+        }
+
+        def step(enqueue: Int, dequeue: Int, flush: Boolean = false): Unit = {
+          check()
+          dut.io.enqValid.poke(enqueue.U)
+          dut.io.deqReady.poke(dequeue.U)
+          dut.io.flush.poke(flush.B)
+          val incoming = (0 until enqueue).map { _ =>
+            val value = nextValue
+            nextValue += 1
+            value
+          }
+          incoming.zipWithIndex.foreach { case (value, i) =>
+            dut.io.enqData(i).poke(value.U)
+          }
+          dut.clock.step()
+          for (_ <- 0 until dequeue) expected.dequeue()
+          expected.enqueueAll(incoming)
+          if (flush) expected.clear()
+          // Clear counts before checking the new occupancy against assertions.
+          dut.io.enqValid.poke(0.U)
+          dut.io.deqReady.poke(0.U)
+          dut.io.flush.poke(false.B)
+          check()
+        }
+
+        step(capacity - 1, 0)
+        step(0, capacity - 1)
+        // A full-width enqueue at the last slot must wrap to that same slot.
+        step(capacity, 0)
+        step(0, 16)
+        step(16, 17)
+        step(0, capacity - 17)
+        step(4, 0)
+        step(0, 0, flush = true)
+        for (cycle <- 0 until 120) {
+          step(random.nextInt(capacity - expected.size + 1),
+               random.nextInt(expected.size + 1), flush = cycle % 37 == 36)
+        }
+        step(0, expected.size)
+      }
+    }
+  }
+
+  "32-entry ROB buffer preserves order across wrap and simultaneous enqueue/dequeue" in {
+    simulate(new CircularBufferMulti(UInt(32.W), 32, 32)) { dut =>
+      dut.io.flush.poke(false.B)
+      dut.io.enqValid.poke(0.U)
+      dut.io.deqReady.poke(0.U)
+      for (i <- 0 until 32) dut.io.enqData(i).poke(0.U)
+      dut.io.nSpace.expect(32.U)
+
+      for (batch <- 0 until 8) {
+        for (i <- 0 until 4) dut.io.enqData(i).poke((batch * 4 + i).U)
+        dut.io.enqValid.poke(4.U)
+        dut.clock.step()
+      }
+      dut.io.enqValid.poke(0.U)
+      dut.io.nEnqueued.expect(32.U)
+      dut.io.nSpace.expect(0.U)
+      for (i <- 0 until 32) dut.io.dataOut(i).expect(i.U)
+
+      dut.io.deqReady.poke(3.U)
+      dut.clock.step()
+      dut.io.nSpace.expect(3.U)
+      for (i <- 0 until 3) dut.io.enqData(i).poke((32 + i).U)
+      dut.io.enqValid.poke(3.U)
+      dut.io.deqReady.poke(2.U)
+      dut.clock.step()
+      dut.io.enqValid.poke(0.U)
+      dut.io.deqReady.poke(0.U)
+      dut.io.nEnqueued.expect(30.U)
+      dut.io.nSpace.expect(2.U)
+      for (i <- 0 until 30) dut.io.dataOut(i).expect((5 + i).U)
+
+      dut.io.deqReady.poke(30.U)
+      dut.clock.step()
+      dut.io.deqReady.poke(0.U)
+      dut.io.nSpace.expect(32.U)
+      dut.io.enqValid.poke(4.U)
+      dut.clock.step()
+      dut.io.enqValid.poke(0.U)
+      dut.io.flush.poke(true.B)
+      dut.clock.step()
+      dut.io.flush.poke(false.B)
+      dut.io.nEnqueued.expect(0.U)
+      dut.io.nSpace.expect(32.U)
+    }
+  }
+
   "Basic" in {
     simulate(new CircularBufferMulti(UInt(32.W), 4, 16)) { dut =>
       dut.io.nEnqueued.expect(0)

@@ -321,7 +321,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         }).reduce(_|_)).getOrElse(false.B)
 
         if (!mini && p.enableRvv) {
-        val pIdx = accDeqPtr + i.U
+        val pIdx = CircularBufferMulti.advance(accDeqPtr, i.U, bufferSize)
 
         val nextEntry = Wire(Vec(8, Valid(new VectorWrite)))
 
@@ -452,8 +452,21 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val countValid = Cto(VecInit(resultUpdate.map(x => x.valid && x.bits.cfDone)).asUInt)
 
     val limit = firstTrapIdx + 1.U
-    val trapReadyToRetire = hasTrap && (limit <= countValid)
-    val deqReady = Mux(trapReadyToRetire, limit, countValid)
+    val trapReadyToRetireRaw = hasTrap && (limit <= countValid)
+    val deqReadyRaw = Mux(trapReadyToRetireRaw, limit, countValid)
+    val trapReadyToRetire = if (p.useRetirementBuffer) {
+        trapReadyToRetireRaw && (limit <= p.rvviTraceDepth.U)
+    } else {
+        trapReadyToRetireRaw
+    }
+    // RVVI exposes a bounded number of retirement lanes. In verification
+    // builds, retire no more entries than the trace can represent; otherwise
+    // a completed ROB tail would disappear from the architectural trace.
+    val deqReady = if (p.useRetirementBuffer) {
+        Mux(deqReadyRaw > p.rvviTraceDepth.U, p.rvviTraceDepth.U, deqReadyRaw)
+    } else {
+        deqReadyRaw
+    }
 
     instBuffer.io.deqReady := deqReady
 
@@ -461,11 +474,15 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     instBuffer.io.flush := trapRetired
 
     if (!mini && p.enableRvv) {
-        accEnqPtr := Mux(trapRetired, 0.U, accEnqPtr + instBuffer.io.enqValid)
-        accDeqPtr := Mux(trapRetired, 0.U, accDeqPtr + deqReady)
+        accEnqPtr := Mux(trapRetired, 0.U,
+            CircularBufferMulti.advance(accEnqPtr, instBuffer.io.enqValid, bufferSize))
+        accDeqPtr := Mux(trapRetired, 0.U,
+            CircularBufferMulti.advance(accDeqPtr, deqReady, bufferSize))
 
         for (x <- 0 until bufferSize) {
-            val isEnqueuing = (0 until p.instructionLanes).map(k => (k.U < instBuffer.io.enqValid) && (x.U === accEnqPtr + k.U)).reduce(_||_)
+            val isEnqueuing = (0 until p.instructionLanes).map(k =>
+                (k.U < instBuffer.io.enqValid) &&
+                (x.U === CircularBufferMulti.advance(accEnqPtr, k.U, bufferSize))).reduce(_||_)
             vectorWriteAccumulator.get(x) := Mux(trapRetired || isEnqueuing, 0.U.asTypeOf(vectorWriteAccumulator.get(0)), vectorAccumulatorNext.get(x))
         }
     }
@@ -491,7 +508,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         io.debug.inst(i).bits.idx := MuxOR(valid, Mux(resultUpdate(i).bits.trap && !allowDebug, noWriteRegIdx, instBuffer.io.dataOut(i).idx))
         io.debug.inst(i).bits.trap := MuxOR(valid, resultUpdate(i).bits.trap)
         if (!mini && p.enableRvv) {
-        val pIdx = accDeqPtr + i.U
+        val pIdx = CircularBufferMulti.advance(accDeqPtr, i.U, bufferSize)
         io.debug.inst(i).bits.vecWrites.get := debugVectorWrites.get(pIdx)
         } else if (p.enableRvv) {
         io.debug.inst(i).bits.vecWrites.get := 0.U.asTypeOf(io.debug.inst(i).bits.vecWrites.get)

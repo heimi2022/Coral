@@ -1,5 +1,10 @@
 # CPU Matrix C DMA Smoke Test
 
+The separate [cross-LOAD overlap regression](../../doc/matrix_dma_load_overlap.md)
+checks the DMA request/receive pipeline directly, including fault draining and
+reset. Run it with `bash tests/cocotb/run_matrix_dma_load_overlap.sh` (Icarus
+Verilog required). It does not replace the CPU-level tests below.
+
 From the coralnpu repository, run:
 
 ```bash

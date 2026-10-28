@@ -18,14 +18,17 @@ load("@coralnpu_hw//third_party/python:requirements.bzl", "requirement")
 load("@rules_hdl//cocotb:cocotb.bzl", "cocotb_test")
 load("@rules_python//python:defs.bzl", "py_library")
 
-# Max number of CPU to use when building the verilated simulator
-_verilator_make_parallelism = 8
+# Compile serially unless a model explicitly opts into more compiler processes.
+# Bazel's --jobs setting does not constrain this nested make invocation.
+_verilator_make_parallelism = 1
 
 def _verilator_resource_estimator(os, input_size):
-    return {"cpu": _verilator_make_parallelism, "memory": 4096}
+    return {"cpu": 4, "memory": 4096}
 
 def _verilator_cocotb_model_impl(ctx):
     """Implementation of the verilator_cocotb_model rule."""
+    if ctx.attr.make_jobs < 1:
+        fail("make_jobs must be positive")
     cc_toolchain = ctx.toolchains["@bazel_tools//tools/cpp:toolchain_type"].cc
     ar_executable = cc_toolchain.ar_executable
     compiler_executable = cc_toolchain.compiler_executable
@@ -54,6 +57,8 @@ def _verilator_cocotb_model_impl(ctx):
             --top-module {hdl_toplevel} \
             --vpi \
             --prefix Vtop \
+            --output-split 5000 \
+            --output-split-cfuncs 5000 \
             -o {hdl_toplevel} \
             -LDFLAGS "-Wl,-rpath {cocotb_lib_path} -L{cocotb_lib_path} -lcocotbvpi_verilator" \
             {trace} \
@@ -74,7 +79,8 @@ def _verilator_cocotb_model_impl(ctx):
         trace = "--trace" if ctx.attr.trace else "",
     )
 
-    make_cmd = "PATH=`dirname {ld}`:$PATH make -j {parallelism} -C {outdir} -f Vtop.mk {trace} CXX={cxx} AR={ar} LINK={cxx} > {make_log} 2>&1".format(
+    # Large generated functions can exceed the host compiler's default stack.
+    make_cmd = "ulimit -s unlimited && PATH=`dirname {ld}`:$PATH make -j {parallelism} -C {outdir} -f Vtop.mk {trace} {make_args} CXX={cxx} AR={ar} LINK={cxx} > {make_log} 2>&1".format(
         outdir = outdir,
         cocotb_lib_path = cocotb_lib_path,
         make_log = make_log.path,
@@ -82,8 +88,10 @@ def _verilator_cocotb_model_impl(ctx):
         ar = ar_executable,
         ld = ld_executable,
         cxx = compiler_executable,
-        parallelism = _verilator_make_parallelism,
+        parallelism = ctx.attr.make_jobs,
+        make_args = " ".join(ctx.attr.make_args),
     )
+    make_cmd = "({}) || {{ status=$?; tail -n 80 {}; exit $status; }}".format(make_cmd, make_log.path)
 
     script = " && ".join([verilator_cmd.strip(), make_cmd])
 
@@ -128,12 +136,16 @@ verilator_cocotb_model = rule(
         verilog_source: The verilog source file to build the model from.
         hdl_toplevel: The name of the toplevel module.
         cflags: A list of flags to pass to the compiler.
+        make_args: Additional arguments for the generated model Makefile.
+        make_jobs: Maximum concurrent host compiler processes.
     """,
     implementation = _verilator_cocotb_model_impl,
     attrs = {
         "verilog_source": attr.label(allow_single_file = True, mandatory = True),
         "hdl_toplevel": attr.string(mandatory = True),
         "cflags": attr.string_list(default = []),
+        "make_args": attr.string_list(default = []),
+        "make_jobs": attr.int(default = _verilator_make_parallelism),
         "trace": attr.bool(default = False),
         "vlt_tpl": attr.label(
             default = "@coralnpu_hw//rules:default.vlt.tpl",

@@ -1,6 +1,7 @@
 package coralnpu
 
 import chisel3._
+import chisel3.util.log2Ceil
 import chisel3.simulator.scalatest.ChiselSim
 import coralnpu.matrix.{MatrixInstOp, MatrixMemOp}
 import org.scalatest.freespec.AnyFreeSpec
@@ -9,7 +10,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
   val p = new Parameters
   p.enableMatrix = true
 
-  class Tester extends Module {
+  class Tester(testRobSpace: Boolean = false) extends Module {
     val io = IO(new Bundle {
       val inst_valid = Input(Bool())
       val inst_ready = Output(Bool())
@@ -23,6 +24,9 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       val inst_bits = Input(UInt(p.instructionBits.W))
       val inst_brchFwd = Input(Bool())
       val retirement_buffer_empty = Input(Bool())
+      val retirement_buffer_nSpace = Option.when(testRobSpace)(
+        Input(UInt(log2Ceil(p.retirementBufferSize + 1).W)))
+      val matrixMemPending = Input(Bool())
 
       val alu_valid = Output(Bool())
       val alu_op = Output(UInt(AluOp.getWidth.W))
@@ -63,8 +67,10 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.scoreboard.regd := 0.U
     dispatch.io.scoreboard.comb := 0.U
     dispatch.io.lsuQueueCapacity := p.instructionLanes.U
-    dispatch.io.retirement_buffer_nSpace := p.instructionLanes.U
+    dispatch.io.retirement_buffer_nSpace :=
+      io.retirement_buffer_nSpace.getOrElse(p.instructionLanes.U)
     dispatch.io.retirement_buffer_empty := io.retirement_buffer_empty
+    dispatch.io.matrixMemPending.get := io.matrixMemPending
     dispatch.io.retirement_buffer_trap_pending := false.B
     dispatch.io.single_step := false.B
     dispatch.io.debug_mode := false.B
@@ -162,8 +168,32 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     0x2bL
   }
 
+  "Dispatch scalar and matrix instructions at ROB space boundaries" in {
+    simulate(new Tester(testRobSpace = true)) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
+      dut.io.matrixZero_ready.poke(true.B)
+      dut.io.inst_valid.poke(true.B)
+      dut.io.inst_addr.poke(0.U)
+      dut.io.inst_brchFwd.poke(false.B)
+
+      for (space <- Seq(0, 1, 31, 32, 47, 48, p.retirementBufferSize - 1,
+                        p.retirementBufferSize).distinct) {
+        dut.io.retirement_buffer_nSpace.get.poke(space.U)
+        dut.io.retirement_buffer_empty.poke((space == p.retirementBufferSize).B)
+        dut.io.inst_bits.poke(0x001A0A13L.U)
+        dut.io.inst_ready.expect((space > 0).B)
+        dut.io.alu_valid.expect((space > 0).B)
+
+        dut.io.inst_bits.poke(encodeMatrixMul(op = 3, ms2 = 1, ms1 = 0, md = 4).U)
+        dut.io.inst_ready.expect((space > 0).B)
+        dut.io.matrix_valid.expect((space > 0).B)
+      }
+    }
+  }
+
   "Dispatch msettileki to matrixCfg with immediate" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgImm(0x08, 4)
 
@@ -172,8 +202,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_K.litValue.U)
@@ -187,6 +215,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch msettilek to matrixCfg with rs1" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgReg(0x09, 6)
 
@@ -195,8 +224,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_K.litValue.U)
@@ -210,6 +237,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch msettilemi to matrixCfg with immediate" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgImm(0x10, 5)
 
@@ -218,8 +246,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_M.litValue.U)
@@ -233,6 +259,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch msettilem to matrixCfg with rs1" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgReg(0x11, 7)
 
@@ -241,8 +268,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_M.litValue.U)
@@ -256,6 +281,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch msettileni to matrixCfg with immediate" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgImm(0x18, 9)
 
@@ -264,8 +290,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_N.litValue.U)
@@ -279,6 +303,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch msettilen to matrixCfg with rs1" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgReg(0x19, 8)
 
@@ -287,8 +312,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_N.litValue.U)
@@ -300,8 +323,9 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "Stall matrixCfg when retirement buffer is not empty" in {
+  "Dispatch matrixCfg with older ROB entries after memory handoff" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixCfgImm(0x10, 4)
 
@@ -311,17 +335,98 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(false.B)
 
-      dut.clock.step()
-
-      dut.io.matrixCfg_valid.expect(false.B)
+      dut.io.inst_ready.expect(true.B)
+      dut.io.matrixCfg_valid.expect(true.B)
       dut.io.rs1Read_valid.expect(false.B)
-      dut.io.rs1Set_valid.expect(false.B)
+      dut.io.rs1Set_valid.expect(true.B)
       dut.io.rdMark_valid.expect(false.B)
+    }
+  }
+
+  "Hold matrixCfg until staged memory reaches MatrixCore" in {
+    simulate(new Tester) { dut =>
+      dut.io.matrixZero_ready.poke(true.B)
+      dut.io.inst_valid.poke(true.B)
+      dut.io.inst_addr.poke(0.U)
+      dut.io.inst_brchFwd.poke(false.B)
+      dut.io.retirement_buffer_empty.poke(false.B)
+      dut.io.matrixMemPending.poke(true.B)
+      for (inst <- Seq(encodeMatrixCfgImm(0x18, 1), encodeMatrixCfgReg(0x11, 7))) {
+        dut.io.inst_bits.poke(inst.U)
+        for (_ <- 0 until 3) {
+          dut.io.matrixCfg_valid.expect(false.B)
+          dut.io.inst_ready.expect(false.B)
+          dut.io.rs1Read_valid.expect(false.B)
+          dut.io.rs1Set_valid.expect(false.B)
+          dut.clock.step()
+        }
+      }
+      dut.io.matrixMemPending.poke(false.B)
+      dut.io.matrixCfg_valid.expect(true.B)
+      dut.io.inst_ready.expect(true.B)
+    }
+  }
+
+  "Wait one CSR write cycle before matrix consumers but allow scalar ALU" in {
+    val consumers = Seq(
+      encodeMatrixMul(op = 3, ms2 = 1, ms1 = 0, md = 4),
+      encodeMatrixMem(kind = 1, store = false, rs2 = 11, rs1 = 10, elemWidth = 0, reg = 1),
+      encodeMatrixMem(kind = 2, store = true, rs2 = 11, rs1 = 10, elemWidth = 2, reg = 4),
+      encodeMatrixCfgImm(0x10, 3),
+      0x0c00022bL, // mzero C0
+      0x80402073L) // csrr x0, xtilen
+    // Separate simulations keep prior consumers out of the matrix scoreboard.
+    for (consumer <- consumers) {
+      simulate(new Tester) { dut =>
+        dut.io.matrixMemPending.poke(false.B)
+        dut.io.matrixZero_ready.poke(true.B)
+        dut.io.inst_valid.poke(true.B)
+        dut.io.inst_addr.poke(0.U)
+        dut.io.inst_brchFwd.poke(false.B)
+        dut.io.retirement_buffer_empty.poke(true.B)
+        dut.io.inst_bits.poke(encodeMatrixCfgImm(0x18, 1).U)
+        dut.io.inst_ready.expect(true.B)
+        dut.io.matrixCfg_valid.expect(true.B)
+        dut.clock.step()
+
+        dut.io.inst_addr.poke(4.U)
+        dut.io.inst_bits.poke(consumer.U)
+        dut.io.inst_ready.expect(false.B)
+        dut.io.matrixCfg_valid.expect(false.B)
+        dut.io.matrix_valid.expect(false.B)
+        dut.io.matrixMem_valid.expect(false.B)
+        dut.io.matrixZero_valid.expect(false.B)
+        // Independent scalar work can use the CSR write cycle.
+        dut.io.inst_bits.poke(0x001A0A13L.U)
+        dut.io.alu_valid.expect(true.B)
+        dut.io.inst_ready.expect(true.B)
+        dut.io.inst_bits.poke(consumer.U)
+        dut.clock.step()
+        dut.io.inst_ready.expect(true.B)
+      }
+    }
+  }
+
+  "Ordinary CSR still waits for ROB empty" in {
+    simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
+      dut.io.matrixZero_ready.poke(true.B)
+      dut.io.inst_valid.poke(true.B)
+      dut.io.inst_addr.poke(0.U)
+      dut.io.inst_bits.poke(0x80402073L.U)
+      dut.io.inst_brchFwd.poke(false.B)
+      dut.io.retirement_buffer_empty.poke(false.B)
+      dut.io.inst_ready.expect(false.B)
+      dut.clock.step(3)
+      dut.io.inst_ready.expect(false.B)
+      dut.io.retirement_buffer_empty.poke(true.B)
+      dut.io.inst_ready.expect(true.B)
     }
   }
 
   "Dispatch matrix multiply fields from unified metadata" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixMul(op = 2, ms2 = 3, ms1 = 1, md = 6)
 
@@ -348,6 +453,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch matrix memory operation and element width from unified metadata" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       val inst = encodeMatrixMem(
         kind = 2, store = true, rs2 = 9, rs1 = 7, elemWidth = 2, reg = 5)
@@ -357,8 +463,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_bits.poke(inst.U)
       dut.io.inst_brchFwd.poke(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
-
-      dut.clock.step()
 
       dut.io.matrixMem_valid.expect(true.B)
       dut.io.matrixMem_op.expect(MatrixMemOp.ST_C.litValue.U)
@@ -375,6 +479,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Dispatch C mzero with backpressure and without scalar register accesses" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.inst_valid.poke(true.B)
       dut.io.inst_addr.poke("h20000200".U)
       dut.io.inst_bits.poke("h0d80022b".U) // mzero4r m4
@@ -408,6 +513,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
   "Issue AB mzero and trap unsupported or misaligned mzero" in {
     simulate(new Tester) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
       dut.io.matrixZero_ready.poke(true.B)
       dut.io.inst_valid.poke(true.B)
       dut.io.inst_addr.poke("h20000200".U)

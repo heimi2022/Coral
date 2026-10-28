@@ -19,9 +19,11 @@ import chisel3.util._
 
 object GenerateRvviTraceSource {
     def apply(p: Parameters): String = {
+        val traceDepth = p.rvviTraceDepth
+        require(traceDepth <= p.retirementBufferSize)
         var moduleInterface = "module RvviTraceBlackBox(\n"
         moduleInterface += "  input logic clk_i,\n"
-        for (i <- 0 until p.retirementBufferSize) {
+        for (i <- 0 until traceDepth) {
             moduleInterface +=
                 "  input logic valid_i_GENI,\n".
                 replaceAll("GENI", i.toString)
@@ -58,11 +60,11 @@ object GenerateRvviTraceSource {
             moduleInterface +=
                 "  input logic [31:0] v_wb_i_GENI,\n".
                 replaceAll("GENI", i.toString)
-            for (j <- 0 until p.retirementBufferSize) {
+            for (j <- 0 until traceDepth) {
                 moduleInterface +=
                     "  input logic [GENSZ:0] csr_i_GENIDX,\n".
-                    replaceAll("GENIDX", (i * p.retirementBufferSize + j).toString).
-                    replaceAll("GENSZ", (((4096 / p.retirementBufferSize) * 32) - 1).toString)
+                    replaceAll("GENIDX", (i * traceDepth + j).toString).
+                    replaceAll("GENSZ", (((4096 / traceDepth) * 32) - 1).toString)
             }
             moduleInterface +=
                 "  input logic [4095:0] csr_wb_i_GENI,\n".
@@ -79,12 +81,12 @@ object GenerateRvviTraceSource {
         |    .FLEN(32),
         |    .VLEN(128),
         |    .NHART(1),
-        |    .RETIRE(GEN_retirementBufferSize)
+        |    .RETIRE(GEN_rvviTraceDepth)
         |  ) rvvi();
-        |""".replaceAll("GEN_retirementBufferSize", p.retirementBufferSize.toString).stripMargin
+        |""".replaceAll("GEN_rvviTraceDepth", traceDepth.toString).stripMargin
 
         coreInstantiation += "  assign rvvi.clk = clk_i;\n"
-        for (i <- 0 until p.retirementBufferSize) {
+        for (i <- 0 until traceDepth) {
             coreInstantiation += "  assign rvvi.valid[0][GENI] = valid_i_GENI;\n".replaceAll("GENI", i.toString)
             coreInstantiation += "  assign rvvi.order[0][GENI] = order_i_GENI;\n".replaceAll("GENI", i.toString)
             coreInstantiation += "  assign rvvi.insn[0][GENI] = insn_i_GENI;\n".replaceAll("GENI", i.toString)
@@ -97,12 +99,12 @@ object GenerateRvviTraceSource {
             coreInstantiation += "  assign rvvi.f_wb[0][GENI] = f_wb_i_GENI;\n".replaceAll("GENI", i.toString)
             coreInstantiation += "  assign rvvi.v_wdata[0][GENI] = v_wdata_i_GENI;\n".replaceAll("GENI", i.toString)
             coreInstantiation += "  assign rvvi.v_wb[0][GENI] = v_wb_i_GENI;\n".replaceAll("GENI", i.toString)
-            for (j <- 0 until p.retirementBufferSize) {
+            for (j <- 0 until traceDepth) {
                 coreInstantiation += "  assign rvvi.csr[0][GENi][MSB:LSB] = csr_i_GENIDX;\n".
                                      replaceAll("GENi", i.toString).
-                                     replaceAll("GENIDX", (i * p.retirementBufferSize + j).toString).
-                                     replaceAll("MSB", ((j + 1) * (4096 / p.retirementBufferSize) - 1).toString).
-                                     replaceAll("LSB", ((j * (4096 / p.retirementBufferSize)).toString))
+                                     replaceAll("GENIDX", (i * traceDepth + j).toString).
+                                     replaceAll("MSB", ((j + 1) * (4096 / traceDepth) - 1).toString).
+                                     replaceAll("LSB", ((j * (4096 / traceDepth)).toString))
             }
             coreInstantiation += "  assign rvvi.csr_wb[0][GENI] = csr_wb_i_GENI;\n".replaceAll("GENI", i.toString)
             coreInstantiation += "  assign rvvi.lrsc_cancel[0][GENI] = 1'b0;\n".replaceAll("GENI", i.toString)
@@ -118,61 +120,67 @@ object GenerateRvviTraceSource {
 
 class RvviTraceBlackBox(p: Parameters) extends BlackBox with HasBlackBoxInline
                                  with HasBlackBoxResource {
+    require(p.rvviTraceDepth <= p.retirementBufferSize)
     val io = IO(new Bundle {
         val clk_i = Input(Clock())
-        val valid_i = Input(Vec(p.retirementBufferSize, Bool()))
-        val order_i = Input(Vec(p.retirementBufferSize, UInt(64.W)))
-        val insn_i = Input(Vec(p.retirementBufferSize, UInt(32.W)))
-        val trap_i = Input(Vec(p.retirementBufferSize, Bool()))
-        val debug_mode_i = Input(Vec(p.retirementBufferSize, Bool()))
-        val pc_rdata_i = Input(Vec(p.retirementBufferSize, UInt(32.W)))
-        val x_wdata_i = Input(Vec(p.retirementBufferSize, UInt((32 * 32).W)))
-        val x_wb_i = Input(Vec(p.retirementBufferSize, UInt(32.W)))
-        val f_wdata_i = Input(Vec(p.retirementBufferSize, UInt((32 * 32).W)))
-        val f_wb_i = Input(Vec(p.retirementBufferSize, UInt(32.W)))
-        val v_wdata_i = Input(Vec(p.retirementBufferSize, UInt((32 * 128).W)))
-        val v_wb_i = Input(Vec(p.retirementBufferSize, UInt(32.W)))
-        val csr_i = Input(Vec(p.retirementBufferSize * p.retirementBufferSize, UInt(((4096 / p.retirementBufferSize) * 32).W)))
-        val csr_wb_i = Input(Vec(p.retirementBufferSize, UInt(4096.W)))
+        val valid_i = Input(Vec(p.rvviTraceDepth, Bool()))
+        val order_i = Input(Vec(p.rvviTraceDepth, UInt(64.W)))
+        val insn_i = Input(Vec(p.rvviTraceDepth, UInt(32.W)))
+        val trap_i = Input(Vec(p.rvviTraceDepth, Bool()))
+        val debug_mode_i = Input(Vec(p.rvviTraceDepth, Bool()))
+        val pc_rdata_i = Input(Vec(p.rvviTraceDepth, UInt(32.W)))
+        val x_wdata_i = Input(Vec(p.rvviTraceDepth, UInt((32 * 32).W)))
+        val x_wb_i = Input(Vec(p.rvviTraceDepth, UInt(32.W)))
+        val f_wdata_i = Input(Vec(p.rvviTraceDepth, UInt((32 * 32).W)))
+        val f_wb_i = Input(Vec(p.rvviTraceDepth, UInt(32.W)))
+        val v_wdata_i = Input(Vec(p.rvviTraceDepth, UInt((32 * 128).W)))
+        val v_wb_i = Input(Vec(p.rvviTraceDepth, UInt(32.W)))
+        val csr_i = Input(Vec(p.rvviTraceDepth * p.rvviTraceDepth, UInt(((4096 / p.rvviTraceDepth) * 32).W)))
+        val csr_wb_i = Input(Vec(p.rvviTraceDepth, UInt(4096.W)))
     })
     addResource("external/RVVI/source/host/rvvi/rvviTrace.sv")
     setInline("RvviTraceBlackBox.sv", GenerateRvviTraceSource(p))
 }
 
 class RvviTrace(p: Parameters) extends Module {
+    require(p.rvviTraceDepth <= p.retirementBufferSize)
+    require(p.instructionLanes <= p.rvviTraceDepth)
     val io = IO(new Bundle {
         val rb = Input(new RetirementBufferDebugIO(p))
         val csr = Input(new CsrTraceIO(p))
     })
-    val x_wdata = Wire(Vec(p.retirementBufferSize, Vec(32, UInt(32.W))))
-    val x_wb = Wire(Vec(p.retirementBufferSize, Vec(32, Bool())))
-    val f_wdata = Wire(Vec(p.retirementBufferSize, Vec(32, UInt(32.W))))
-    val f_wb = Wire(Vec(p.retirementBufferSize, Vec(32, Bool())))
-    val v_wdata = Wire(Vec(p.retirementBufferSize, Vec(32, UInt(128.W))))
-    val v_wb = Wire(Vec(p.retirementBufferSize, Vec(32, Bool())))
-    val csr = Wire(Vec(p.retirementBufferSize, Vec(4096, UInt(32.W))))
-    val csr_wb = Wire(Vec(p.retirementBufferSize, Vec(4096, Bool())))
+    val x_wdata = Wire(Vec(p.rvviTraceDepth, Vec(32, UInt(32.W))))
+    val x_wb = Wire(Vec(p.rvviTraceDepth, Vec(32, Bool())))
+    val f_wdata = Wire(Vec(p.rvviTraceDepth, Vec(32, UInt(32.W))))
+    val f_wb = Wire(Vec(p.rvviTraceDepth, Vec(32, Bool())))
+    val v_wdata = Wire(Vec(p.rvviTraceDepth, Vec(32, UInt(128.W))))
+    val v_wb = Wire(Vec(p.rvviTraceDepth, Vec(32, Bool())))
+    val csr = Wire(Vec(p.rvviTraceDepth, Vec(4096, UInt(32.W))))
+    val csr_wb = Wire(Vec(p.rvviTraceDepth, Vec(4096, Bool())))
 
     val count = RegInit(0.U(64.W))
     count := count + PopCount(io.rb.inst.map(_.valid))
 
     val rvviTraceBlackBox = Module(new RvviTraceBlackBox(p))
     rvviTraceBlackBox.io.clk_i := clock
-    for (i <- 0 until p.retirementBufferSize) {
+    // RVVI exports a bounded prefix of the retirement lanes. Do not silently
+    // lose information if the core is later widened beyond this depth.
+    assert(!io.rb.inst.drop(p.rvviTraceDepth).map(_.valid).reduceOption(_ || _).getOrElse(false.B))
+    for (i <- 0 until p.rvviTraceDepth) {
         rvviTraceBlackBox.io.x_wdata_i(i) := x_wdata(i).asUInt
         rvviTraceBlackBox.io.x_wb_i(i) := x_wb(i).asUInt
         rvviTraceBlackBox.io.f_wdata_i(i) := f_wdata(i).asUInt
         rvviTraceBlackBox.io.f_wb_i(i) := f_wb(i).asUInt
         rvviTraceBlackBox.io.v_wdata_i(i) := v_wdata(i).asUInt
         rvviTraceBlackBox.io.v_wb_i(i) := v_wb(i).asUInt
-        for (j <- 0 until p.retirementBufferSize) {
+        for (j <- 0 until p.rvviTraceDepth) {
             val subsize = rvviTraceBlackBox.io.csr_i(i).getWidth
-            rvviTraceBlackBox.io.csr_i(i * p.retirementBufferSize + j) := csr(i).asUInt(subsize * (j+1) - 1, subsize * j)
+            rvviTraceBlackBox.io.csr_i(i * p.rvviTraceDepth + j) := csr(i).asUInt(subsize * (j+1) - 1, subsize * j)
         }
         rvviTraceBlackBox.io.csr_wb_i(i) := csr_wb(i).asUInt
     }
 
-    for (i <- 0 until p.retirementBufferSize) {
+    for (i <- 0 until p.rvviTraceDepth) {
         val valid = io.rb.inst(i).valid
         val insn = io.rb.inst(i).bits.inst
         val pc_rdata = io.rb.inst(i).bits.pc

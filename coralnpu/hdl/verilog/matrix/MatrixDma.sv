@@ -170,7 +170,7 @@ module MatrixDma #(
         .REG_IDX                ( REG_IDX_W            ),
             .ROW_BYTE_W             ( 9                    ),
         .CMD_QUEUE_DEPTH        ( LOAD_CMD_QUEUE_DEPTH ),
-        .READ_OUTSTANDING_DEPTH ( 4                    )
+        .READ_OUTSTANDING_DEPTH ( 16                   )
     ) u_matrix_dma_load (
         .clk              ( clk                    ),
         .rst_n            ( rst_n                  ),

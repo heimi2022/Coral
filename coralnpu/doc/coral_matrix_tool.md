@@ -1,6 +1,6 @@
 # CoralNPU 矩阵工具链入口
 
-更新时间：2026-10-01
+更新时间：2026-10-13
 
 CoralNPU 当前冻结的矩阵编码有两个入口：独立的 Python
 assembler/disassembler，以及 `include/coral_matrix.h` 提供的 C API。两者都
@@ -64,6 +64,91 @@ C API 的内存操作约定如下：
 
 当前接口覆盖 A/B/C、whole、转置 A/B/C 的 8/16/32/64 位 load/store，
 以及三种 tile shape 配置、四种 `mmacc.w.b` 变体和 `mzero`。
+
+### 超大矩阵分块 GEMM
+
+MatrixCore 单条 MatMul 当前支持的 `M/N/K` 上限都是 64。需要计算更大的
+矩阵时，使用 `include/coral_matrix_gemm.h` 中的
+`coral_matrix_gemm_multicreg_run()`。软件遍历 M tile 和 N group，最多让四个
+N tile 的部分和驻留在 C0..C3，并复用同一个 A tile。每个输出 tile 只执行
+一次 `mzero`，所有 K tile 都用 `mmacc` 累加，最后执行一次 `msce32` 写回。
+
+接口约定如下：
+
+- A 是 row-major 的 `[M][K]` S1.6 int8 矩阵。
+- B 使用硬件需要的转置布局 `[N][K]`，每个 B 行对应一个输出列。
+- `a_scale[g][m]` 和 `b_scale[g][n]` 按 ceil(K/32) 个 scale 行存储。
+- C 是 row-major 的 FP32 输出矩阵。
+- 所有 stride 和矩阵起始地址当前需要 64 字节对齐。
+- M/N/K 支持任意正整数。K 尾部先补零到 round_up(K,32)，由软件拆成
+  不超过 64 的 K tile；描述符仍使用原始逻辑 K。
+
+`include/coral_matrix_gemm_layout.h` 的 `coral_matrix_gemm_layout_init()`
+计算对齐 stride 和 buffer 容量，`coral_matrix_gemm_pad_k()` 在 GEMM 前
+对输入 K 尾部补零。B 必须已经转置为 `[N][K]`，当前不做 B 转置。
+输入行须容纳补零元素，scale 须有 ceil(K/32) 组，C 仍使用对齐行 stride。
+
+例如 `M=128, N=96, K=128` 会被拆成 2x2 个输出 tile，每个输出 tile
+再执行两个 K tile；每个 M tile 的两个 N tile 分别驻留在 C0、C1。
+调用方式为：
+
+```c
+#include "include/coral_matrix_gemm.h"
+
+const coral_matrix_gemm_desc_t problem = {
+    a, 128 * sizeof(int8_t), b_transposed, 128 * sizeof(int8_t),
+    a_scale, 128, b_scale, 128,
+    c, 96 * sizeof(float), 128, 96, 128,
+};
+int rc = coral_matrix_gemm_multicreg_run(&problem);
+```
+
+高层 GEMM 统一使用 multicreg 调度。`coral_gemm_mx_multicreg()` 保留为长参数
+兼容入口；新代码优先使用描述符接口。描述符字段顺序固定为
+A、A stride、转置 B、B stride、
+两组 scale 及 stride、C、C stride、M/N/K，所有 stride 仍以字节为单位。
+当 N group 只有一个 tile 时，同一个调度自然只使用 C0。
+
+这个接口是 MatrixCore 的软件分块层，不会把任意 C 循环自动识别成矩阵
+指令；它为上层 AI 编译器提供了一个稳定的 tiled GEMM lowering 目标。
+
+该调度对每个 M/K tile 保留 A，并最多让四个 N
+tile 的部分和驻留在 C0..C3；软件热路径固定使用 A0、B1/B2/B3，第四个
+B tile 在 B1 的最后一次 MMACC 消费后复用 B1。四个 AB reg 在硬件上地位
+相同，固定映射只是减少动态寄存器选择的标量开销，不是 reg0 只能放 A 的限制。
+
+`N` 不需要是 64 的倍数。每个 N tile 使用自己的 `tile_n`，所以例如
+`N=193` 可以在同一个 group 中按 `64/64/64/1` 使用 C0..C3；尾 tile
+不会被填充后写出无效列。C API 在每个 MMACC 前使用
+`msettilen(tile_n)`，Decode 等待 CSR 配置生效，无需软件 `nop`。
+配置不再要求 ROB 清空；只需等待旧访存命令交接和上一条配置写入。
+各 MMACC/DMA 命令在接收时保存自己的维度，AB reg 覆盖由 scoreboard
+等待旧使用者完成。
+
+当前验证覆盖了 `N=65`、`129`、`193`、`255`、`257`，以及
+`M=512,N=512,K=128` 的四 C reg 调度。2026-10-13，用户确认新增的
+7 个任意正整数维度 Verilator GEMM 用例全部通过，覆盖 K=1/31/33/65/127/129、
+M/N 尾块、多 C reg 和 AXI 背压；该批用例尚未进行 VCS 验证。
+仍须遵守前述 padding、地址和 stride 要求。重跑命令：
+
+```bash
+bash tests/cocotb/run_matrix_gemm_any.sh verilator
+```
+
+截至 2026-10-12，用户已确认固定 AB 寄存器调度后的
+`M=64,K=64,N=65/129/255/257` 四个 ELF 用例在 Verilator 和 VCS 下
+全部通过。回归核对 FP32 输出、有效写字节、完整内存镜像、AXI 事务和矩阵
+指令退休计数。此次没有修改 RTL。
+
+当前调度按 `B load -> scale load -> MATMUL` 逐 tile 发射，前三个 tile
+使用 B1/B2/B3，第四个 tile 复用 B1；尚未实现更深的加载与计算交叠调度。实现细节、尾块
+处理和验证范围见 [矩阵分块策略](matrix_tiling_strategy.md#13-实现结构与本轮验证)。
+重跑 VCS 四个尾块用例：
+
+```bash
+cd /home/wjj/2-NPU/coralnpu
+bash tests/cocotb/run_matrix_multicreg_vcs.sh
+```
 
 编译一个只包含矩阵指令的 probe：
 

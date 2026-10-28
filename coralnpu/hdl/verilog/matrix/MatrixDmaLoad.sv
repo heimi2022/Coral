@@ -12,10 +12,10 @@
    - 每行不足 64B 的高字节在 AB 写口补零
 
 说明：
-1. 当前仍然保持“同一时刻只执行一条矩阵 load 大命令”，但命令内部的多行可并行在途
+1. 请求发射与返回写入独立推进，多条 load 可以同时在途；两侧均保持命令顺序
 2. 当前使用单 AXI ID，不支持乱序返回；依赖 AXI 对同 ID 返回顺序的保证
 3. 当前 fault 语义偏硬件直写风格：
-   - 检测到 burst error 后停止继续发新请求
+   - 检测到 burst error 后停止该命令的寄存器写入，继续发完并排空该命令的请求
    - 已经直写进矩阵寄存器的 beat 不回滚
 
 ！ RISCV 拓展中 转置指令暂时不考虑，若做转置需要额外大量寄存器开销，或者在一整条DMA指令中对数据分块进行转置。
@@ -105,7 +105,7 @@ module MatrixDmaLoad #(
     localparam int CMD_DATA = 76 + ROW_BYTE_W;
     // 接收侧只需知道目标寄存器、目的类型、行大小和总行数，不携带地址或 stride。
     localparam int INFLIGHT_DATA = 12 + ROW_BYTE_W;
-    // 当前命令串行执行：命令队列之外最多有一条执行中的命令。
+    // 限制已接收但尚未完成的 LOAD 总数，包含排队、发射及接收中的命令。
     localparam int PC_QUEUE_DEPTH = CMD_QUEUE_DEPTH + 1;
     logic [31:0] pc_fifo_data_out;
     logic pc_fifo_full;
@@ -150,6 +150,7 @@ module MatrixDmaLoad #(
 
     logic                          recv_cmd_active;
     logic                          recv_cmd_fault_seen;
+    logic                          recv_cmd_data_done;
     logic [2:0]                    recv_cmd_reg;
     logic                          recv_cmd_dst_sel;
     logic [ROW_BYTE_W-1:0]         recv_cmd_row_bytes;
@@ -181,6 +182,7 @@ module MatrixDmaLoad #(
     logic                          read_beat_valid;
     logic                          read_beat_first;
     logic                          read_beat_last;
+    logic                          read_cmd_last;
     logic [AXI_BEAT_LG2-1:0]       read_burst_start_offset;
     logic [AXI_DATA-1:0]           read_beat_data;
     logic                          read_burst_done_error;
@@ -263,11 +265,9 @@ module MatrixDmaLoad #(
 // 1) 命令发射路径
 // =========================================================================
 
-    // 命令可排队；上一条命令排空后再发射下一条，保证错误恢复不混入下一条数据。
-    // 同一命令内部仍允许多个 AXI burst 在途。
+    // 前一条命令发完 burst 请求即可切换；返回侧通过描述符和 LOAD 尾拍保序。
     assign issue_cmd_pop =
-        !issue_cmd_active && !recv_cmd_active &&
-        !read_busy && inflight_fifo_empty &&
+        !issue_cmd_active &&
         !issue_cmd_fifo_empty &&
         !inflight_fifo_full;
 
@@ -410,12 +410,14 @@ module MatrixDmaLoad #(
         .burst_addr_i        ( issue_addr             ),
         .burst_byte_num_i    ( cmd_burst_byte_num     ),
         .burst_valid_i       ( read_burst_valid       ),
+        .burst_cmd_last_i    ( issue_request_last     ),
         .r_pause_i           ( read_pause             ),
         .r_req_busy_o        ( read_req_busy          ),
         .r_burst_busy_o      ( read_busy              ),
         .r_beat_valid_o      ( read_beat_valid        ),
         .r_beat_first_o      ( read_beat_first        ),
         .r_beat_last_o       ( read_beat_last         ),
+        .r_cmd_last_o        ( read_cmd_last          ),
         .r_burst_start_offset_o ( read_burst_start_offset ),
         .r_beat_byte_count_o ( read_beat_byte_count   ),
         .r_beat_data_o       ( read_beat_data         ),
@@ -445,8 +447,19 @@ module MatrixDmaLoad #(
 
     // AXI 控制器将 R 握手数据寄存一拍后返回。本拍更新缓冲后，必须仍为
     // 下一拍可能返回的完整 beat 预留空间；小于一拍的行尾消费尤其需要此保护。
-    assign read_pause = inflight_cmd_pop ||
+    // read_cmd_last 与寄存后的尾拍同时到达，立即挡住下一条 LOAD 的 R 握手。
+    // data_done 将暂停保持到旧缓冲写完、下一条描述符装入，避免跨命令拼接。
+    assign read_pause = inflight_cmd_pop || read_cmd_last || recv_cmd_data_done ||
         (recv_stream_count_next > (STREAM_BUFFER_BYTES - AXI_STRB));
+
+    always @(posedge clk or negedge rst_n) begin
+        if (!rst_n)
+            recv_cmd_data_done <= 1'b0;
+        else if (inflight_cmd_pop)
+            recv_cmd_data_done <= 1'b0;
+        else if (read_cmd_last)
+            recv_cmd_data_done <= 1'b1;
+    end
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
@@ -617,10 +630,11 @@ module MatrixDmaLoad #(
     assign recv_cmd_error = recv_cmd_fault_seen || read_burst_done_error;
 
     assign recv_cmd_success_done = recv_cmd_active && recv_last_row &&
-                                   recv_row_done && !recv_cmd_error;
+                                   recv_row_done && !recv_cmd_error &&
+                                   (recv_cmd_data_done || read_cmd_last);
 
     assign recv_cmd_fault_done = recv_cmd_active && recv_cmd_error &&
-                                 !issue_cmd_active && !read_busy && !read_beat_valid;
+                                 recv_cmd_data_done && !read_beat_valid;
 
     // =========================================================================
     // 4) 完成 / busy 汇报

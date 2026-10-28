@@ -137,7 +137,8 @@ def chisel_cc_library(
         verilog_file_path = "",
         vopts = [],
         gen_flags = [],
-        extra_outs = []):
+        extra_outs = [],
+        emit_jvm_flags = ["-Xmx4g"]):
     gen_binary_name = name + "_emit_verilog_binary"
     chisel_binary(
         name = gen_binary_name,
@@ -148,11 +149,13 @@ def chisel_cc_library(
         verilog_file_path = module_name + ".sv"
 
     gen_flags = " ".join(gen_flags)
+    # A full core with a larger ROB can exceed the JVM's default heap limit.
+    emit_jvm_args = " ".join(["--jvm_flag=" + flag for flag in emit_jvm_flags])
     native.genrule(
         name = name + "_emit_verilog",
         srcs = [],
         outs = [verilog_file_path] + extra_outs,
-        cmd = "CHISEL_FIRTOOL_PATH=$$(dirname $(execpath @coralnpu_hw//third_party/llvm-firtool:firtool)) ./$(location " + gen_binary_name + ") --target-dir=$(RULEDIR) " + gen_flags,
+        cmd = "CHISEL_FIRTOOL_PATH=$$(dirname $(execpath @coralnpu_hw//third_party/llvm-firtool:firtool)) ./$(location " + gen_binary_name + ") " + emit_jvm_args + " --target-dir=$(RULEDIR) " + gen_flags,
         tools = [
             ":{}".format(gen_binary_name),
             "@coralnpu_hw//third_party/llvm-firtool:firtool",

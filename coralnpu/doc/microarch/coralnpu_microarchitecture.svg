@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1200" viewBox="0 0 1800 1200">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f6f8fb"/>
+      <stop offset="1" stop-color="#e9eef5"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f2f5f9"/>
+    </linearGradient>
+    <linearGradient id="matrix" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#fff8ec"/>
+      <stop offset="1" stop-color="#fce7c2"/>
+    </linearGradient>
+    <linearGradient id="rvv" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#eef8f3"/>
+      <stop offset="1" stop-color="#d7eee2"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#142235" flood-opacity="0.16"/>
+    </filter>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2367a8"/>
+    </marker>
+    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#c87918"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2d8a62"/>
+    </marker>
+    <marker id="arrowGray" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#68788b"/>
+    </marker>
+    <style>
+      .title { font: 700 30px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #162436; }
+      .subtitle { font: 400 15px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #546579; }
+      .section { font: 700 19px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #21344a; }
+      .boxTitle { font: 700 16px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #21344a; }
+      .boxText { font: 400 13px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #34495e; }
+      .small { font: 400 11px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #526477; }
+      .tiny { font: 400 10px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #526477; }
+      .tag { font: 700 12px 'Noto Sans CJK SC','Microsoft YaHei',sans-serif; fill: #ffffff; }
+      .outer { fill: url(#core); stroke: #9aabba; stroke-width: 2; }
+      .block { fill: #ffffff; stroke: #aab8c6; stroke-width: 1.5; }
+      .matrixBlock { fill: url(#matrix); stroke: #d39a4a; stroke-width: 1.5; }
+      .rvvBlock { fill: url(#rvv); stroke: #75ad91; stroke-width: 1.5; }
+      .ioBlock { fill: #eaf1fb; stroke: #6e95c0; stroke-width: 1.5; }
+      .control { fill: none; stroke: #2367a8; stroke-width: 2.5; marker-end: url(#arrowBlue); }
+      .data { fill: none; stroke: #c87918; stroke-width: 3; marker-end: url(#arrowOrange); }
+      .vector { fill: none; stroke: #2d8a62; stroke-width: 2.5; marker-end: url(#arrowGreen); }
+      .return { fill: none; stroke: #68788b; stroke-width: 2; stroke-dasharray: 8 6; marker-end: url(#arrowGray); }
+      .boundary { fill: none; stroke: #8292a5; stroke-width: 2; stroke-dasharray: 8 6; }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1200" fill="url(#bg)"/>
+  <text x="70" y="58" class="title">CoralNPU 微架构与矩阵数据通路</text>
+  <text x="70" y="86" class="subtitle">当前实现视图：顺序发射 RISC-V 前端 + RVV 后端 + 独立 MatrixCore；矩阵命令通过握手、scoreboard 和 FIFO 反压流动</text>
+  <rect x="70" y="105" width="1660" height="1015" rx="18" class="outer" filter="url(#shadow)"/>
+
+  <!-- external interfaces -->
+  <text x="105" y="145" class="section">外部接口</text>
+  <rect x="100" y="170" width="180" height="72" rx="10" class="ioBlock"/>
+  <text x="190" y="198" text-anchor="middle" class="boxTitle">指令存储器</text>
+  <text x="190" y="220" text-anchor="middle" class="boxText">IBus / L1 I$</text>
+  <rect x="100" y="270" width="180" height="72" rx="10" class="ioBlock"/>
+  <text x="190" y="298" text-anchor="middle" class="boxTitle">标量数据存储器</text>
+  <text x="190" y="320" text-anchor="middle" class="boxText">DBus / L1 D$ / LSU</text>
+  <rect x="100" y="370" width="180" height="92" rx="10" class="ioBlock"/>
+  <text x="190" y="398" text-anchor="middle" class="boxTitle">矩阵外部存储器</text>
+  <text x="190" y="421" text-anchor="middle" class="boxText">独立 AXI Master</text>
+  <text x="190" y="442" text-anchor="middle" class="small">512 bit 数据通路</text>
+  <rect x="100" y="490" width="180" height="72" rx="10" class="ioBlock"/>
+  <text x="190" y="518" text-anchor="middle" class="boxTitle">CSR / Debug</text>
+  <text x="190" y="540" text-anchor="middle" class="boxText">状态、配置、RVVI</text>
+
+  <!-- SCore -->
+  <rect x="330" y="150" width="665" height="500" rx="16" class="block" filter="url(#shadow)"/>
+  <rect x="330" y="150" width="665" height="42" rx="16" fill="#dfe8f3"/>
+  <text x="355" y="178" class="section">SCore：顺序发射标量前端</text>
+  <text x="963" y="178" text-anchor="end" class="small">4 instruction lanes</text>
+
+  <rect x="355" y="220" width="135" height="85" rx="9" class="block"/>
+  <text x="422" y="248" text-anchor="middle" class="boxTitle">Fetch</text>
+  <text x="422" y="270" text-anchor="middle" class="boxText">PC / branch</text>
+  <text x="422" y="289" text-anchor="middle" class="boxText">instruction buffer</text>
+
+  <rect x="520" y="220" width="170" height="85" rx="9" class="block"/>
+  <text x="605" y="248" text-anchor="middle" class="boxTitle">Decode / Dispatch</text>
+  <text x="605" y="270" text-anchor="middle" class="boxText">in-order issue</text>
+  <text x="605" y="289" text-anchor="middle" class="boxText">RAW / WAW / backpressure</text>
+
+  <rect x="720" y="220" width="240" height="85" rx="9" class="block"/>
+  <text x="840" y="248" text-anchor="middle" class="boxTitle">Register File + Scoreboard</text>
+  <text x="840" y="270" text-anchor="middle" class="boxText">x / f / vector architectural state</text>
+  <text x="840" y="289" text-anchor="middle" class="boxText">operand read one cycle later</text>
+
+  <rect x="355" y="345" width="180" height="118" rx="9" class="block"/>
+  <text x="445" y="373" text-anchor="middle" class="boxTitle">Scalar execution</text>
+  <text x="445" y="396" text-anchor="middle" class="boxText">ALU × 4</text>
+  <text x="445" y="417" text-anchor="middle" class="boxText">BRU × 4</text>
+  <text x="445" y="438" text-anchor="middle" class="boxText">MLU / DVU</text>
+
+  <rect x="555" y="345" width="180" height="118" rx="9" class="rvvBlock"/>
+  <rect x="555" y="345" width="70" height="23" rx="8" fill="#2d8a62"/>
+  <text x="590" y="361" text-anchor="middle" class="tag">RVV</text>
+  <text x="645" y="380" text-anchor="middle" class="boxTitle">Vector backend</text>
+  <text x="645" y="403" text-anchor="middle" class="boxText">decode / queue</text>
+  <text x="645" y="424" text-anchor="middle" class="boxText">vector ALU / load-store</text>
+  <text x="645" y="445" text-anchor="middle" class="small">VLEN 128（当前配置）</text>
+
+  <rect x="755" y="345" width="205" height="118" rx="9" class="block"/>
+  <text x="857" y="373" text-anchor="middle" class="boxTitle">Retirement</text>
+  <text x="857" y="396" text-anchor="middle" class="boxText">ROB 64 entries</text>
+  <text x="857" y="417" text-anchor="middle" class="boxText">in-order completion</text>
+  <text x="857" y="438" text-anchor="middle" class="boxText">RVVI trace 16 entries</text>
+
+  <rect x="355" y="505" width="605" height="100" rx="9" fill="#f5f7fa" stroke="#b8c3cf"/>
+  <text x="375" y="532" class="boxTitle">矩阵指令交接</text>
+  <text x="375" y="555" class="boxText">CONFIG：msettilem / n / k      MATMUL：mmacc      ZERO：mzero*</text>
+  <text x="375" y="578" class="boxText">MEM：matrix load/store      命令 PC 进入 MatrixCore，完成后按序退休</text>
+
+  <!-- MatrixCore -->
+  <rect x="1030" y="150" width="650" height="790" rx="16" fill="url(#matrix)" stroke="#d39a4a" stroke-width="2" filter="url(#shadow)"/>
+  <rect x="1030" y="150" width="650" height="42" rx="16" fill="#f5d7a6"/>
+  <text x="1055" y="178" class="section">MatrixCore：矩阵命令与计算数据通路</text>
+  <text x="1645" y="178" text-anchor="end" class="small">单个共享 PE 阵列</text>
+
+  <rect x="1055" y="220" width="190" height="105" rx="9" class="matrixBlock"/>
+  <text x="1150" y="247" text-anchor="middle" class="boxTitle">命令入口</text>
+  <text x="1150" y="270" text-anchor="middle" class="boxText">CMD / ZERO / MEM</text>
+  <text x="1150" y="291" text-anchor="middle" class="boxText">CSR dimensions snapshot</text>
+  <text x="1150" y="311" text-anchor="middle" class="small">ready / valid 反压</text>
+
+  <rect x="1270" y="220" width="180" height="105" rx="9" class="matrixBlock"/>
+  <text x="1360" y="247" text-anchor="middle" class="boxTitle">Matrix Scoreboard</text>
+  <text x="1360" y="270" text-anchor="middle" class="boxText">8 entries</text>
+  <text x="1360" y="291" text-anchor="middle" class="boxText">AB / scale / C hazards</text>
+  <text x="1360" y="311" text-anchor="middle" class="small">允许安全重叠</text>
+
+  <rect x="1475" y="220" width="180" height="105" rx="9" class="matrixBlock"/>
+  <text x="1565" y="247" text-anchor="middle" class="boxTitle">PC / Descriptor FIFO</text>
+  <text x="1565" y="270" text-anchor="middle" class="boxText">命令顺序保持</text>
+  <text x="1565" y="291" text-anchor="middle" class="boxText">weight + act/psum</text>
+  <text x="1565" y="311" text-anchor="middle" class="small">满时拉低 ready</text>
+
+  <rect x="1055" y="355" width="600" height="125" rx="9" class="matrixBlock"/>
+  <text x="1075" y="383" class="boxTitle">matmul_tiling / pe_ctrl</text>
+  <text x="1075" y="408" class="boxText">一条矩阵命令拆成 weight block 与 act/psum block，按 M/N/K tile 推进</text>
+  <text x="1075" y="430" class="boxText">状态：LoadWeight → StreamPreloadWeight → Stream</text>
+  <text x="1075" y="452" class="boxText">FIFO 满、DMA busy、C bank 冲突时，通过 valid/ready 和局部 bubble 停顿</text>
+
+  <rect x="1055" y="510" width="600" height="145" rx="9" class="matrixBlock"/>
+  <text x="1075" y="538" class="boxTitle">矩阵寄存器文件</text>
+  <rect x="1075" y="558" width="125" height="68" rx="7" fill="#fffdf8" stroke="#d39a4a"/>
+  <text x="1137" y="582" text-anchor="middle" class="boxTitle">AB Reg × 4</text>
+  <text x="1137" y="603" text-anchor="middle" class="small">A/B 对称物理槽</text>
+  <rect x="1220" y="558" width="125" height="68" rx="7" fill="#fffdf8" stroke="#d39a4a"/>
+  <text x="1282" y="582" text-anchor="middle" class="boxTitle">Scale Reg</text>
+  <text x="1282" y="603" text-anchor="middle" class="small">A/B scale</text>
+  <rect x="1365" y="558" width="125" height="68" rx="7" fill="#fffdf8" stroke="#d39a4a"/>
+  <text x="1427" y="582" text-anchor="middle" class="boxTitle">C Reg × 4</text>
+  <text x="1427" y="603" text-anchor="middle" class="small">partial sums</text>
+  <rect x="1510" y="558" width="125" height="68" rx="7" fill="#fffdf8" stroke="#d39a4a"/>
+  <text x="1572" y="582" text-anchor="middle" class="boxTitle">DMA engine</text>
+  <text x="1572" y="603" text-anchor="middle" class="small">load / store</text>
+
+  <rect x="1055" y="685" width="600" height="215" rx="9" fill="#fffdf8" stroke="#d39a4a"/>
+  <text x="1075" y="713" class="boxTitle">计算流水线</text>
+  <rect x="1075" y="738" width="155" height="112" rx="7" fill="#f8e1bb" stroke="#cb913f"/>
+  <text x="1152" y="766" text-anchor="middle" class="boxTitle">32 × 32 PE array</text>
+  <text x="1152" y="790" text-anchor="middle" class="boxText">weight-stationary</text>
+  <text x="1152" y="812" text-anchor="middle" class="boxText">A 行 / B 行流入</text>
+  <text x="1152" y="834" text-anchor="middle" class="small">psum 向下传播</text>
+  <rect x="1250" y="738" width="155" height="112" rx="7" fill="#f8e1bb" stroke="#cb913f"/>
+  <text x="1327" y="766" text-anchor="middle" class="boxTitle">MX dot product</text>
+  <text x="1327" y="790" text-anchor="middle" class="boxText">INT8 点积</text>
+  <text x="1327" y="812" text-anchor="middle" class="boxText">scale 对齐</text>
+  <text x="1327" y="834" text-anchor="middle" class="small">每 tile K ≤ 64</text>
+  <rect x="1425" y="738" width="205" height="112" rx="7" fill="#f8e1bb" stroke="#cb913f"/>
+  <text x="1527" y="766" text-anchor="middle" class="boxTitle">accumulaters</text>
+  <text x="1527" y="790" text-anchor="middle" class="boxText">4-stage custom-C pipeline</text>
+  <text x="1527" y="812" text-anchor="middle" class="boxText">normalize / round / compress</text>
+  <text x="1527" y="834" text-anchor="middle" class="small">写回 C Reg</text>
+
+  <!-- bottom storage/dataflow -->
+  <rect x="330" y="700" width="665" height="240" rx="16" class="block" filter="url(#shadow)"/>
+  <text x="355" y="735" class="section">存储与系统交互</text>
+  <rect x="355" y="765" width="185" height="105" rx="9" class="ioBlock"/>
+  <text x="447" y="793" text-anchor="middle" class="boxTitle">L1 I-cache</text>
+  <text x="447" y="816" text-anchor="middle" class="boxText">取指路径</text>
+  <text x="447" y="838" text-anchor="middle" class="small">8 KB / 4-way</text>
+  <rect x="565" y="765" width="185" height="105" rx="9" class="ioBlock"/>
+  <text x="657" y="793" text-anchor="middle" class="boxTitle">L1 D-cache / LSU</text>
+  <text x="657" y="816" text-anchor="middle" class="boxText">标量与 RVV 访存</text>
+  <text x="657" y="838" text-anchor="middle" class="small">独立于 Matrix AXI</text>
+  <rect x="775" y="765" width="185" height="105" rx="9" class="ioBlock"/>
+  <text x="867" y="793" text-anchor="middle" class="boxTitle">TCM / 外部总线</text>
+  <text x="867" y="816" text-anchor="middle" class="boxText">DBus / EBus / AXI</text>
+  <text x="867" y="838" text-anchor="middle" class="small">CPU 数据侧</text>
+  <text x="355" y="910" class="small">矩阵 DMA 使用独立 512-bit AXI master；标量/RVV 数据通路使用 CPU 数据总线。</text>
+
+  <!-- connectors -->
+  <path d="M280 206 H355" class="control"/>
+  <path d="M280 306 H330 V820 H355" class="control"/>
+  <path d="M280 526 H330 V440 H355" class="control"/>
+  <path d="M490 262 H520" class="control"/>
+  <path d="M690 262 H720" class="control"/>
+  <path d="M605 305 V345" class="control"/>
+  <path d="M780 305 V345" class="control"/>
+  <path d="M735 404 H755" class="vector"/>
+  <path d="M960 404 H1015 V272 H1055" class="control"/>
+  <path d="M960 555 H1015 V272 H1055" class="control"/>
+  <path d="M1245 272 H1270" class="control"/>
+  <path d="M1450 272 H1475" class="control"/>
+  <path d="M1150 325 V355" class="control"/>
+  <path d="M1360 325 V355" class="control"/>
+  <path d="M1565 325 V355" class="control"/>
+  <path d="M1355 480 V510" class="data"/>
+  <path d="M1150 655 V685" class="data"/>
+  <path d="M1280 655 V685" class="data"/>
+  <path d="M1425 655 V685" class="data"/>
+  <path d="M1230 794 H1250" class="data"/>
+  <path d="M1405 794 H1425" class="data"/>
+  <path d="M1527 850 V875 H1427 V626" class="return"/>
+  <path d="M1635 592 H1695 V415 H1680" class="data"/>
+  <path d="M1510 592 H1460 V462 H1655" class="data"/>
+  <path d="M1055 900 H995 V820 H960" class="data"/>
+  <path d="M1055 900 H995 V420 H960" class="return"/>
+  <path d="M100 406 H70 V1050 H1695 V940" class="data"/>
+  <path d="M280 406 H310 V580 H355" class="data"/>
+
+  <!-- labels / legend -->
+  <rect x="1080" y="975" width="575" height="115" rx="10" fill="#fff" stroke="#c9a36b"/>
+  <text x="1100" y="1002" class="boxTitle">当前架构要点</text>
+  <text x="1100" y="1024" class="small">• 顺序发射，不代表 MatrixCore 只能一条命令在途；ready/scoreboard/FIFO 决定实际接收。</text>
+  <text x="1100" y="1045" class="small">• 4 个 AB Reg 和 4 个 C Reg 是物理资源，不是 4 个独立计算阵列。</text>
+  <text x="1100" y="1066" class="small">• 单条矩阵命令 M/N/K ≤ 64；大 GEMM 由软件 tile、寄存器复用和 C 累加完成。</text>
+
+  <rect x="330" y="970" width="665" height="120" rx="10" fill="#f5f7fa" stroke="#aab8c6"/>
+  <text x="355" y="998" class="boxTitle">图例</text>
+  <path d="M355 1025 H425" class="control"/><text x="440" y="1030" class="small">控制 / 命令 / ready-valid</text>
+  <path d="M625 1025 H695" class="data"/><text x="710" y="1030" class="small">矩阵数据 / AXI / psum</text>
+  <path d="M355 1060 H425" class="vector"/><text x="440" y="1065" class="small">RVV 数据路径</text>
+  <path d="M625 1060 H695" class="return"/><text x="710" y="1065" class="small">完成 / 写回 / 反馈</text>
+
+  <text x="70" y="1165" class="tiny">CoralNPU architecture view · generated from current Core/SCore/MatrixCore and matrix RTL documentation · 2026-10</text>
+</svg>

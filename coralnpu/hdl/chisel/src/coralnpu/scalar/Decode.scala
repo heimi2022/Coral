@@ -271,6 +271,7 @@ class Dispatch(p: Parameters) extends Module {
         val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd))
         val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
         val matrixDone = Option.when(p.enableMatrix)(Flipped(Valid(UInt(32.W))))
+        val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -294,7 +295,7 @@ class Dispatch(p: Parameters) extends Module {
 
         val fbusPortAddr = Option.when(p.enableFloat)(Output(UInt(5.W)))
 
-        val retirement_buffer_nSpace = Input(UInt(5.W))
+        val retirement_buffer_nSpace = Input(UInt(log2Ceil(p.retirementBufferSize + 1).W))
         val retirement_buffer_empty = Input(Bool())
         val retirement_buffer_trap_pending = Input(Bool())
         val single_step = Input(Bool())
@@ -313,8 +314,12 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
     if (p.enableMatrix) { io.matrixCfg.get := MakeInvalid(new MatrixCfgCmd) }
 
+    // The CSR write occurs one cycle after configuration dispatch. Consumers
+    // must wait until the new shape is visible at MatrixCore's command boundary.
+    val matrixCfgPending = io.matrixCfg.map(cfg => RegNext(cfg.valid, false.B)).getOrElse(false.B)
+
     val matrixScoreboard = if (p.enableMatrix) {
-        val matrixscoreboard = Module(new MatrixScoreboard(p.retirementBufferSize))
+        val matrixscoreboard = Module(new MatrixScoreboard(p.matrixScoreboardDepth))
         val matrixQuery = decodedInsts(0).matrix.get.bits
         val matrixQueryValid = decodedInsts(0).isMatrixMul() ||
             decodedInsts(0).isMatrixLoadStore() || decodedInsts(0).isMatrixZero()
@@ -527,6 +532,14 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         }
     }
 
+    val matrixConfigInterlock = (0 until p.instructionLanes).map { i =>
+        val configCanIssue = !decodedInsts(i).isMatrixCfg() ||
+            !io.matrixMemPending.getOrElse(false.B)
+        val configVisible = !matrixCfgPending ||
+            (!decodedInsts(i).isMatrixInstruction() && !decodedInsts(i).isCsr())
+        configCanIssue && configVisible
+    }
+
     val canDispatch = (0 until p.instructionLanes).map(i =>
         !io.halted &&          // Don't dispatch if halted
         !io.interlock &&       // Don't dispatch when interlocked
@@ -545,10 +558,11 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         lsuInterlock(i) && // Ensure lsu instructions can be dispatched into queue
         rvvInterlock(i) && // Ensure rvv instructions can be dispatched into queue
         matrixScoreboardInterlock(i) && // Wait for conflicting matrix-register users
+        matrixConfigInterlock(i) && // Preserve shape across CPU staging and CSR writes
         !undefInterlock(i) &&     // Ensure undef is only dispatched from first slot
         (i.U < io.retirement_buffer_nSpace) && // Retirement buffer needs space for our slot
         !io.retirement_buffer_trap_pending && // Stall dispatch when a trap is pending
-        (!decodedInsts(i).isCsr() && !decodedInsts(i).isMatrixCfg() || io.retirement_buffer_empty) && // CSRs must wait for ROB to be empty
+        (!decodedInsts(i).isCsr() || io.retirement_buffer_empty) && // Ordinary CSRs still drain the ROB
         singleStepInterlock(i) &&
         mpauseInterlock(i)
     )

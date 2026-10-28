@@ -6,7 +6,7 @@ import org.scalatest.freespec.AnyFreeSpec
 import chisel3.util.Valid
 
 class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
-  class Tester extends Module {
+  class Tester(depth: Int = 4) extends Module {
     val io = IO(new Bundle {
       val inst = Input(UInt(32.W))
       val pc = Input(UInt(32.W))
@@ -15,7 +15,7 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       val canIssue = Output(Bool())
     })
 
-    val scoreboard = Module(new MatrixScoreboard(4))
+    val scoreboard = Module(new MatrixScoreboard(depth))
     scoreboard.io.candidateValid := true.B
     scoreboard.io.candidate := MatrixDecode(io.inst)
     scoreboard.io.issued.valid := io.issue
@@ -30,6 +30,51 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
 
   private def matmul(reg: Int): BigInt =
     0x1800002bL | (2L << 20) | (2L << 10) | (reg.toLong << 7)
+
+  "hold the configured number of commands and replace a completed command while full" in {
+    val depth = new coralnpu.Parameters().matrixScoreboardDepth
+    simulate(new Tester(depth = depth)) { dut =>
+      dut.io.done.valid.poke(false.B)
+      dut.io.done.bits.poke(0.U)
+      dut.io.inst.poke(matmul(0).U)
+      dut.io.issue.poke(true.B)
+      for (i <- 0 until depth) {
+        dut.io.pc.poke((0x100 + 4 * i).U)
+        dut.io.canIssue.expect(true.B)
+        dut.clock.step()
+      }
+      dut.io.issue.poke(false.B)
+      dut.io.canIssue.expect(false.B)
+
+      // A completion frees one slot for a new issue on the same edge.
+      dut.io.done.valid.poke(true.B)
+      dut.io.done.bits.poke(0x100.U)
+      dut.io.pc.poke(0x200.U)
+      dut.io.issue.poke(true.B)
+      dut.io.canIssue.expect(true.B)
+      dut.clock.step()
+      dut.io.issue.poke(false.B)
+      dut.io.done.valid.poke(false.B)
+      dut.io.canIssue.expect(false.B)
+
+      dut.io.inst.poke(storeC(0).U)
+      for (i <- 1 until depth) {
+        dut.io.done.valid.poke(true.B)
+        dut.io.done.bits.poke((0x100 + 4 * i).U)
+        dut.io.canIssue.expect(false.B)
+        dut.clock.step()
+      }
+      // The replacement must still protect C until its own completion.
+      dut.io.done.valid.poke(false.B)
+      dut.io.canIssue.expect(false.B)
+      dut.io.done.valid.poke(true.B)
+      dut.io.done.bits.poke(0x200.U)
+      dut.io.canIssue.expect(true.B)
+      dut.clock.step()
+      dut.io.done.valid.poke(false.B)
+      dut.io.canIssue.expect(true.B)
+    }
+  }
 
   "serialize STORE_C and MATMUL to the same C register in program order" in {
     simulate(new Tester) { dut =>

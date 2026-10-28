@@ -29,6 +29,7 @@ PE 控制模块
 3. n > 32、多 tile 串行等更完整的尾块处理
 4. C reg 标志位为0时，PE阵列结果可以直接bypass到C reg 少几次 累加器的翻转
 
+！！！2026-10-16 两条 使用同一 C 的 matmul 命令之间，由于指令或是某些原因，中间插了一个气泡，也有可能导致C 的读写冲突，这里需要进行逻辑上的修改
 
 只在脉动阵列最底部做了 MX 量化逻辑，由于目前MX量化分组为32个元素一组，脉动阵列大小刚好为32*32，因此这是正确的。
 后续若分组数改变，或者脉动阵列一次能容纳的K变大了(量化位宽导致等),这里逻辑需要修改
@@ -192,6 +193,7 @@ module pe_ctrl #(
     logic                                       weight_pop;
     logic                                       stream_pop;
     logic                                       start_stream_preload;
+    logic                                       begin_weight_prefetch;
     logic                                       output_meta_push;
     logic                                       output_meta_pop;
     logic [OUTPUT_META_WIDTH-1:0]               output_meta_wr_data;
@@ -404,9 +406,6 @@ module pe_ctrl #(
 
     // `StreamPreloadWeight` 表示当前块计算和下一块装权同时进行。
     // 开始计算当前 block，同时预装载下一个 weight block
-    assign start_stream_preload = (((state == LoadWeight) && weight_done_now && !tiling_weight_empty) ||
-                                  ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
-                                   !tiling_weight_empty));
 
     assign weight_bank_available = weight_banks_busy_q < 2;
     assign weight_load_start = weight_load_active && !weight_load_ongoing_q;
@@ -439,6 +438,10 @@ module pe_ctrl #(
         end else if (start_stream_preload || enter_load_weight) begin
             stream_overlap_done <= 1'b0;
             weight_overlap_done <= 1'b0;
+        end else if (begin_weight_prefetch) begin
+            // Keep the current stream, including a last row issued this cycle.
+            stream_overlap_done <= stream_last;
+            weight_overlap_done <= 1'b0;
         end else begin
             if (stream_last)
                 stream_overlap_done <= 1'b1;
@@ -454,11 +457,16 @@ module pe_ctrl #(
                                  !weight_overlap_done &&
                                  (weight_load_ongoing_q || weight_bank_available));
 
-    assign enter_load_weight = ((state == Idle) && !tiling_weight_empty) ||
-                               ((state == Stream) && stream_last && !tiling_weight_empty);
+    assign enter_load_weight = (state == Idle) && !tiling_weight_empty;
 
-    assign weight_pop = enter_load_weight || start_stream_preload;
+    // Capture only the next weight descriptor; the current activation stays live.
+    assign begin_weight_prefetch = (state == Stream) && !tiling_weight_empty;
+    assign weight_pop = enter_load_weight || start_stream_preload || begin_weight_prefetch;
 
+    assign start_stream_preload = (((state == LoadWeight) && weight_done_now && !tiling_weight_empty) ||
+                                  ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
+                                   !tiling_weight_empty));
+                                   
     assign enter_stream = (((state == LoadWeight) && weight_done_now && tiling_weight_empty) ||
                           ((state == StreamPreloadWeight) && stream_done_now && weight_done_now &&
                            tiling_weight_empty));
@@ -534,6 +542,7 @@ module pe_ctrl #(
         end
     end
 
+    assign stream_active = (state == Stream) || ((state == StreamPreloadWeight) && !stream_overlap_done);
     assign stream_count_p1      = stream_count + 1'd1;
     assign stream_issue_active  = stream_active && !stream_boundary_bubble_q &&
                                   (!stream_start_pending_q || next_stream_ready);
@@ -551,10 +560,11 @@ module pe_ctrl #(
             stream_start_age_q <= stream_start_age_q + 1'b1;
     end
 
+    // 新激活分块已经准备好，但首行还需要等待启动间隔
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n)
             stream_start_pending_q <= 1'b0;
-        else if (stream_pop && !next_stream_ready)
+        else if (stream_pop && (!next_stream_ready || (stream_issue_active && (stream_count == '0))))
             stream_start_pending_q <= 1'b1;
         else if (stream_issue_active)
             stream_start_pending_q <= 1'b0;
@@ -580,8 +590,6 @@ module pe_ctrl #(
                 stream_count <= stream_count_p1;
         end
     end
-    
-    assign stream_active = (state == Stream) || ((state == StreamPreloadWeight) && !stream_overlap_done);
 
     // rs1 相关控制单独处理。
     always @* begin
@@ -720,7 +728,9 @@ module pe_ctrl #(
             rd_read_sel <= output_rd;
             // 每个 N 区域的 K0 使用零初值；K1 必须读取 K0 的写回结果。
             // 整块保持，确保首次遍历的所有行都旁路为零。
-            rd_zero_block_q <= !c_reg_zero_n_i[output_rd[1:0]] && !output_kblock;
+            // Forward a same-cycle release before the external zero flag updates.
+            rd_zero_block_q <= !output_kblock && !(c_reg_zero_n_i[output_rd[1:0]] || (c_reg_zero_release_valid_o &&
+                               c_reg_zero_release_mask_o[output_rd[1:0]]));
         end
     end
 
@@ -974,14 +984,11 @@ module pe_ctrl #(
                 end
             end
 
-            // Stream 状态下如果来了右矩阵应该也支持预装载右矩阵,现在该逻辑未实现
             Stream: begin
-                if (stream_last) begin
-                    if (enter_load_weight)
-                        next_state = LoadWeight;
-                    else
-                        next_state = Idle;
-                end
+                if (begin_weight_prefetch)
+                    next_state = StreamPreloadWeight;
+                else if (stream_last)
+                    next_state = Idle;
             end
             default: begin
                 next_state = Idle;

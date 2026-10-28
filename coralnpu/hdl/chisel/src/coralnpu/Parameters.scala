@@ -107,7 +107,10 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     val floatRegfileBaseAddr = 32
     val rvvRegfileBaseAddr = 64
     val rvvRegCount = 32
-    val retirementBufferSize = 8
+    val retirementBufferSize = 64
+    // Keep RVVI fanout independent from the architectural ROB size.
+    val rvviTraceDepth = 16
+    val matrixScoreboardDepth = 8
     def retirementBufferIdxWidth: Int = {
         val scalarRegCount = 32
         val floatRegCount = (if (enableFloat) { 32 } else { 0 })

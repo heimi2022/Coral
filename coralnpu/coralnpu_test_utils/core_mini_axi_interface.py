@@ -79,6 +79,16 @@ class DebugCsrAddr:
   STATUS     = 0x814
 
 
+def retirement_lane_indices(dut):
+  """Discover the elaborated ROB retirement ports once per monitor."""
+  count = 0
+  while hasattr(dut, f"io_debug_rb_inst_{count}_valid"):
+    count += 1
+  if not count:
+    raise ValueError("No ROB retirement ports found")
+  return range(count)
+
+
 def format_line_from_word(word, addr):
   shift = addr % 16
   line = np.zeros([4], dtype=np.uint32)
