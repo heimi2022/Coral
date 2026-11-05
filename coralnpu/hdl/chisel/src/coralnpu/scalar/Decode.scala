@@ -272,6 +272,7 @@ class Dispatch(p: Parameters) extends Module {
         val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
         val matrixDone = Option.when(p.enableMatrix)(Flipped(Valid(UInt(32.W))))
         val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
+        val matrixIssueQueueReady = Option.when(p.enableMatrix)(Input(Bool()))
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -534,7 +535,8 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
     val matrixConfigInterlock = (0 until p.instructionLanes).map { i =>
         val configCanIssue = !decodedInsts(i).isMatrixCfg() ||
-            !io.matrixMemPending.getOrElse(false.B)
+            (!io.matrixMemPending.getOrElse(false.B) &&
+             io.matrixIssueQueueReady.getOrElse(true.B))
         val configVisible = !matrixCfgPending ||
             (!decodedInsts(i).isMatrixInstruction() && !decodedInsts(i).isCsr())
         configCanIssue && configVisible
@@ -752,7 +754,9 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // Matrix metadata is formed once by DecodeInstruction.
         if (p.enableMatrix && i == 0) {
             io.matrixCfg.get.valid := tryDispatch && d.isMatrixCfg()
+            io.matrixCfg.get.bits.pc := io.inst(i).bits.addr
             io.matrixCfg.get.bits.op := d.matrix.get.bits.cfgOp
+            io.matrixCfg.get.bits.value := 0.U
 
             io.matrixMul.get.valid := tryDispatch && d.isMatrixMul()
             io.matrixMul.get.bits.op := d.matrix.get.bits.matmulOp

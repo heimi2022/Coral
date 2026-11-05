@@ -111,6 +111,9 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     // Keep RVVI fanout independent from the architectural ROB size.
     val rvviTraceDepth = 16
     val matrixScoreboardDepth = 8
+    // Matrix commands can wait here independently of the MatrixCore execution
+    // latency. Scoreboard depth remains a separate architectural choice.
+    val matrixIssueQueueDepth = 8
     def retirementBufferIdxWidth: Int = {
         val scalarRegCount = 32
         val floatRegCount = (if (enableFloat) { 32 } else { 0 })

@@ -22,7 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.RvvCoreIO
 import _root_.circt.stage.ChiselStage
-import coralnpu.matrix.{MatrixCoreIO, MatrixMemExecReq, MatrixMemOp}
+import coralnpu.matrix.{MatrixCoreIO, MatrixIssueQueue, MatrixMemExecReq, MatrixMemOp}
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -60,6 +60,9 @@ class SCore(p: Parameters) extends Module {
 
     val csr = Csr(p)
     val dispatch = Module(new DispatchV2(p))
+    val matrixIssueQueue = Option.when(p.enableMatrix) {
+        Module(new MatrixIssueQueue(p, p.matrixIssueQueueDepth))
+    }
 
     val lsu = Lsu(p)
     val fault_manager = Module(new FaultManager(p))
@@ -93,14 +96,14 @@ class SCore(p: Parameters) extends Module {
     if (p.enableMatrix){
         dispatch.io.matrixDone.get.valid := io.matrixcore.get.status.done
         dispatch.io.matrixDone.get.bits := io.matrixcore.get.status.donePc
-        rob_io.matrixComplete.get.valid := io.matrixcore.get.status.done
-        rob_io.matrixComplete.get.bits := io.matrixcore.get.status.donePc
+        rob_io.matrixComplete.get(0).valid := io.matrixcore.get.status.done
+        rob_io.matrixComplete.get(0).bits := io.matrixcore.get.status.donePc
         
-        // 所有矩阵执行命令均等待 MatrixCore 返回完成 PC 后退休。
+        // 矩阵命令和配置命令均等待各自的完成事件后退休。
         rob_io.matrixInstr.get := VecInit(Seq.tabulate(p.instructionLanes) { i =>
             if (i == 0) {
                 dispatch.io.matrixMul.get.fire || dispatch.io.matrixMem.get.fire ||
-                dispatch.io.matrixZero.get.fire
+                dispatch.io.matrixZero.get.fire || dispatch.io.matrixCfg.get.valid
             } else false.B
         })
     }
@@ -239,30 +242,55 @@ class SCore(p: Parameters) extends Module {
 
     
     if (p.enableMatrix) {
-        // matrix from dispatch to csr 
-        csr.io.matrixCfg.get.valid := dispatch.io.matrixCfg.get.valid
-        csr.io.matrixCfg.get.bits := dispatch.io.matrixCfg.get.bits
-
         // from matrixcore to csr
         io.matrixcore.get.csr <> csr.io.matrix.get
 
-        // matrix instruction dispatch
-        io.matrixcore.get.cmd <> dispatch.io.matrixMul.get
-
-        io.matrixcore.get.zero <> dispatch.io.matrixZero.get
-
-        // The scalar register file returns operands one cycle after dispatch.
-        // Reserve this entry at issue, then capture operands before presenting
-        // the complete command to MatrixCore. Later scalar reads cannot alter it.
+        // Scalar operands return one cycle after dispatch. Capture them before
+        // inserting the complete memory/config command into the ordered queue.
         val matrixMemOperandsPending = RegNext(dispatch.io.matrixMem.get.fire, false.B)
         val matrixMemValid = RegInit(false.B)
         val matrixMemCommand = Reg(new MatrixMemExecReq(p))
-        dispatch.io.matrixMem.get.ready := !matrixMemOperandsPending && !matrixMemValid
-        // MatrixCore snapshots dimensions at mem.fire, after CPU operand staging.
+        val matrixCfgOperandsPending = RegNext(dispatch.io.matrixCfg.get.valid, false.B)
+        val matrixCfgCommand = Reg(new MatrixCfgCmd)
+        val matrixCfgApplyPending = RegNext(matrixIssueQueue.get.io.configDeq.fire, false.B)
+        val matrixCfgAppliedPc = RegEnable(
+            matrixIssueQueue.get.io.configDeq.bits.pc,
+            matrixIssueQueue.get.io.configDeq.fire
+        )
+        val matrixMemStageBusy = matrixMemOperandsPending || matrixMemValid
+        val matrixCfgStageBusy = matrixCfgOperandsPending
+        val matrixDispatchReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
+            matrixIssueQueue.get.io.enqReady
+
+        // Reserve queue space for a config at dispatch; a matrix command cannot
+        // enter during the cycle in which its scalar operand is being captured.
+        dispatch.io.matrixIssueQueueReady.get := matrixDispatchReady
+
+        // Only one matrix command is accepted into the shared FIFO per cycle.
+        dispatch.io.matrixMul.get.ready := matrixDispatchReady
+        dispatch.io.matrixZero.get.ready := matrixDispatchReady
+        dispatch.io.matrixMem.get.ready := matrixDispatchReady
         dispatch.io.matrixMemPending.get := matrixMemOperandsPending || matrixMemValid
+
+        matrixIssueQueue.get.io.matmulEnq.valid := dispatch.io.matrixMul.get.valid &&
+            !matrixMemStageBusy
+        matrixIssueQueue.get.io.matmulEnq.bits := dispatch.io.matrixMul.get.bits
+        matrixIssueQueue.get.io.zeroEnq.valid := dispatch.io.matrixZero.get.valid &&
+            !matrixMemStageBusy
+        matrixIssueQueue.get.io.zeroEnq.bits := dispatch.io.matrixZero.get.bits
+        matrixIssueQueue.get.io.memEnq.valid := matrixMemValid
+        matrixIssueQueue.get.io.memEnq.bits := matrixMemCommand
+        matrixIssueQueue.get.io.configEnq.valid := matrixCfgOperandsPending
+        matrixIssueQueue.get.io.configEnq.bits.pc := matrixCfgCommand.pc
+        matrixIssueQueue.get.io.configEnq.bits.op := matrixCfgCommand.op
+        matrixIssueQueue.get.io.configEnq.bits.value := regfile.io.readData(0).data
 
         when(dispatch.io.matrixMem.get.fire) {
             matrixMemCommand.req := dispatch.io.matrixMem.get.bits
+        }
+        when(dispatch.io.matrixCfg.get.valid) {
+            matrixCfgCommand.pc := dispatch.io.matrixCfg.get.bits.pc
+            matrixCfgCommand.op := dispatch.io.matrixCfg.get.bits.op
         }
         val matrixMemIsWhole = matrixMemCommand.req.op.isOneOf(
             MatrixMemOp.LD_WHOLE,
@@ -274,11 +302,32 @@ class SCore(p: Parameters) extends Module {
         }
         when(matrixMemOperandsPending) {
             matrixMemValid := true.B
-        }.elsewhen(io.matrixcore.get.mem.fire) {
+        }.elsewhen(matrixMemValid && matrixIssueQueue.get.io.enqReady) {
             matrixMemValid := false.B
         }
-        io.matrixcore.get.mem.valid := matrixMemValid
-        io.matrixcore.get.mem.bits := matrixMemCommand
+
+        // A config entry updates the CSR at the queue head. CSR registers take
+        // one cycle to update, so hold later MatrixCore commands until visible.
+        csr.io.matrixCfg.get.valid := matrixIssueQueue.get.io.configDeq.valid &&
+            matrixIssueQueue.get.io.configDeq.ready
+        csr.io.matrixCfg.get.bits := matrixIssueQueue.get.io.configDeq.bits
+        matrixIssueQueue.get.io.configDeq.ready := !matrixCfgApplyPending
+        rob_io.matrixComplete.get(1).valid := matrixCfgApplyPending
+        rob_io.matrixComplete.get(1).bits := matrixCfgAppliedPc
+        val matrixCfgBarrier = matrixCfgApplyPending
+
+        // The FIFO head is issued only when the corresponding MatrixCore port
+        // is ready. This keeps commands ordered without blocking Decode on the
+        // execution latency of an older command.
+        io.matrixcore.get.cmd.valid := matrixIssueQueue.get.io.matmulDeq.valid && !matrixCfgBarrier
+        io.matrixcore.get.cmd.bits := matrixIssueQueue.get.io.matmulDeq.bits
+        matrixIssueQueue.get.io.matmulDeq.ready := io.matrixcore.get.cmd.ready && !matrixCfgBarrier
+        io.matrixcore.get.zero.valid := matrixIssueQueue.get.io.zeroDeq.valid && !matrixCfgBarrier
+        io.matrixcore.get.zero.bits := matrixIssueQueue.get.io.zeroDeq.bits
+        matrixIssueQueue.get.io.zeroDeq.ready := io.matrixcore.get.zero.ready && !matrixCfgBarrier
+        io.matrixcore.get.mem.valid := matrixIssueQueue.get.io.memDeq.valid && !matrixCfgBarrier
+        io.matrixcore.get.mem.bits := matrixIssueQueue.get.io.memDeq.bits
+        matrixIssueQueue.get.io.memDeq.ready := io.matrixcore.get.mem.ready && !matrixCfgBarrier
 
     }
 
@@ -286,7 +335,7 @@ class SCore(p: Parameters) extends Module {
     dmRs1.valid := true.B
     dmRs1.data := io.dm.csr_rs1
     val dispatchCsrLikeValid =
-        dispatch.io.csr.valid || dispatch.io.matrixCfg.map(_.valid).getOrElse(false.B)
+        dispatch.io.csr.valid
 
     csr.io.rs1 := Mux(
         RegNext(dispatchCsrLikeValid, false.B),

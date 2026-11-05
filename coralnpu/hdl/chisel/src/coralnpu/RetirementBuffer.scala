@@ -39,7 +39,7 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
     val debug = Output(new RetirementBufferDebugIO(p))
     // matrix 
     val matrixInstr = Option.when(p.enableMatrix)(Input(Vec(p.instructionLanes, Bool())))
-    val matrixComplete = Option.when(p.enableMatrix)(Input(Valid(UInt(32.W))))
+    val matrixComplete = Option.when(p.enableMatrix)(Input(Vec(2, Valid(UInt(32.W)))))
 }
 
 /**
@@ -279,13 +279,18 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     // Compute update based on register writeback.
     // Note: The shift when committing instructions will be handled in a later block.
     val resultUpdate = Wire(Vec(bufferSize, Valid(new InstructionUpdate)))
-    val matrixDoneMatches = VecInit((0 until bufferSize).map { i =>
-        val entry = instBuffer.io.dataOut(i)
-        io.matrixComplete.map(x =>
-            x.valid && (i.U < instBuffer.io.nEnqueued) && entry.isMatrix &&
-            !resultBuffer(i).valid && (x.bits === entry.addr)
-        ).getOrElse(false.B)
-    })
+    // Select the oldest unfinished match independently for each completion port.
+    // Merging before priority selection would lose simultaneous completions.
+    val matrixDoneEntries = io.matrixComplete.map { completions =>
+        completions.map { completion =>
+            val matches = VecInit((0 until bufferSize).map { i =>
+                val entry = instBuffer.io.dataOut(i)
+                completion.valid && (i.U < instBuffer.io.nEnqueued) && entry.isMatrix &&
+                    !resultBuffer(i).valid && (completion.bits === entry.addr)
+            })
+            PriorityEncoderOH(matches.asUInt)
+        }.reduce(_ | _)
+    }.getOrElse(0.U(bufferSize.W))
 
     for (i <- 0 until bufferSize) {
         val bufferEntry = instBuffer.io.dataOut(i)
@@ -303,8 +308,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         )).getOrElse(Seq(false.B))
         // Check if this entry is an operation that doesn't require a register write, but is not a store.
         val nonWritingInstr = (bufferEntry.idx === noWriteRegIdx) && !bufferEntry.isMatrix
-        val earlierMatrixDone = if (i == 0) false.B else matrixDoneMatches.take(i).reduce(_ || _)
-        val matrixDone = matrixDoneMatches(i) && !earlierMatrixDone
+        val matrixDone = matrixDoneEntries(i)
         val storeInstr = bufferEntry.idx === storeRegIdx
         // Check if this entry is the faulting instruction
         val faultingInstr = io.fault.valid && (bufferEntry.addr === faultPc)

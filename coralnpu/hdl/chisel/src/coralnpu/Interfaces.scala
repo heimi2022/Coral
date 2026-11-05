@@ -301,7 +301,9 @@ object MatrixCfgOp extends ChiselEnum {
 }
 
 class MatrixCfgCmd extends Bundle {
+    val pc = UInt(32.W)
     val op = MatrixCfgOp()
+    val value = UInt(32.W)
 }
 
 class CsrMatrixIO(p: Parameters) extends Bundle {

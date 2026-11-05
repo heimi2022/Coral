@@ -632,9 +632,9 @@ class Csr(p: Parameters) extends Module {
     if (p.enableMatrix) {
         when(matrixCfgReq.get.valid) {
             switch(matrixCfgReq.get.bits.op) {
-                is(MatrixCfgOp.SET_M) { xtilem := rs1 }
-                is(MatrixCfgOp.SET_K) { xtilek := rs1 }
-                is(MatrixCfgOp.SET_N) { xtilen := rs1 }
+                is(MatrixCfgOp.SET_M) { xtilem := matrixCfgReq.get.bits.value }
+                is(MatrixCfgOp.SET_K) { xtilek := matrixCfgReq.get.bits.value }
+                is(MatrixCfgOp.SET_N) { xtilen := matrixCfgReq.get.bits.value }
             }
         }
     }

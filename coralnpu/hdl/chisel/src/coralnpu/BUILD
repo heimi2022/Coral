@@ -88,6 +88,15 @@ chisel_library(
     ],
 )
 
+chisel_test(
+    name = "coralnpu_retirement_buffer_tests",
+    srcs = ["RetirementBufferTest.scala"],
+    deps = [
+        ":coralnpu_base",
+        ":retirement_buffer",
+    ],
+)
+
 chisel_library(
     name = "coralnpu_rvv",
     srcs = [
@@ -188,6 +197,7 @@ chisel_library(
         "matrix/MatrixCore.scala",
         "matrix/MatrixDecode.scala",
         "matrix/MatrixInterface.scala",
+        "matrix/MatrixIssueQueue.scala",
         "matrix/MatrixScoreboard.scala",
     ],
     resources = [

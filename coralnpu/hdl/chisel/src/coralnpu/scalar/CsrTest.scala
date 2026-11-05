@@ -70,6 +70,8 @@ class CsrSpec extends AnyFreeSpec with ChiselSim {
 
     csr.io.matrixCfg.get.valid := io.matrixCfg_valid
     csr.io.matrixCfg.get.bits.op := io.matrixCfg_op.asTypeOf(MatrixCfgOp())
+    csr.io.matrixCfg.get.bits.pc := 0.U
+    csr.io.matrixCfg.get.bits.value := io.rs1_data
 
     io.rd_valid := csr.io.rd.valid
     io.rd_addr := csr.io.rd.bits.addr
