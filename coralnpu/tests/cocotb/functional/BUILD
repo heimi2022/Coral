@@ -23,6 +23,7 @@ cocotb_test_suite(
         "matrix_cfg_overlap",
         "matrix_cfg_overlap_backpressure",
         "matrix_cfg_overlap_n_boundary",
+        "matmul_store_pending_scalar_rvv",
     ],
     verilator_model = ":matrix_cpu_dma_model",
     tests_kwargs = {

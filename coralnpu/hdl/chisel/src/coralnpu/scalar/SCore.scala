@@ -94,8 +94,8 @@ class SCore(p: Parameters) extends Module {
 
     // matrix
     if (p.enableMatrix){
-        dispatch.io.matrixDone.get.valid := io.matrixcore.get.status.done
-        dispatch.io.matrixDone.get.bits := io.matrixcore.get.status.donePc
+        matrixIssueQueue.get.io.completed.valid := io.matrixcore.get.status.done
+        matrixIssueQueue.get.io.completed.bits := io.matrixcore.get.status.donePc
         rob_io.matrixComplete.get(0).valid := io.matrixcore.get.status.done
         rob_io.matrixComplete.get(0).bits := io.matrixcore.get.status.donePc
         
@@ -166,7 +166,7 @@ class SCore(p: Parameters) extends Module {
         csr.io.dm.debug_pc.valid
     dispatch.io.inst <> decodeBuffer.io.out
     dispatch.io.halted := csr.io.halted || csr.io.wfi || csr.io.dm.debug_mode
-    dispatch.io.mactive := io.matrixcore.map(_.status.busy).getOrElse(false.B)  // matrix
+    if (!p.enableMatrix) { dispatch.io.mactive := false.B }
     dispatch.io.lsuActive := lsu.io.active
     dispatch.io.lsuQueueCapacity := lsu.io.queueCapacity
     dispatch.io.scoreboard.comb := regfile.io.scoreboard.comb
@@ -259,6 +259,10 @@ class SCore(p: Parameters) extends Module {
         )
         val matrixMemStageBusy = matrixMemOperandsPending || matrixMemValid
         val matrixCfgStageBusy = matrixCfgOperandsPending
+        // MatrixCore busy alone misses commands waiting for operands or FIFO issue.
+        dispatch.io.mactive := matrixMemStageBusy || matrixCfgStageBusy ||
+            matrixIssueQueue.get.io.active || matrixCfgApplyPending ||
+            io.matrixcore.get.status.busy
         val matrixDispatchReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
             matrixIssueQueue.get.io.enqReady
 
@@ -316,9 +320,8 @@ class SCore(p: Parameters) extends Module {
         rob_io.matrixComplete.get(1).bits := matrixCfgAppliedPc
         val matrixCfgBarrier = matrixCfgApplyPending
 
-        // The FIFO head is issued only when the corresponding MatrixCore port
-        // is ready. This keeps commands ordered without blocking Decode on the
-        // execution latency of an older command.
+        // 队列按依赖选择一个候选，只有 MatrixCore 对应端口握手才移除。
+        // CONFIG 的一拍生效屏障仍在这里统一阻止后续命令提前使用新尺寸。
         io.matrixcore.get.cmd.valid := matrixIssueQueue.get.io.matmulDeq.valid && !matrixCfgBarrier
         io.matrixcore.get.cmd.bits := matrixIssueQueue.get.io.matmulDeq.bits
         matrixIssueQueue.get.io.matmulDeq.ready := io.matrixcore.get.cmd.ready && !matrixCfgBarrier

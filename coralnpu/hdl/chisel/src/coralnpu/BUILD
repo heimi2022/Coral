@@ -228,6 +228,15 @@ chisel_test(
 )
 
 chisel_test(
+    name = "coralnpu_matrix_issue_queue_tests",
+    srcs = ["matrix/MatrixIssueQueueTest.scala"],
+    deps = [
+        ":coralnpu_base",
+        ":coralnpu_matrix",
+    ],
+)
+
+chisel_test(
     name = "coralnpu_rvv_tests",
     srcs = [
         "rvv/RvvDecodeTest.scala",

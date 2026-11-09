@@ -15,7 +15,7 @@ import chisel3.util._
 import common._
 import coralnpu.float.{FloatInstruction, FloatOpcode}
 import coralnpu.rvv._
-import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd, MatrixScoreboard}
+import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd}
 
 class DecodedInstruction(p: Parameters) extends Bundle {
     // The original encoding
@@ -217,7 +217,7 @@ class Dispatch(p: Parameters) extends Module {
     val io = IO(new Bundle {
         // Core controls.
         val halted = Input(Bool())
-        val mactive = Input(Bool())  // memory active
+        val mactive = Input(Bool())  // Matrix staging, queue, execution or config update active.
         val lsuActive = Input(Bool()) // lsu active
 
         val scoreboard = new Bundle {
@@ -270,7 +270,6 @@ class Dispatch(p: Parameters) extends Module {
         val matrixMul = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd))
         val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd))
         val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
-        val matrixDone = Option.when(p.enableMatrix)(Flipped(Valid(UInt(32.W))))
         val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
         val matrixIssueQueueReady = Option.when(p.enableMatrix)(Input(Bool()))
 
@@ -318,23 +317,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     // The CSR write occurs one cycle after configuration dispatch. Consumers
     // must wait until the new shape is visible at MatrixCore's command boundary.
     val matrixCfgPending = io.matrixCfg.map(cfg => RegNext(cfg.valid, false.B)).getOrElse(false.B)
-
-    val matrixScoreboard = if (p.enableMatrix) {
-        val matrixscoreboard = Module(new MatrixScoreboard(p.matrixScoreboardDepth))
-        val matrixQuery = decodedInsts(0).matrix.get.bits
-        val matrixQueryValid = decodedInsts(0).isMatrixMul() ||
-            decodedInsts(0).isMatrixLoadStore() || decodedInsts(0).isMatrixZero()
-        matrixscoreboard.io.candidateValid := matrixQueryValid
-        matrixscoreboard.io.candidate := matrixQuery
-        matrixscoreboard.io.completed := io.matrixDone.get
-        val matrixIssue = io.matrixMul.get.fire || io.matrixMem.get.fire || io.matrixZero.get.fire
-        matrixscoreboard.io.issued.valid := matrixIssue
-        matrixscoreboard.io.issued.bits.pc := io.inst(0).bits.addr
-        matrixscoreboard.io.issued.bits.instruction := matrixQuery
-        Some(matrixscoreboard)
-    } else {
-        None
-    }
 
     // ---------------------------------------------------------------------------
     // Jumps
@@ -416,11 +398,9 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
     // ---------------------------------------------------------------------------
     // Fence interlock
-    // MatrixCore busy does not cover commands still awaiting scalar operands
-    // in SCore. Track issue through completion before allowing WFI/clock gating.
-    val matrixInFlight = matrixScoreboard.map(_.io.hasInFlight).getOrElse(false.B)
+    // SCore includes staged, queued and executing commands in mactive.
     val fence = decodedInsts.map(x =>
-        x.isFency() && (matrixInFlight || io.mactive || io.lsuActive))
+        x.isFency() && (io.mactive || io.lsuActive))
 
     // ---------------------------------------------------------------------------
     // Slot 0 interlock
@@ -507,7 +487,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             (io.scoreboard.regd === 0.U) &&
             (io.fscoreboard.getOrElse(0.U) === 0.U) &&
             io.rvvIdle.getOrElse(true.B) &&
-            !io.lsuActive
+            !io.lsuActive && !io.mactive
         )
 
     // ---------------------------------------------------------------------------
@@ -523,16 +503,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     // ---------------------------------------------------------------------------
     // Combine above rules. This variable represents which instructions can be
     // dispatched before in-orderness and back-pressure are considered.
-    val matrixScoreboardInterlock = (0 until p.instructionLanes).map { i =>
-        if (p.enableMatrix && i == 0) {
-            val hasMatrixRegisterCommand = decodedInsts(i).isMatrixMul() ||
-                decodedInsts(i).isMatrixLoadStore() || decodedInsts(i).isMatrixZero()
-            !hasMatrixRegisterCommand || matrixScoreboard.get.io.issueAllowed
-        } else {
-            true.B
-        }
-    }
-
     val matrixConfigInterlock = (0 until p.instructionLanes).map { i =>
         val configCanIssue = !decodedInsts(i).isMatrixCfg() ||
             (!io.matrixMemPending.getOrElse(false.B) &&
@@ -559,7 +529,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // rvvLsuInterlock(i) &&  // Dispatch only one Rvv LsuOp
         lsuInterlock(i) && // Ensure lsu instructions can be dispatched into queue
         rvvInterlock(i) && // Ensure rvv instructions can be dispatched into queue
-        matrixScoreboardInterlock(i) && // Wait for conflicting matrix-register users
         matrixConfigInterlock(i) && // Preserve shape across CPU staging and CSR writes
         !undefInterlock(i) &&     // Ensure undef is only dispatched from first slot
         (i.U < io.retirement_buffer_nSpace) && // Retirement buffer needs space for our slot

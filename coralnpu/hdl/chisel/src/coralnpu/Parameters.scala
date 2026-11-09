@@ -113,7 +113,10 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     val matrixScoreboardDepth = 8
     // Matrix commands can wait here independently of the MatrixCore execution
     // latency. Scoreboard depth remains a separate architectural choice.
-    val matrixIssueQueueDepth = 8
+    val matrixIssueQueueDepth = 4
+    // Only the oldest few queued commands participate in dependency selection.
+    // The physical issue queue remains matrixIssueQueueDepth entries deep.
+    val matrixIssueLookahead = 3
     def retirementBufferIdxWidth: Int = {
         val scalarRegCount = 32
         val floatRegCount = (if (enableFloat) { 32 } else { 0 })

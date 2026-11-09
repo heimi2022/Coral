@@ -10,7 +10,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
   val p = new Parameters
   p.enableMatrix = true
 
-  class Tester(testRobSpace: Boolean = false) extends Module {
+  class Tester(testRobSpace: Boolean = false, testMatrixActive: Boolean = false) extends Module {
     val io = IO(new Bundle {
       val inst_valid = Input(Bool())
       val inst_ready = Output(Bool())
@@ -27,6 +27,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       val retirement_buffer_nSpace = Option.when(testRobSpace)(
         Input(UInt(log2Ceil(p.retirementBufferSize + 1).W)))
       val matrixMemPending = Input(Bool())
+      val matrixActive = Option.when(testMatrixActive)(Input(Bool()))
 
       val alu_valid = Output(Bool())
       val alu_op = Output(UInt(AluOp.getWidth.W))
@@ -60,7 +61,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     val dispatch = Module(new DispatchV2(p))
 
     dispatch.io.halted := false.B
-    dispatch.io.mactive := false.B
+    dispatch.io.mactive := io.matrixActive.getOrElse(false.B)
     dispatch.io.lsuActive := false.B
     dispatch.io.branchTaken := false.B
     dispatch.io.interlock := false.B
@@ -76,8 +77,6 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.single_step := false.B
     dispatch.io.debug_mode := false.B
     dispatch.io.matrixZero.get.ready := io.matrixZero_ready
-    dispatch.io.matrixDone.get.valid := false.B
-    dispatch.io.matrixDone.get.bits := 0.U
     io.matrixZero_valid := dispatch.io.matrixZero.get.valid
     io.matrixZero_pc := dispatch.io.matrixZero.get.bits.pc
     io.matrixZero_md := dispatch.io.matrixZero.get.bits.md
@@ -376,7 +375,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       encodeMatrixCfgImm(0x10, 3),
       0x0c00022bL, // mzero C0
       0x80402073L) // csrr x0, xtilen
-    // Separate simulations keep prior consumers out of the matrix scoreboard.
+    // Each consumer starts from the same configuration-write boundary.
     for (consumer <- consumers) {
       simulate(new Tester) { dut =>
         dut.io.matrixMemPending.poke(false.B)
@@ -422,6 +421,57 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.inst_ready.expect(false.B)
       dut.io.retirement_buffer_empty.poke(true.B)
       dut.io.inst_ready.expect(true.B)
+    }
+  }
+
+  "Dispatch dependent matrix commands and scalar work without waiting for completion" in {
+    simulate(new Tester(testMatrixActive = true)) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
+      dut.io.matrixZero_ready.poke(true.B)
+      dut.io.matrixActive.get.poke(true.B)
+      dut.io.inst_valid.poke(true.B)
+      dut.io.inst_addr.poke(0x100.U)
+      dut.io.inst_brchFwd.poke(false.B)
+      dut.io.retirement_buffer_empty.poke(false.B)
+      dut.io.inst_bits.poke(encodeMatrixMul(op = 3, ms2 = 1, ms1 = 0, md = 4).U)
+      dut.io.inst_ready.expect(true.B)
+      dut.clock.step()
+
+      dut.io.inst_addr.poke(0x104.U)
+      dut.io.inst_bits.poke(encodeMatrixMem(2, true, 11, 10, 2, 4).U)
+      dut.io.matrixMem_valid.expect(true.B)
+      dut.io.inst_ready.expect(true.B)
+      dut.clock.step()
+
+      // Scoreboard capacity now limits execution, not front-end admission.
+      dut.io.inst_bits.poke(encodeMatrixMul(op = 3, ms2 = 1, ms1 = 0, md = 4).U)
+      for (_ <- 0 until p.matrixScoreboardDepth + 1) {
+        dut.io.inst_ready.expect(true.B)
+        dut.clock.step()
+      }
+      dut.io.inst_bits.poke(0x001A0A13L.U)
+      dut.io.alu_valid.expect(true.B)
+      dut.io.inst_ready.expect(true.B)
+    }
+  }
+
+  "Hold WFI and MPAUSE while queued or executing matrix work remains" in {
+    simulate(new Tester(testMatrixActive = true)) { dut =>
+      dut.io.matrixMemPending.poke(false.B)
+      dut.io.matrixZero_ready.poke(true.B)
+      dut.io.inst_valid.poke(true.B)
+      dut.io.inst_addr.poke(0.U)
+      dut.io.inst_brchFwd.poke(false.B)
+      dut.io.retirement_buffer_empty.poke(true.B)
+      for (inst <- Seq(0x10500073L, 0x08000073L)) {
+        dut.io.inst_bits.poke(inst.U)
+        dut.io.matrixActive.get.poke(true.B)
+        dut.io.inst_ready.expect(false.B)
+        dut.clock.step(2)
+        dut.io.inst_ready.expect(false.B)
+        dut.io.matrixActive.get.poke(false.B)
+        dut.io.inst_ready.expect(true.B)
+      }
     }
   }
 

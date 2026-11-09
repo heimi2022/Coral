@@ -20,10 +20,42 @@ class MatrixScoreboardAccess extends Bundle {
   val writeC = UInt(4.W)
 }
 
-class MatrixScoreboardIO(depth: Int) extends Bundle {
-  val candidateValid = Input(Bool())
-  val candidate = Input(new MatrixInstruction)
-  val issueAllowed = Output(Bool())
+object MatrixScoreboardAccess {
+  def apply(instruction: MatrixInstruction): MatrixScoreboardAccess = {
+    val access = Wire(new MatrixScoreboardAccess)
+    access.isMatmul := instruction.isMatmul()
+    access.readAbData := instruction.readAbData
+    access.writeAbData := instruction.writeAbData
+    access.readAbScale := instruction.readAbScale
+    access.writeAbScale := instruction.writeAbScale
+    access.readC := instruction.readC
+    access.writeC := instruction.writeC
+    access
+  }
+
+  // RAW/WAR/WAW 共用这套 mask 比较。只有已按顺序发射的 MATMUL 可以
+  // 交给 MatrixCore 重叠累加；窗口内尚未发射的同 C MATMUL 不能越序。
+  def conflict(older: MatrixScoreboardAccess, younger: MatrixScoreboardAccess,
+               allowMatmulOverlap: Boolean = false): Bool = {
+    def hazard(readOlder: UInt, writeOlder: UInt,
+               readYounger: UInt, writeYounger: UInt): Bool = {
+      ((writeOlder & (readYounger | writeYounger)) |
+       (readOlder & writeYounger)).orR
+    }
+    val abData = hazard(older.readAbData, older.writeAbData,
+                        younger.readAbData, younger.writeAbData)
+    val abScale = hazard(older.readAbScale, older.writeAbScale,
+                         younger.readAbScale, younger.writeAbScale)
+    val c = hazard(older.readC, older.writeC, younger.readC, younger.writeC)
+    val overlap = if (allowMatmulOverlap) older.isMatmul && younger.isMatmul else false.B
+    abData || abScale || (c && !overlap)
+  }
+}
+
+class MatrixScoreboardIO(queryCount: Int) extends Bundle {
+  // 多个候选共享同一份在途表；查询端口只增加组合比较，不复制存储。
+  val candidates = Flipped(Vec(queryCount, Valid(new MatrixScoreboardIssue)))
+  val issueAllowed = Output(Vec(queryCount, Bool()))
   val issued = Input(Valid(new MatrixScoreboardIssue))
   val completed = Flipped(Valid(UInt(32.W)))
   val hasInFlight = Output(Bool())
@@ -31,10 +63,10 @@ class MatrixScoreboardIO(depth: Int) extends Bundle {
 }
 
 /** Tracks matrix-register accesses until the corresponding MatrixCore command completes. */
-class MatrixScoreboard(depth: Int) extends Module {
-    require(depth > 0)
+class MatrixScoreboard(depth: Int, queryCount: Int = 1) extends Module {
+    require(depth > 0 && queryCount > 0)
 
-    val io = IO(new MatrixScoreboardIO(depth))
+    val io = IO(new MatrixScoreboardIO(queryCount))
     val count_q = RegInit(0.U(log2Ceil(depth + 1).W))
     val pc_q = Reg(Vec(depth, UInt(32.W)))
     val access_q = Reg(Vec(depth, new MatrixScoreboardAccess))
@@ -51,22 +83,19 @@ class MatrixScoreboard(depth: Int) extends Module {
 
     val hasSpace = (count_q < depth.U) || release
 
-    val conflict = (0 until depth).map { i =>
-        val older = access_q(i)
-        val active = (i.U < count_q) && !releaseSlot(i)
-        val bothMatmul = older.isMatmul && io.candidate.isMatmul()
-
-        val abDataConflict = ((older.writeAbData & (io.candidate.readAbData | io.candidate.writeAbData)) =/= 0.U) ||
-                             ((older.readAbData & io.candidate.writeAbData) =/= 0.U)
-        val abScaleConflict = ((older.writeAbScale & (io.candidate.readAbScale | io.candidate.writeAbScale)) =/= 0.U) ||
-                              ((older.readAbScale & io.candidate.writeAbScale) =/= 0.U)
-        val cConflict = (((older.writeC & (io.candidate.readC | io.candidate.writeC)) =/= 0.U) ||
-                        ((older.readC & io.candidate.writeC) =/= 0.U)) && !bothMatmul
-
-        active && (abDataConflict || abScaleConflict || cConflict)
-    }.reduce(_ || _)
-
-    io.issueAllowed := io.candidateValid && hasSpace && !conflict
+    for (q <- 0 until queryCount) {
+        val candidate = io.candidates(q)
+        val access = MatrixScoreboardAccess(candidate.bits.instruction)
+        val conflict = (0 until depth).map { i =>
+            val active = (i.U < count_q) && !releaseSlot(i)
+            // 完成接口只有 PC，禁止同 PC 的不同动态实例同时在途，避免误退休。
+            active && ((pc_q(i) === candidate.bits.pc) ||
+                MatrixScoreboardAccess.conflict(access_q(i), access, allowMatmulOverlap = true))
+        }.reduce(_ || _)
+        // CONFIG 不占在途表，也不需要等待无关计算结束，但仍受重复 PC 保护。
+        io.issueAllowed(q) := candidate.valid && !conflict &&
+            (candidate.bits.instruction.isConfig() || hasSpace)
+    }
     io.hasInFlight := count_q =/= 0.U
     io.isFull := !hasSpace
 
@@ -84,13 +113,7 @@ class MatrixScoreboard(depth: Int) extends Module {
                     else releaseSlot.take(i + 1).reduce(_ || _)
         when (issueAccepted && appendIndex === i.U) {
             pc_q(i) := io.issued.bits.pc
-            access_q(i).isMatmul := io.issued.bits.instruction.isMatmul()
-            access_q(i).readAbData := io.issued.bits.instruction.readAbData
-            access_q(i).writeAbData := io.issued.bits.instruction.writeAbData
-            access_q(i).readAbScale := io.issued.bits.instruction.readAbScale
-            access_q(i).writeAbScale := io.issued.bits.instruction.writeAbScale
-            access_q(i).readC := io.issued.bits.instruction.readC
-            access_q(i).writeC := io.issued.bits.instruction.writeC
+            access_q(i) := MatrixScoreboardAccess(io.issued.bits.instruction)
         }.elsewhen(shift) {
             if (i < depth - 1) {
                 pc_q(i) := pc_q(i + 1)

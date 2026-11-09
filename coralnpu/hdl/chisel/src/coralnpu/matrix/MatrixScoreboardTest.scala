@@ -6,6 +6,13 @@ import org.scalatest.freespec.AnyFreeSpec
 import chisel3.util.Valid
 
 class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
+  // 与队列用例一致，限制 Verilator 编译并行度，便于低内存环境串行验证。
+  override implicit def commonSettingsModifications: svsim.CommonSettingsModifications = {
+    val inherited = super.commonSettingsModifications
+    settings => inherited(settings).copy(
+      availableParallelism = svsim.CommonCompilationSettings.AvailableParallelism.UpTo(1))
+  }
+
   class Tester(depth: Int = 4) extends Module {
     val io = IO(new Bundle {
       val inst = Input(UInt(32.W))
@@ -16,13 +23,14 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
     })
 
     val scoreboard = Module(new MatrixScoreboard(depth))
-    scoreboard.io.candidateValid := true.B
-    scoreboard.io.candidate := MatrixDecode(io.inst)
+    scoreboard.io.candidates(0).valid := true.B
+    scoreboard.io.candidates(0).bits.pc := io.pc
+    scoreboard.io.candidates(0).bits.instruction := MatrixDecode(io.inst)
     scoreboard.io.issued.valid := io.issue
     scoreboard.io.issued.bits.pc := io.pc
     scoreboard.io.issued.bits.instruction := MatrixDecode(io.inst)
     scoreboard.io.completed := io.done
-    io.canIssue := scoreboard.io.issueAllowed
+    io.canIssue := scoreboard.io.issueAllowed(0)
   }
 
   private def storeC(reg: Int): BigInt =
@@ -141,6 +149,7 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
 
       dut.io.issue.poke(false.B)
+      dut.io.pc.poke(0x30c.U)
       dut.io.inst.poke(storeC(3).U)
       dut.io.canIssue.expect(true.B)
     }
@@ -207,6 +216,7 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
 
       dut.io.issue.poke(false.B)
+      dut.io.pc.poke(0x608.U)
       dut.io.done.valid.poke(true.B)
       dut.io.done.bits.poke(0x604.U)
       dut.io.inst.poke(storeC(1).U)
@@ -275,6 +285,26 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       dut.io.canIssue.expect(true.B)
       dut.clock.step()
 
+      dut.io.done.valid.poke(false.B)
+      dut.io.canIssue.expect(true.B)
+    }
+  }
+
+  "reject a repeated PC even with independent registers until completion" in {
+    simulate(new Tester) { dut =>
+      dut.io.done.valid.poke(false.B)
+      dut.io.done.bits.poke(0.U)
+      dut.io.pc.poke(0x900.U)
+      dut.io.inst.poke(matmul(0).U)
+      dut.io.issue.poke(true.B)
+      dut.clock.step()
+      dut.io.issue.poke(false.B)
+      dut.io.inst.poke(matmul(1).U)
+      dut.io.canIssue.expect(false.B)
+      dut.io.done.valid.poke(true.B)
+      dut.io.done.bits.poke(0x900.U)
+      dut.io.canIssue.expect(true.B)
+      dut.clock.step()
       dut.io.done.valid.poke(false.B)
       dut.io.canIssue.expect(true.B)
     }

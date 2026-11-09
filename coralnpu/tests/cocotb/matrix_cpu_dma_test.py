@@ -1445,7 +1445,7 @@ async def c_api_elf_gemm_m65_n256_k128_backpressure(dut):
 
 
 async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=4,
-                          scalar_burst=0, rvv_burst=0):
+                          scalar_burst=0, rvv_burst=0, store_before_work=False):
     """MXINT8: S1.6 elements, one biased power-of-two scale per 32 K elements."""
     core = CoreMiniAxiInterface(dut)
     ram = MatrixMemory(dut, stalled)
@@ -1527,6 +1527,15 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
         command((1 << 28) | (2 << 26) | (3 << 23) | (1 << 20) |
                 (2 << 10) | (c_reg << 7) | 0x2B, f"MATMUL {index + 1}")
 
+    def store_result():
+        li(12, dst)
+        command((2 << 28) | (1 << 26) | (1 << 25) | (11 << 20) |
+                (12 << 15) | (2 << 10) | (c_reg << 7) | 0x2B,
+                f"STORE C{c_reg - 4}")
+
+    if store_before_work:
+        store_result()
+
     # Keep the scalar and RVV pipes busy after MATMUL has been accepted. The
     # instructions use independent architectural state, so the test observes
     # overlap without changing the matrix operands or result.
@@ -1541,21 +1550,21 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
                 command(0xCC087057, "RVV VSETIVLI")
             # vadd.vv v3, v1, v2
             command(0x021101D7, f"RVV VADD {index + 1}")
-    li(12, dst)
-    command((2 << 28) | (1 << 26) | (1 << 25) | (11 << 20) |
-            (12 << 15) | (2 << 10) | (c_reg << 7) | 0x2B,
-            f"STORE C{c_reg - 4}")
+    if not store_before_work:
+        store_result()
     expected_words = list(words)
     words.extend([0x10500073, 0x0000006F])
     retired = []
     cycle = 0
     matrix_dispatch_cycle = None
     matrix_retire_cycle = None
+    store_dispatch_cycle = None
     scalar_dispatched_before_matrix_retire = False
     rvv_dispatched_before_matrix_retire = False
 
     async def monitor():
         nonlocal cycle, matrix_dispatch_cycle, matrix_retire_cycle
+        nonlocal store_dispatch_cycle
         nonlocal scalar_dispatched_before_matrix_retire
         nonlocal rvv_dispatched_before_matrix_retire
         retirement_lanes = retirement_lane_indices(dut)
@@ -1570,6 +1579,8 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
                 name = commands.get(pc, "")
                 if name.startswith("MATMUL") and matrix_dispatch_cycle is None:
                     matrix_dispatch_cycle = cycle
+                elif name.startswith("STORE"):
+                    store_dispatch_cycle = cycle
                 elif name.startswith("SCALAR") and matrix_retire_cycle is None:
                     scalar_dispatched_before_matrix_retire = True
                 elif name.startswith("RVV") and matrix_retire_cycle is None:
@@ -1609,6 +1620,10 @@ async def exercise_matmul(dut, k, repetitions=1, stalled=False, m=3, n=5, c_reg=
     assert not int(dut.io_fault.value)
     assert matrix_dispatch_cycle is not None, "MATMUL was not dispatched"
     assert matrix_retire_cycle is not None, "MATMUL did not retire"
+    if store_before_work:
+        assert store_dispatch_cycle is not None and store_dispatch_cycle < matrix_retire_cycle, (
+            "Dependent STORE did not dispatch before MATMUL retirement"
+        )
     if scalar_burst:
         assert scalar_dispatched_before_matrix_retire, (
             "No scalar instruction dispatched before MATMUL retirement"
@@ -1906,3 +1921,10 @@ async def matmul_mx_scalar_rvv_high_load(dut):
     """Run heavy scalar and RVV traffic while a maximum-size MATMUL executes."""
     await exercise_matmul(dut, 64, stalled=True, m=64, n=64, c_reg=7,
                           scalar_burst=96, rvv_burst=96)
+
+
+@cocotb.test()
+async def matmul_store_pending_scalar_rvv(dut):
+    """Queue dependent STORE before independent scalar/RVV work completes."""
+    await exercise_matmul(dut, 64, stalled=True, m=64, n=64, c_reg=4,
+                          scalar_burst=16, rvv_burst=16, store_before_work=True)
