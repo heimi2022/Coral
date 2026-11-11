@@ -19,6 +19,43 @@ import chisel3.simulator.scalatest.ChiselSim
 import org.scalatest.freespec.AnyFreeSpec
 
 class CircularBufferMultiSpec extends AnyFreeSpec with ChiselSim {
+  "Expose ROB allocation index and phase across wrap and flush" in {
+    simulate(new CircularBufferMulti(UInt(16.W), 2, 4)) { dut =>
+      dut.io.flush.poke(false.B)
+      dut.io.enqValid.poke(0.U)
+      dut.io.deqReady.poke(0.U)
+      for (i <- 0 until 2) dut.io.enqData(i).poke(0.U)
+      dut.io.enqPtr.expect(0.U)
+      dut.io.enqPosition.expect(false.B)
+
+      dut.io.enqValid.poke(2.U)
+      dut.clock.step()
+      dut.io.enqPtr.expect(2.U)
+      dut.io.enqPosition.expect(false.B)
+
+      dut.io.enqValid.poke(2.U)
+      dut.io.deqReady.poke(2.U)
+      dut.clock.step()
+      dut.io.enqPtr.expect(0.U)
+      dut.io.enqPosition.expect(true.B)
+
+      dut.clock.step()
+      dut.io.enqPtr.expect(2.U)
+      dut.io.enqPosition.expect(true.B)
+      dut.clock.step()
+      dut.io.enqPtr.expect(0.U)
+      dut.io.enqPosition.expect(false.B)
+
+      dut.io.flush.poke(true.B)
+      dut.clock.step()
+      dut.io.flush.poke(false.B)
+      dut.io.enqValid.poke(0.U)
+      dut.io.deqReady.poke(0.U)
+      dut.io.enqPtr.expect(0.U)
+      dut.io.enqPosition.expect(false.B)
+    }
+  }
+
   for (capacity <- Seq(48, 64)) {
     s"$capacity-entry ROB buffer matches a queue across wrap and flush" in {
       simulate(new CircularBufferMulti(UInt(16.W), capacity, capacity)) { dut =>

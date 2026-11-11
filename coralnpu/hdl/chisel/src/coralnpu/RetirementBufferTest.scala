@@ -17,10 +17,12 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       val done = Input(Vec(2, Valid(UInt(32.W))))
       val retired = Output(Vec(p.rvviTraceDepth, Valid(UInt(32.W))))
       val empty = Output(Bool())
+      val allocAge = Output(Vec(p.instructionLanes, new RobAge(p)))
     })
 
     val rob = Module(new RetirementBuffer(p, mini = true))
     rob.io.storeComplete := 0.U.asTypeOf(rob.io.storeComplete)
+    io.allocAge := rob.io.allocAge
     rob.io.fault := 0.U.asTypeOf(rob.io.fault)
     rob.io.matrixComplete.get := io.done
     for (port <- rob.io.writeDataScalar) {
@@ -64,6 +66,23 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.io.retired(i).valid.expect((i < pcs.size).B)
       if (i < pcs.size) {
         dut.io.retired(i).bits.expect(pcs(i).U)
+      }
+    }
+  }
+
+  "allocation ages follow the ROB pointer across wrap" in {
+    simulate(new Tester) { dut =>
+      for (_ <- 0 until dut.p.retirementBufferSize - 2) {
+        enqueue(dut, Seq(0x100))
+        dut.io.done(0).valid.poke(true.B)
+        dut.io.done(0).bits.poke(0x100.U)
+        dut.clock.step()
+        dut.io.done(0).valid.poke(false.B)
+      }
+      for (i <- 0 until dut.p.instructionLanes) {
+        val sum = dut.p.retirementBufferSize - 2 + i
+        dut.io.allocAge(i).index.expect((sum % dut.p.retirementBufferSize).U)
+        dut.io.allocAge(i).position.expect((sum >= dut.p.retirementBufferSize).B)
       }
     }
   }

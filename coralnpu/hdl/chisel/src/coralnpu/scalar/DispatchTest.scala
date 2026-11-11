@@ -70,6 +70,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.lsuQueueCapacity := p.instructionLanes.U
     dispatch.io.retirement_buffer_nSpace :=
       io.retirement_buffer_nSpace.getOrElse(p.instructionLanes.U)
+    dispatch.io.robAge := 0.U.asTypeOf(dispatch.io.robAge)
     dispatch.io.retirement_buffer_empty := io.retirement_buffer_empty
     dispatch.io.matrixMemPending.get := io.matrixMemPending
     dispatch.io.matrixIssueQueueReady.get := true.B

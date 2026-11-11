@@ -59,8 +59,9 @@ class MatrixIssueWindow(entryBits: Int, depth: Int, visibleDepth: Int) extends M
 class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     require(depth > 0)
 
-    // 统一 entry 布局为 [PC:32][kind:2][payload:73]，宽度按最大的 MEM payload 定。
-    private val payloadBits = 73
+    // Entry 保留矩阵访存的 ROB 年龄标签，低 73 位仍是原有 MEM payload。
+    private val robAgeBits = 1 + log2Ceil(p.retirementBufferSize)
+    private val payloadBits = 73 + robAgeBits
     private val kindBits = 2
     private val pcBits = 32
     private val entryBits = payloadBits + kindBits + pcBits
@@ -99,8 +100,10 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     // 窗口的可用空间通过一个共享 ready 信号反馈给所有矩阵命令来源。
     io.enqReady := queue.io.enq.ready
 
-    // MEM payload 共 73 位：[op:4][reg:3][elemWidth:2][base:32][stride:32]。
+    // MEM payload 高位保存 ROB age，低 73 位沿用原布局。
     private val memPayload = Cat(
+        io.memEnq.bits.req.robAge.position,
+        io.memEnq.bits.req.robAge.index,
         io.memEnq.bits.req.op.asUInt,
         io.memEnq.bits.req.reg,
         io.memEnq.bits.req.elemWidth,
@@ -108,7 +111,7 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
         io.memEnq.bits.stride
     )
 
-    // MATMUL 有效字段为 11 位：[op:2][ms1:3][ms2:3][md:3]；高位补零到 73 位。
+    // MATMUL 有效字段为 11 位：[op:2][ms1:3][ms2:3][md:3]；高位补零。
     private val matmulPayload = Cat(
         0.U((payloadBits - 11).W),
         io.matmulEnq.bits.op.asUInt,
@@ -117,7 +120,7 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
         io.matmulEnq.bits.md
     )
 
-    // ZERO 有效字段为 6 位：[md:3][regCount:3]；高位补零到 73 位。
+    // ZERO 有效字段为 6 位：[md:3][regCount:3]；高位补零。
     private val zeroPayload = Cat(
         0.U((payloadBits - 6).W),
         io.zeroEnq.bits.md,
@@ -257,6 +260,8 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     // MEM payload 占满 73 位，按入队时的字段顺序还原访存请求。
     io.memDeq.valid := selected.valid && isMem && issueAllowed
     io.memDeq.bits.req.pc := head(pcHi, pcLo)
+    io.memDeq.bits.req.robAge.position := headPayload(payloadHi, payloadHi)
+    io.memDeq.bits.req.robAge.index := headPayload(payloadHi - 1, 73)
     io.memDeq.bits.req.op := headPayload(72, 69).asTypeOf(MatrixMemOp())
     io.memDeq.bits.req.reg := headPayload(68, 66)
     io.memDeq.bits.req.elemWidth := headPayload(65, 64)

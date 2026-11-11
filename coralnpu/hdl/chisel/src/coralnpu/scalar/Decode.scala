@@ -268,7 +268,7 @@ class Dispatch(p: Parameters) extends Module {
 
         // Matrix execution interfaces.
         val matrixMul = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd))
-        val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd))
+        val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd(p)))
         val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
         val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
         val matrixIssueQueueReady = Option.when(p.enableMatrix)(Input(Bool()))
@@ -296,6 +296,7 @@ class Dispatch(p: Parameters) extends Module {
         val fbusPortAddr = Option.when(p.enableFloat)(Output(UInt(5.W)))
 
         val retirement_buffer_nSpace = Input(UInt(log2Ceil(p.retirementBufferSize + 1).W))
+        val robAge = Input(Vec(p.instructionLanes, new RobAge(p)))
         val retirement_buffer_empty = Input(Bool())
         val retirement_buffer_trap_pending = Input(Bool())
         val single_step = Input(Bool())
@@ -686,6 +687,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         io.lsu(i).bits.addr := rdAddr(i)
         io.lsu(i).bits.op := lsu.bits
         io.lsu(i).bits.pc := io.inst(i).bits.addr
+        io.lsu(i).bits.robAge := io.robAge(i)
         if (p.enableRvv) {
             io.lsu(i).bits.elemWidth.get := io.inst(i).bits.inst(14,12)
             io.lsu(i).bits.nfields.get := io.inst(i).bits.inst(31,29)
@@ -739,6 +741,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.matrixMem.get.bits.elemWidth := d.matrix.get.bits.elemWidth
             io.matrixMem.get.bits.reg := d.matrix.get.bits.md
             io.matrixMem.get.bits.pc := io.inst(i).bits.addr
+            io.matrixMem.get.bits.robAge := io.robAge(i)
 
             io.matrixZero.get.valid := tryDispatch && d.isMatrixZero()
             io.matrixZero.get.bits.pc := io.inst(i).bits.addr

@@ -31,20 +31,23 @@ object CircularBufferMulti {
 }
 
 class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module {
-  require(n > 0 && n <= capacity)
-  val io = IO(new Bundle {
-    val enqValid = Input(UInt(log2Ceil(n + 1).W))
-    val enqData = Input(Vec(n, t))
+    require(n > 0 && n <= capacity)
+    val io = IO(new Bundle {
+        val enqValid = Input(UInt(log2Ceil(n + 1).W))   // 待写入的数据个数
+        val enqData = Input(Vec(n, t))  // 待写入的数据
 
-    val nEnqueued = Output(UInt(log2Ceil(capacity + 1).W))
-    val nSpace = Output(UInt(log2Ceil(capacity + 1).W))
+        val nEnqueued = Output(UInt(log2Ceil(capacity + 1).W))  // 当前已有多少项
+        val nSpace = Output(UInt(log2Ceil(capacity + 1).W)) // 当前还有多少空间
+        // Current ROB allocation position. The phase toggles whenever enqPtr wraps.
+        val enqPtr = Output(UInt(math.max(1, log2Ceil(capacity)).W))
+        val enqPosition = Output(Bool())
 
-    val dataOut = Output(Vec(n, t))
-    val deqReady = Input(UInt(log2Ceil(n + 1).W))
+        val dataOut = Output(Vec(n, t))
+        val deqReady = Input(UInt(log2Ceil(n + 1).W))
 
-    val flush = Input(Bool())
-  })
-  dontTouch(io)
+        val flush = Input(Bool())
+    })
+    dontTouch(io)
 
   // Note first assert below should be sufficient it allows enqueueing items when buffer
   // is full or close to full provided deqReady >= enqValid.
@@ -62,6 +65,7 @@ class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module
   val ptrWidth = math.max(1, log2Ceil(capacity))
   val enqPtr = RegInit(0.U(ptrWidth.W))
   val deqPtr = RegInit(0.U(ptrWidth.W))
+  val enqPosition = RegInit(false.B)
   assert(enqPtr < capacity.U)
   assert(deqPtr < capacity.U)
 
@@ -80,10 +84,20 @@ class CircularBufferMulti[T <: Data](t: T, n: Int, capacity: Int) extends Module
   }
 
   var nEnqueued = RegInit(0.U(io.nEnqueued.getWidth.W))
-  enqPtr    := Mux(io.flush, 0.U, CircularBufferMulti.advance(enqPtr, io.enqValid, capacity))
+  val enqSum = enqPtr +& io.enqValid
+  val enqWrapped = enqSum >= capacity.U
+  val nextEnqPtr = if (isPow2(capacity)) {
+    enqSum(ptrWidth - 1, 0)
+  } else {
+    Mux(enqWrapped, enqSum - capacity.U, enqSum)(ptrWidth - 1, 0)
+  }
+  enqPtr    := Mux(io.flush, 0.U, nextEnqPtr)
+  enqPosition := Mux(io.flush, false.B, enqPosition ^ enqWrapped)
   deqPtr    := Mux(io.flush, 0.U, CircularBufferMulti.advance(deqPtr, io.deqReady, capacity))
   nEnqueued := Mux(io.flush, 0.U, nEnqueued + io.enqValid - io.deqReady)
 
+  io.enqPtr := enqPtr
+  io.enqPosition := enqPosition
   io.nEnqueued := nEnqueued
   io.nSpace := capacity.U - nEnqueued
 

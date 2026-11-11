@@ -156,6 +156,7 @@ class LsuCmd(p: Parameters) extends Bundle {
   val addr = UInt(5.W)
   val op = LsuOp()
   val pc = UInt(32.W)
+  val robAge = new RobAge(p)
   val elemWidth = Option.when(p.enableRvv) { UInt(3.W) }
   val nfields = Option.when(p.enableRvv) { UInt(3.W) }
   val umop = Option.when(p.enableRvv) { UInt(5.W) }
@@ -192,6 +193,7 @@ class LsuUOp(p: Parameters) extends Bundle {
   val rd = UInt(5.W)
   val op = LsuOp()
   val pc = UInt(32.W)
+  val robAge = new RobAge(p)
   // addr 是访存基地址；data 对标量 store 保存写数据，对向量 strided 操作保存 stride。
   val addr = UInt(32.W)
   val data = UInt(32.W)  // Doubles as rs2
@@ -224,6 +226,7 @@ object LsuUOp {
     result.rd := cmd.addr
     result.op := cmd.op
     result.pc := cmd.pc
+    result.robAge := cmd.robAge
     if (fbus.isDefined) {
       result.addr := sbus.addr(i)
       result.data := Mux(
@@ -394,6 +397,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   val rd = UInt(5.W)
   val store = Bool()
   val pc = UInt(32.W)
+  val robAge = new RobAge(p)
   val baseAddr = UInt(32.W)
   // active(i)=1 表示第 i 个 byte 尚待 load 或 store。
   val active = Vec(bytesPerSlot, Bool())
@@ -460,6 +464,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.rd := rd
     result.store := store
     result.pc := pc
+    result.robAge := robAge
     result.pendingWriteback := pendingWriteback
     result.baseAddr := baseAddr
     result.elemStride := elemStride
@@ -530,6 +535,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.rd := rd
     result.store := store
     result.pc := pc
+    result.robAge := robAge
     result.baseAddr := baseAddr
     result.addrs := addrs
     result.pendingWriteback := pendingWriteback
@@ -558,6 +564,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.op := op
     result.store := store
     result.pc := pc
+    result.robAge := robAge
     result.addrs := addrs
     result.active := active
     result.data := data
@@ -624,6 +631,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.rd := rd
     result.store := store
     result.pc := pc
+    result.robAge := robAge
     result.pendingWriteback := pendingWriteback
     result.active := (0 until bytesPerSlot).map(i => active(i) & ~selected(i))
     result.baseAddr := baseAddr
@@ -683,6 +691,7 @@ object LsuSlot {
     result.rd := uop.rd
     result.store := uop.store
     result.pc := uop.pc
+    result.robAge := uop.robAge
     if (p.enableRvv) {
       // 分数 LMUL 在此按一个寄存器片段处理。
       val effectiveLmul = MuxCase(uop.emul_data.getOrElse(0.U)(1, 0), Seq(
@@ -884,8 +893,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     io.vldst := 0.U
 
     // 入口队列可暂存多条命令；队列深度不代表这些内存操作会并行执行。
-    val opQueue = Module(new CircularBufferMulti(new LsuUOp(p), p.instructionLanes, 4))
-    opQueue.io.flush := false.B
+    val opQueue = Module(new MemoryIssueQueue(p))
     io.queueCapacity := opQueue.io.nSpace
 
     // Flush 请求独立于普通访存 slot 保存，直到下游 ready 接受为止。
@@ -914,20 +922,16 @@ class LsuV2(p: Parameters) extends Lsu(p) {
         io.req(i).ready := (validSum(i) < queueSpace) && !flushCmd.valid
     }
 
-    // 将本周期握手的命令转换为内部 UOp，并压紧有效项后入队。
+    // 将本周期握手的命令转换为内部 UOp；有效项压紧由队列内部完成。
     val ops = (0 until p.instructionLanes).map(i =>
         MakeValid(
             io.req(i).fire && !LsuOp.isFlush(io.req(i).bits.op),
             LsuUOp(p, i, io.req(i).bits, io.busPort, io.busPort_flt, io.rvvState))
     )
-    val alignedOps = Aligner(ops)
-
-    opQueue.io.enqValid := PopCount(alignedOps.map(_.valid))
-    opQueue.io.enqData := alignedOps.map(_.bits)
-    assert(opQueue.io.enqValid <= opQueue.io.nSpace)
+    opQueue.io.enq := VecInit(ops)
 
     // 队首 UOp 转成逐 byte 跟踪的活动 slot；当前实现每个 slot 跟踪 16 byte。
-    val nextSlot = LsuSlot.fromLsuUOp(opQueue.io.dataOut(0), p, 16)
+    val nextSlot = LsuSlot.fromLsuUOp(opQueue.io.deq.bits, p, 16)
 
   // 保存上一拍接受的读请求元数据。该实现一次只跟踪当前 slot 的读返回。
   val readFired = RegInit(MakeInvalid(new LsuRead(32 - nextSlot.elemBits)))
@@ -1111,7 +1115,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   val writebackUpdatedSlot = slot.writebackUpdate()
 
   // 只有活动 slot 完全空闲时才弹出下一条 UOp。
-  opQueue.io.deqReady := Mux(slot.slotIdle() && (opQueue.io.nEnqueued > 0.U), 1.U, 0.U)
+  opQueue.io.deq.ready := slot.slotIdle()
 
   // 按优先级选择本拍 slot 状态更新：异常清空、装载新操作、接收 RVV 片段、
   // 更新访存进度，最后处理结果写回/向量循环推进。
@@ -1126,7 +1130,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     // Move to inactive if error.
     (faultReg.valid) -> LsuSlot.inactive(p, 16),
     // When inactive, dequeue if possible
-    (slot.slotIdle() && (opQueue.io.nEnqueued > 0.U)) -> nextSlot,
+    opQueue.io.deq.fire -> nextSlot,
     // Vector update.
     vectorUpdate -> vectorUpdatedSlot,
     // Active transaction update.
@@ -1138,6 +1142,6 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   slot := slotNext
 
   // 提供给 Decode/系统的忙状态：活动 slot 非空或命令队列仍有待办项。
-  io.active := !slot.slotIdle() || (opQueue.io.nEnqueued =/= 0.U)
+  io.active := !slot.slotIdle() || opQueue.io.deq.valid
 }
 

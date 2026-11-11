@@ -344,6 +344,7 @@ chisel_library(
         "L1ICache.scala",
         "Library.scala",
         "Parameters.scala",
+        "RobAge.scala",
     ],
     deps = [
         ":clock_gate",
@@ -365,6 +366,7 @@ chisel_library(
         "scalar/FaultManager.scala",
         "scalar/Fetch.scala",
         "scalar/Lsu.scala",
+        "scalar/MemoryIssueQueue.scala",
         "scalar/Mlu.scala",
         "scalar/Regfile.scala",
         "scalar/SCore.scala",

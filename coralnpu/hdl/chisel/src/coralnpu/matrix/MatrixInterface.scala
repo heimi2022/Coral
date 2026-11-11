@@ -2,7 +2,7 @@ package coralnpu.matrix
 
 import chisel3._
 import chisel3.util._
-import coralnpu.{CsrMatrixIO, Parameters}
+import coralnpu.{CsrMatrixIO, Parameters, RobAge}
 
 object MatrixInstOp extends ChiselEnum {
     val MMACC_W_B   = Value // 00
@@ -50,15 +50,16 @@ object MatrixMemOp extends ChiselEnum {
     val ST_CT = Value
 }
 
-class MatrixMemCmd extends Bundle {
+class MatrixMemCmd(p: Parameters) extends Bundle {
     val pc = UInt(32.W)
+    val robAge = new RobAge(p)
     val op = MatrixMemOp()
     val reg = UInt(3.W)
     val elemWidth = UInt(2.W)   // 00/01/10/11 = 8/16/32/64
 }
 
 class MatrixMemExecReq(p: Parameters) extends Bundle {
-    val req = new MatrixMemCmd
+    val req = new MatrixMemCmd(p)
     val base = UInt(32.W)
     val stride = UInt(32.W)
 }

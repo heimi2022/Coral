@@ -103,6 +103,8 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     dut.io.matmulEnq.bits.md.poke(4.U)
     dut.io.memEnq.valid.poke(false.B)
     dut.io.memEnq.bits.req.pc.poke(0.U)
+    dut.io.memEnq.bits.req.robAge.position.poke(false.B)
+    dut.io.memEnq.bits.req.robAge.index.poke(0.U)
     dut.io.memEnq.bits.req.op.poke(MatrixMemOp.ST_C)
     dut.io.memEnq.bits.req.reg.poke(4.U)
     dut.io.memEnq.bits.req.elemWidth.poke(2.U)
@@ -133,14 +135,27 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
   }
 
   private def enqueueMem(dut: MatrixIssueQueue, pc: Int, op: MatrixMemOp.Type,
-                         reg: Int): Unit = {
+                         reg: Int, agePosition: Boolean = false,
+                         ageIndex: Int = 0): Unit = {
     dut.io.memEnq.bits.req.pc.poke(pc.U)
+    dut.io.memEnq.bits.req.robAge.position.poke(agePosition.B)
+    dut.io.memEnq.bits.req.robAge.index.poke(ageIndex.U)
     dut.io.memEnq.bits.req.op.poke(op)
     dut.io.memEnq.bits.req.reg.poke(reg.U)
     dut.io.memEnq.valid.poke(true.B)
     dut.io.enqReady.expect(true.B)
     dut.clock.step()
     dut.io.memEnq.valid.poke(false.B)
+  }
+
+  "Preserve ROB age through the matrix memory issue window" in {
+    simulate(new MatrixIssueQueue(parameters(), 4)) { dut =>
+      initialize(dut)
+      enqueueMem(dut, 0x180, MatrixMemOp.LD_B, 2, agePosition = true, ageIndex = 47)
+      dut.io.memDeq.valid.expect(true.B)
+      dut.io.memDeq.bits.req.robAge.position.expect(true.B)
+      dut.io.memDeq.bits.req.robAge.index.expect(47.U)
+    }
   }
 
   private def complete(dut: MatrixIssueQueue, pc: Int): Unit = {

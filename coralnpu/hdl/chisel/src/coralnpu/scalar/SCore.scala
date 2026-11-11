@@ -70,6 +70,7 @@ class SCore(p: Parameters) extends Module {
     val rob_io = retirement_buffer.io
 
     rob_io.inst := dispatch.io.inst
+    dispatch.io.robAge := rob_io.allocAge
     rob_io.jump := dispatch.io.jump
     rob_io.branch := dispatch.io.branch
     rob_io.writeAddrScalar := dispatch.io.rdMark

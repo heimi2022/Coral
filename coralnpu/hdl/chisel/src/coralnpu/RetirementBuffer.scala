@@ -20,6 +20,7 @@ import common._
 
 class RetirementBufferIO(p: Parameters) extends Bundle {
     val inst = Input(Vec(p.instructionLanes, Decoupled(new FetchInstruction(p))))
+    val allocAge = Output(Vec(p.instructionLanes, new RobAge(p)))
     val targets = Input(Vec(p.instructionLanes, UInt(32.W)))
     val jalrTargets = Input(Vec(p.instructionLanes, UInt(32.W)))
     val jump = Input(Vec(p.instructionLanes, Bool()))
@@ -82,6 +83,12 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val instBuffer = Module(new CircularBufferMulti(new Instruction,
                                 /* needs to be at least writeDataScalar count */ bufferSize,
                                                 /* chosen sort-of-arbitrarily */ bufferSize))
+    val allocAgeBase = Wire(new RobAge(p))
+    allocAgeBase.position := instBuffer.io.enqPosition
+    allocAgeBase.index := instBuffer.io.enqPtr
+    for (i <- 0 until p.instructionLanes) {
+        io.allocAge(i) := RobAge.advance(allocAgeBase, i.U, p)
+    }
     io.empty := instBuffer.io.nEnqueued === 0.U
     // Check that we see no instructions fire after the first non-fire.
     val instFires = io.inst.map(_.fire)
