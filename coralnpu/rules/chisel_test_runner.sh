@@ -12,7 +12,7 @@ export VERILATOR_CXX=`which g++`
 export VERILATOR_ROOT=${PWD}/external/verilator
 
 ${PWD}/external/verilator/verilator_bin \
-    "\${@}"
+    "\${@}" --verilate-jobs 1
 EOF
 chmod +x ${PWD}/external/verilator/verilator
 

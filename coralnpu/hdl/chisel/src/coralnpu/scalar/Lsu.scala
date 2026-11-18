@@ -28,20 +28,16 @@ class DFlushFenceiIO(p: Parameters) extends DFlushIO(p) {
 // LSU 对外接口定义。实际实现由 Lsu.apply 选择 LsuV2。
 class Lsu(p: Parameters) extends Module {
     val io = IO(new Bundle {
-        // Decode 阶段：接收访存命令并读取基地址/写数据。
-        val req = Vec(p.instructionLanes, Flipped(Decoupled(new LsuCmd(p))))
-        // 寄存器读端口
-        val busPort = Flipped(new RegfileBusPortIO(p))
-        val busPort_flt = Option.when(p.enableFloat)(Flipped(new RegfileBusPortIO(p)))
+        // 只接收 MemoryIssueUnit 已完成顺序检查、且锁存好操作数的命令。
+        val issue = Flipped(Decoupled(new LsuIssueCommand(p)))
 
         // 执行阶段：load 结果写入整数或浮点寄存器文件。
         val rd = Valid(Flipped(new RegfileWriteDataIO))
         val rd_flt = Valid(Flipped(new RegfileWriteDataIO))
 
-        // 本地指令/数据存储器及 flush 接口。
+        // 本地指令/数据存储器接口。
         val ibus = new IBusIO(p)
         val dbus = new DBusIO(p)
-        val flush = new DFlushFenceiIO(p)
         val fault = Valid(new FaultInfo(p))
 
         // 外部数据总线：访问外部内存或外设，后续通常转换为 AXI/TileLink。
@@ -53,17 +49,17 @@ class Lsu(p: Parameters) extends Module {
         val rvv2lsu = Option.when(p.enableRvv)(Vec(2, Flipped(Decoupled(new Rvv2Lsu(p)))))
         val lsu2rvv = Option.when(p.enableRvv)(Vec(2, Decoupled(new Lsu2Rvv(p))))
 
-        // RVV 当前配置状态，例如 SEW、LMUL 和 VL。
-        val rvvState = Option.when(p.enableRvv)(Input(Valid(new RvvConfigState(p))))
-
-        val queueCapacity = Output(UInt(3.W))
+        // 仅表示执行 slot 忙；排队状态由 MemoryIssueUnit 单独提供。
         val active = Output(Bool())
         val storeComplete = Output(Valid(UInt(32.W)))
+        val memoryOrderRangeUpdate = Output(Valid(
+            new MemoryOrderRangeUpdate(p)))
+        val memoryOrderComplete = Output(Valid(new RobAge(p)))
   })
 }
 
 object Lsu {
-  // 统一实例化入口，当前使用带操作队列和活动 slot 的 LsuV2。
+  // 统一实例化入口，LsuV2 只负责活动 slot 的执行。
   def apply(p: Parameters): Lsu = {
     return Module(new LsuV2(p))
   }
@@ -187,7 +183,7 @@ class LsuCmd(p: Parameters) extends Bundle {
   }
 }
 
-// LSU 内部排队格式：已带上标量寄存器读出的基地址和 store 源数据。
+// 访存入口的排队格式：已带上标量寄存器读出的基地址和 store 源数据。
 class LsuUOp(p: Parameters) extends Bundle {
   val store = Bool()
   val rd = UInt(5.W)
@@ -203,6 +199,9 @@ class LsuUOp(p: Parameters) extends Bundle {
   // This is the sew from vtype. It controls data width in indexed
   // loads/stores and is unused in other ops.
   val sew = Option.when(p.enableRvv) { UInt(3.W) }
+  val vl = Option.when(p.enableRvv) { UInt(log2Ceil(p.rvvVlen + 1).W) }
+  val wholeRegister = Option.when(p.enableRvv) { Bool() }
+  val maskOperation = Option.when(p.enableRvv) { Bool() }
   // How many data registers (per segment if applicable) to operate on.
   val emul_data = Option.when(p.enableRvv) { UInt(3.W) }
   val nfields = Option.when(p.enableRvv) { UInt(3.W) }
@@ -211,6 +210,11 @@ class LsuUOp(p: Parameters) extends Bundle {
     cf"LsuUOp(store -> ${store}, rd -> ${rd}, op -> ${op}, " +
     cf"pc -> 0x${pc}%x, addr -> 0x${addr}%x, data -> ${data})"
   }
+}
+
+// 发射到 LSU 的操作；uop 中的 robAge 同时标识对应的 Tracker 记录。
+class LsuIssueCommand(p: Parameters) extends Bundle {
+  val uop = new LsuUOp(p)
 }
 
 object LsuUOp {
@@ -255,6 +259,9 @@ object LsuUOp {
             (eew === "b110".U && sew === "b000".U) -> (lmul + 2.U),
         ))
         result.elemWidth.get := eew
+        result.vl.get := rvvState.get.bits.vl
+        result.wholeRegister.get := cmd.isWholeRegister()
+        result.maskOperation.get := cmd.isMaskOperation()
         // 普通向量访存按 EMUL 处理；mask 与 whole-register 操作有各自规则。
         result.emul_data.get := MuxCase(lmul, Seq(
             // If mask operation, always make LMUL=1.
@@ -417,6 +424,10 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   // Number of time indices repeats (up to 4 times)
   val indexParitions = UInt(3.W)
   val vectorLoop = new LsuVectorLoop()
+  // Indexed-vector address envelope accumulated across all index subvectors.
+  val memoryRangeValid = Bool()
+  val memoryRangeStart = UInt(32.W)
+  val memoryRangeEnd = UInt(32.W)
 
   def pendingVector(): Bool = {
     !vectorLoop.subvector.isFull()
@@ -517,6 +528,18 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.data := Mux(shouldUpdate && LsuOp.isVector(op) && rvv2lsu.vregfile.valid,
         UIntToVec(rvv2lsu.vregfile.bits.data, 8), data)
 
+    val candidateMin = updateAddrs.reduce((a, b) => Mux(a <= b, a, b))
+    val candidateMax = updateAddrs.reduce((a, b) => Mux(a >= b, a, b))
+    val indexRangeUpdate = LsuOp.isIndexedVector(op) &&
+        shouldUpdate && rvv2lsu.idx.valid
+    result.memoryRangeValid := memoryRangeValid || indexRangeUpdate
+    result.memoryRangeStart := Mux(indexRangeUpdate && memoryRangeValid,
+        Mux(candidateMin < memoryRangeStart, candidateMin, memoryRangeStart),
+        Mux(indexRangeUpdate, candidateMin, memoryRangeStart))
+    result.memoryRangeEnd := Mux(indexRangeUpdate && memoryRangeValid,
+        Mux(candidateMax > memoryRangeEnd, candidateMax, memoryRangeEnd),
+        Mux(indexRangeUpdate, candidateMax, memoryRangeEnd))
+
     result
   }
 
@@ -549,6 +572,9 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.sew := sew
     result.indexParitions := indexParitions
     result.vectorLoop := vectorLoop
+    result.memoryRangeValid := memoryRangeValid
+    result.memoryRangeStart := memoryRangeStart
+    result.memoryRangeEnd := memoryRangeEnd
 
     result
   }
@@ -587,6 +613,9 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
                              finishedVectorLoop,
                              vectorLoopNext)
     result.pendingWriteback := !finished
+    result.memoryRangeValid := memoryRangeValid
+    result.memoryRangeStart := memoryRangeStart
+    result.memoryRangeEnd := memoryRangeEnd
 
     // TODO(davidgao): absorb baseAddr offset computation into vectorLoop
     val lmulUpdate = vectorWriteback && vectorLoop.segment.isFull()
@@ -643,6 +672,9 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.sew := sew
     result.indexParitions := indexParitions
     result.vectorLoop := vectorLoop
+    result.memoryRangeValid := memoryRangeValid
+    result.memoryRangeStart := memoryRangeStart
+    result.memoryRangeEnd := memoryRangeEnd
     result
   }
 
@@ -744,6 +776,9 @@ object LsuSlot {
       result.indexParitions := 0.U
       result.vectorLoop := 0.U.asTypeOf(result.vectorLoop)
     }
+    result.memoryRangeValid := false.B
+    result.memoryRangeStart := 0.U
+    result.memoryRangeEnd := 0.U
 
     // Load 要向目的寄存器写回；RVV store 也要向 RVV 核回报操作完成。
     result.pendingWriteback := !uop.store || LsuOp.isVector(uop.op)
@@ -878,7 +913,7 @@ object FlushCmd {
   }
 }
 
-// 入口可以排队多条指令，但真正执行访存的只有一个活动 slot。
+// 独立的 LSU 执行端：命令来自 MemoryIssueUnit，内部只有一个活动 slot。
 // 这个 slot 按 byte 记录需求，再将属于同一条总线数据行的 byte 合并访问。
 class LsuV2(p: Parameters) extends Lsu(p) {
     // faultReg 额外保存目的寄存器和操作类型，供异常时恢复指令上下文。
@@ -892,46 +927,8 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     // Tie-offs
     io.vldst := 0.U
 
-    // 入口队列可暂存多条命令；队列深度不代表这些内存操作会并行执行。
-    val opQueue = Module(new MemoryIssueQueue(p))
-    io.queueCapacity := opQueue.io.nSpace
-
-    // Flush 请求独立于普通访存 slot 保存，直到下游 ready 接受为止。
-    // DispatchV2 will only flush on first slot, when LSU is inactive.
-
-    val flushCmd = RegInit(MakeInvalid(new FlushCmd))  // Track pending flush + pc
-    io.flush.valid  := flushCmd.valid
-    io.flush.all    := flushCmd.bits.all
-    io.flush.clean  := true.B
-    io.flush.fencei := flushCmd.bits.fencei
-    io.flush.pcNext := flushCmd.bits.pcNext
-
-    flushCmd := MuxCase(flushCmd, Seq(
-        // New flush command
-        (io.req(0).fire && LsuOp.isFlush(io.req(0).bits.op))
-            -> MakeValid(true.B, FlushCmd(io.req(0).bits)),
-        // Finish flush command
-        (io.flush.valid && io.flush.ready) -> MakeInvalid(new FlushCmd),
-    ))
-
-    // 按队列剩余空间对输入 lane 做反压；有效请求压入多入口环形队列。
-    val queueSpace = opQueue.io.nSpace
-    val validSum = io.req.map(_.valid).scan(
-        0.U(log2Ceil(p.instructionLanes + 1).W))(_+_)
-    for (i <- 0 until p.instructionLanes) {
-        io.req(i).ready := (validSum(i) < queueSpace) && !flushCmd.valid
-    }
-
-    // 将本周期握手的命令转换为内部 UOp；有效项压紧由队列内部完成。
-    val ops = (0 until p.instructionLanes).map(i =>
-        MakeValid(
-            io.req(i).fire && !LsuOp.isFlush(io.req(i).bits.op),
-            LsuUOp(p, i, io.req(i).bits, io.busPort, io.busPort_flt, io.rvvState))
-    )
-    opQueue.io.enq := VecInit(ops)
-
-    // 队首 UOp 转成逐 byte 跟踪的活动 slot；当前实现每个 slot 跟踪 16 byte。
-    val nextSlot = LsuSlot.fromLsuUOp(opQueue.io.deq.bits, p, 16)
+    // 已获准的 UOp 转成逐 byte 跟踪的活动 slot，每个 slot 跟踪 16 byte。
+    val nextSlot = LsuSlot.fromLsuUOp(io.issue.bits.uop, p, 16)
 
   // 保存上一拍接受的读请求元数据。该实现一次只跟踪当前 slot 的读返回。
   val readFired = RegInit(MakeInvalid(new LsuRead(32 - nextSlot.elemBits)))
@@ -953,10 +950,32 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   } else {
       slot
   }
+  val vectorUpdate = io.rvv2lsu.map(_(0).fire).getOrElse(false.B)
 
   // ==========================================================================
   // 先消费上一拍的读返回，再决定当前 slot 下一笔访存请求。
   val faultReg = RegInit(MakeInvalid(new LsuFault(p)))
+
+  // 年龄直接复用 slot.robAge，只额外记录是否仍占用 Tracker 项。
+  val memoryOrderActive = RegInit(false.B)
+
+  val indexedAddressSetComplete = if (p.enableRvv) {
+    vectorUpdate && io.rvv2lsu.get(0).bits.idx.valid &&
+      !vectorUpdatedSlot.vectorLoop.isActive()
+  } else {
+    false.B
+  }
+  io.memoryOrderRangeUpdate.valid := indexedAddressSetComplete &&
+    vectorUpdatedSlot.memoryRangeValid && memoryOrderActive
+  io.memoryOrderRangeUpdate.bits.robAge := slot.robAge
+  io.memoryOrderRangeUpdate.bits.hasAccess := true.B
+  io.memoryOrderRangeUpdate.bits.addressKnown := true.B
+  private val trackedAddressBits = MemoryOrderTracker.AddressBits
+  io.memoryOrderRangeUpdate.bits.rangeStart :=
+    vectorUpdatedSlot.memoryRangeStart(trackedAddressBits - 1, 0)
+  io.memoryOrderRangeUpdate.bits.rangeEnd :=
+    vectorUpdatedSlot.memoryRangeEnd(trackedAddressBits - 1, 0)
+  io.issue.ready := slot.slotIdle() && !faultReg.valid
 
   // 读返回按地址分配到 slot 的 byte，并更新尚未完成的 byte 集合。
   val loadUpdatedSlot = Mux(readFired.valid,
@@ -1114,14 +1133,20 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   val writebackFired = writebacksFired.reduce(_ || _)
   val writebackUpdatedSlot = slot.writebackUpdate()
 
-  // 只有活动 slot 完全空闲时才弹出下一条 UOp。
-  opQueue.io.deq.ready := slot.slotIdle()
+  val memoryOrderOpComplete = faultReg.valid || scalarStoreComplete ||
+      (writebackFired && writebackUpdatedSlot.slotIdle())
+  io.memoryOrderComplete.valid := memoryOrderActive && memoryOrderOpComplete
+  io.memoryOrderComplete.bits := slot.robAge
+  when(io.issue.fire) {
+    memoryOrderActive := true.B
+  }.elsewhen(io.memoryOrderComplete.valid) {
+    memoryOrderActive := false.B
+  }
 
   // 按优先级选择本拍 slot 状态更新：异常清空、装载新操作、接收 RVV 片段、
   // 更新访存进度，最后处理结果写回/向量循环推进。
 
   // 检查 RVV 输入和结果写回只能发生在 slot 对应阶段。
-  val vectorUpdate = io.rvv2lsu.map(_(0).fire).getOrElse(false.B)
   assert(!vectorUpdate || slot.pendingVector())
   assert(!writebackFired || (slot.shouldWriteback() || faultReg.valid))
 
@@ -1130,7 +1155,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     // Move to inactive if error.
     (faultReg.valid) -> LsuSlot.inactive(p, 16),
     // When inactive, dequeue if possible
-    opQueue.io.deq.fire -> nextSlot,
+    io.issue.fire -> nextSlot,
     // Vector update.
     vectorUpdate -> vectorUpdatedSlot,
     // Active transaction update.
@@ -1141,7 +1166,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
 
   slot := slotNext
 
-  // 提供给 Decode/系统的忙状态：活动 slot 非空或命令队列仍有待办项。
-  io.active := !slot.slotIdle() || opQueue.io.deq.valid
+  // 队列忙状态在 SCore 中合并；这里仅报告执行端是否仍有操作。
+  io.active := !slot.slotIdle()
 }
 

@@ -238,6 +238,50 @@ struct CoreMiniAxi_tb : Sysc_tb {
   // NB: Used to bind bridge and checker, DUT needs manual wiring.
   CoreMiniAxiSignals tlm2axi_signals_;
   CoreMiniAxiSignals axi2tlm_signals_;
+#if (KP_enableMatrix == true)
+  // This scalar bus testbench leaves the independent matrix AXI master idle.
+  struct MatrixAxiIO {
+    sc_signal<bool> write_addr_ready;
+    sc_signal<bool> write_addr_valid;
+    sc_signal<bool> write_addr_bits_id;
+    sc_signal<bool> write_addr_bits_lock;
+    sc_signal<bool> write_data_ready;
+    sc_signal<bool> write_data_valid;
+    sc_signal<bool> write_data_bits_last;
+    sc_signal<bool> write_resp_ready;
+    sc_signal<bool> write_resp_valid;
+    sc_signal<bool> write_resp_bits_id;
+    sc_signal<bool> read_addr_ready;
+    sc_signal<bool> read_addr_valid;
+    sc_signal<bool> read_addr_bits_id;
+    sc_signal<bool> read_addr_bits_lock;
+    sc_signal<bool> read_data_ready;
+    sc_signal<bool> read_data_valid;
+    sc_signal<bool> read_data_bits_id;
+    sc_signal<bool> read_data_bits_last;
+    sc_signal<sc_bv<32>> write_addr_bits_addr;
+    sc_signal<sc_bv<3>> write_addr_bits_prot;
+    sc_signal<sc_bv<8>> write_addr_bits_len;
+    sc_signal<sc_bv<3>> write_addr_bits_size;
+    sc_signal<sc_bv<2>> write_addr_bits_burst;
+    sc_signal<sc_bv<4>> write_addr_bits_cache;
+    sc_signal<sc_bv<4>> write_addr_bits_qos;
+    sc_signal<sc_bv<4>> write_addr_bits_region;
+    sc_signal<sc_bv<KP_matrixAxiDataBits>> write_data_bits_data;
+    sc_signal<sc_bv<KP_matrixAxiDataBits / 8>> write_data_bits_strb;
+    sc_signal<sc_bv<2>> write_resp_bits_resp;
+    sc_signal<sc_bv<32>> read_addr_bits_addr;
+    sc_signal<sc_bv<3>> read_addr_bits_prot;
+    sc_signal<sc_bv<8>> read_addr_bits_len;
+    sc_signal<sc_bv<3>> read_addr_bits_size;
+    sc_signal<sc_bv<2>> read_addr_bits_burst;
+    sc_signal<sc_bv<4>> read_addr_bits_cache;
+    sc_signal<sc_bv<4>> read_addr_bits_qos;
+    sc_signal<sc_bv<4>> read_addr_bits_region;
+    sc_signal<sc_bv<KP_matrixAxiDataBits>> read_data_bits_data;
+    sc_signal<sc_bv<2>> read_data_bits_resp;
+  } matrix_axi_io_;
+#endif
   DebugIO debug_io_;
   DebugModuleIO dm_io_;
   Xbar xbar_;

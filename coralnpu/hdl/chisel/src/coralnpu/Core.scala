@@ -127,8 +127,6 @@ object EmitCore extends App {
             p.enableVerification = arg.split("=")(1).toBoolean
         } else if (arg.startsWith("--lsuDataBits")) {
             p.lsuDataBits = arg.split("=")(1).toInt
-            // itcmSizeKBytes, and dtcmSizeKBytes replace highmem flag
-            // if highmem is needed, set both tcm sizes to 1024
         } else if (arg.startsWith("--itcmSizeKBytes")) {
             p.itcmSizeKBytes = arg.split("=")(1).toInt
         } else if (arg.startsWith("--dtcmSizeKBytes")) {
@@ -147,17 +145,11 @@ object EmitCore extends App {
 
     val finalModuleName = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
         moduleName
-    } else if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesHighmem && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesHighmem) {
-        s"${moduleName}Highmem"
     } else {
         s"${moduleName}_ITCM${p.itcmSizeKBytes}KB_DTCM${p.dtcmSizeKBytes}KB"
     }
 
-    val memoryRegions = if (p.itcmSizeKBytes == Parameters.itcmSizeKBytesDefault && p.dtcmSizeKBytes == Parameters.dtcmSizeKBytesDefault) {
-        MemoryRegions.default
-    } else {
-        MemoryRegions.highmem(p.itcmSizeKBytes, p.dtcmSizeKBytes)
-    }
+    val memoryRegions = MemoryRegions.configured(p.itcmSizeKBytes, p.dtcmSizeKBytes)
 
     // The core module must be created in the ChiselStage context. Use lazy here
     // so it's created in ChiselStage, but referencable afterwards.

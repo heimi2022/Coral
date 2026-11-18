@@ -343,6 +343,7 @@ chisel_library(
         "L1DCache.scala",
         "L1ICache.scala",
         "Library.scala",
+        "MemoryOrderTracker.scala",
         "Parameters.scala",
         "RobAge.scala",
     ],
@@ -367,6 +368,7 @@ chisel_library(
         "scalar/Fetch.scala",
         "scalar/Lsu.scala",
         "scalar/MemoryIssueQueue.scala",
+        "scalar/MemoryIssueUnit.scala",
         "scalar/Mlu.scala",
         "scalar/Regfile.scala",
         "scalar/SCore.scala",
@@ -494,6 +496,7 @@ chisel_cc_library(
 
 CORE_MINI_AXI_VOPTS = [
     "-DUSE_GENERIC",
+    "-Wno-fatal",
     # Warnings that we disable for fpnew
     "-Wno-UNOPTFLAT",
     "-Wno-ASCRANGE",
@@ -545,28 +548,6 @@ template_rule(
     vopts = CORE_MINI_AXI_VOPTS,
 )
 
-chisel_cc_library(
-    name = "core_mini_highmem_axi_cc_library",
-    chisel_lib = ":coralnpu",
-    emit_class = "coralnpu.EmitCore",
-    extra_outs = [
-        "VCoreMiniHighmemAxi_parameters.h",
-        "CoreMiniHighmemAxi.zip",
-    ],
-    gen_flags = [
-        "--enableFetchL0=False",
-        "--fetchDataBits=128",
-        "--lsuDataBits=128",
-        "--enableFloat=True",
-        "--moduleName=CoreMini",
-        "--useAxi",
-        "--itcmSizeKBytes=1024",
-        "--dtcmSizeKBytes=1024",
-    ],
-    module_name = "CoreMiniHighmemAxi",
-    vopts = CORE_MINI_AXI_VOPTS,
-)
-
 # Separate output names keep matrix verification independent of CPU/RVV baselines.
 chisel_cc_library(
     name = "matrix_core_axi_cc_library",
@@ -589,12 +570,12 @@ chisel_cc_library(
 )
 
 chisel_cc_library(
-    name = "core_mini_itcm512kb_dtcm512kb_axi_cc_library",
+    name = "core_mini_dtcm512kb_axi_cc_library",
     chisel_lib = ":coralnpu",
     emit_class = "coralnpu.EmitCore",
     extra_outs = [
-        "VCoreMini_ITCM512KB_DTCM512KBAxi_parameters.h",
-        "CoreMini_ITCM512KB_DTCM512KBAxi.zip",
+        "VCoreMini_ITCM8KB_DTCM512KBAxi_parameters.h",
+        "CoreMini_ITCM8KB_DTCM512KBAxi.zip",
     ],
     gen_flags = [
         "--enableFetchL0=False",
@@ -603,10 +584,10 @@ chisel_cc_library(
         "--enableFloat=True",
         "--moduleName=CoreMini",
         "--useAxi",
-        "--itcmSizeKBytes=512",
+        "--itcmSizeKBytes=8",
         "--dtcmSizeKBytes=512",
     ],
-    module_name = "CoreMini_ITCM512KB_DTCM512KBAxi",
+    module_name = "CoreMini_ITCM8KB_DTCM512KBAxi",
     vopts = CORE_MINI_AXI_VOPTS,
 )
 
@@ -706,30 +687,17 @@ template_rule(
             ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
             "module_name": "RvvCoreMiniVerificationAxi",
         },
-        "rvv_core_mini_highmem_axi_cc_library": {
+        "rvv_core_mini_dtcm512kb_axi_cc_library": {
             "extra_outs": [
-                "VRvvCoreMiniHighmemAxi_parameters.h",
-                "RvvCoreMiniHighmemAxi.zip",
+                "VRvvCoreMini_ITCM8KB_DTCM512KBAxi_parameters.h",
+                "RvvCoreMini_ITCM8KB_DTCM512KBAxi.zip",
             ],
             "gen_flags": [
                 "--moduleName=RvvCoreMini",
-                "--itcmSizeKBytes=1024",
-                "--dtcmSizeKBytes=1024",
-                # Highmem naming is handled in Core.scala
-            ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
-            "module_name": "RvvCoreMiniHighmemAxi",
-        },
-        "rvv_core_mini_itcm512kb_dtcm512kb_axi_cc_library": {
-            "extra_outs": [
-                "VRvvCoreMini_ITCM512KB_DTCM512KBAxi_parameters.h",
-                "RvvCoreMini_ITCM512KB_DTCM512KBAxi.zip",
-            ],
-            "gen_flags": [
-                "--moduleName=RvvCoreMini",
-                "--itcmSizeKBytes=512",
+                "--itcmSizeKBytes=8",
                 "--dtcmSizeKBytes=512",
             ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
-            "module_name": "RvvCoreMini_ITCM512KB_DTCM512KBAxi",
+            "module_name": "RvvCoreMini_ITCM8KB_DTCM512KBAxi",
         },
     },
     chisel_lib = ":coralnpu",

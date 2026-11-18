@@ -254,6 +254,49 @@ void CoreMiniAxi_tb::Connect() {
   core_->io_axi_master_write_resp_bits_id(axi2tlm_signals_.bid);
   core_->io_axi_master_write_resp_bits_resp(axi2tlm_signals_.bresp);
 
+#if (KP_enableMatrix == true)
+  // Bind every matrix port; un-driven response signals stay at their zero defaults.
+  core_->io_matrix_axi_master_write_addr_ready(matrix_axi_io_.write_addr_ready);
+  core_->io_matrix_axi_master_write_addr_valid(matrix_axi_io_.write_addr_valid);
+  core_->io_matrix_axi_master_write_addr_bits_id(matrix_axi_io_.write_addr_bits_id);
+  core_->io_matrix_axi_master_write_addr_bits_lock(matrix_axi_io_.write_addr_bits_lock);
+  core_->io_matrix_axi_master_write_data_ready(matrix_axi_io_.write_data_ready);
+  core_->io_matrix_axi_master_write_data_valid(matrix_axi_io_.write_data_valid);
+  core_->io_matrix_axi_master_write_data_bits_last(matrix_axi_io_.write_data_bits_last);
+  core_->io_matrix_axi_master_write_resp_ready(matrix_axi_io_.write_resp_ready);
+  core_->io_matrix_axi_master_write_resp_valid(matrix_axi_io_.write_resp_valid);
+  core_->io_matrix_axi_master_write_resp_bits_id(matrix_axi_io_.write_resp_bits_id);
+  core_->io_matrix_axi_master_read_addr_ready(matrix_axi_io_.read_addr_ready);
+  core_->io_matrix_axi_master_read_addr_valid(matrix_axi_io_.read_addr_valid);
+  core_->io_matrix_axi_master_read_addr_bits_id(matrix_axi_io_.read_addr_bits_id);
+  core_->io_matrix_axi_master_read_addr_bits_lock(matrix_axi_io_.read_addr_bits_lock);
+  core_->io_matrix_axi_master_read_data_ready(matrix_axi_io_.read_data_ready);
+  core_->io_matrix_axi_master_read_data_valid(matrix_axi_io_.read_data_valid);
+  core_->io_matrix_axi_master_read_data_bits_id(matrix_axi_io_.read_data_bits_id);
+  core_->io_matrix_axi_master_read_data_bits_last(matrix_axi_io_.read_data_bits_last);
+  core_->io_matrix_axi_master_write_addr_bits_addr(matrix_axi_io_.write_addr_bits_addr);
+  core_->io_matrix_axi_master_write_addr_bits_prot(matrix_axi_io_.write_addr_bits_prot);
+  core_->io_matrix_axi_master_write_addr_bits_len(matrix_axi_io_.write_addr_bits_len);
+  core_->io_matrix_axi_master_write_addr_bits_size(matrix_axi_io_.write_addr_bits_size);
+  core_->io_matrix_axi_master_write_addr_bits_burst(matrix_axi_io_.write_addr_bits_burst);
+  core_->io_matrix_axi_master_write_addr_bits_cache(matrix_axi_io_.write_addr_bits_cache);
+  core_->io_matrix_axi_master_write_addr_bits_qos(matrix_axi_io_.write_addr_bits_qos);
+  core_->io_matrix_axi_master_write_addr_bits_region(matrix_axi_io_.write_addr_bits_region);
+  core_->io_matrix_axi_master_write_data_bits_data(matrix_axi_io_.write_data_bits_data);
+  core_->io_matrix_axi_master_write_data_bits_strb(matrix_axi_io_.write_data_bits_strb);
+  core_->io_matrix_axi_master_write_resp_bits_resp(matrix_axi_io_.write_resp_bits_resp);
+  core_->io_matrix_axi_master_read_addr_bits_addr(matrix_axi_io_.read_addr_bits_addr);
+  core_->io_matrix_axi_master_read_addr_bits_prot(matrix_axi_io_.read_addr_bits_prot);
+  core_->io_matrix_axi_master_read_addr_bits_len(matrix_axi_io_.read_addr_bits_len);
+  core_->io_matrix_axi_master_read_addr_bits_size(matrix_axi_io_.read_addr_bits_size);
+  core_->io_matrix_axi_master_read_addr_bits_burst(matrix_axi_io_.read_addr_bits_burst);
+  core_->io_matrix_axi_master_read_addr_bits_cache(matrix_axi_io_.read_addr_bits_cache);
+  core_->io_matrix_axi_master_read_addr_bits_qos(matrix_axi_io_.read_addr_bits_qos);
+  core_->io_matrix_axi_master_read_addr_bits_region(matrix_axi_io_.read_addr_bits_region);
+  core_->io_matrix_axi_master_read_data_bits_data(matrix_axi_io_.read_data_bits_data);
+  core_->io_matrix_axi_master_read_data_bits_resp(matrix_axi_io_.read_data_bits_resp);
+#endif
+
   // AR
   core_->io_axi_slave_read_addr_ready(tlm2axi_signals_.arready);
   core_->io_axi_slave_read_addr_valid(tlm2axi_signals_.arvalid);

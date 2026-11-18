@@ -21,7 +21,7 @@ from coralnpu_test_utils.TileLinkULInterface import (
 )
 
 # --- DMA Register Map ---
-DMA_BASE = 0x40050000
+DMA_BASE = 0x3A000
 DMA_CTRL = DMA_BASE + 0x00
 DMA_STATUS = DMA_BASE + 0x04
 DMA_DESC_ADDR = DMA_BASE + 0x08

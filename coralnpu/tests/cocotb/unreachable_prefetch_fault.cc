@@ -133,6 +133,7 @@ __attribute__((used, retain, noreturn)) void wfi() {
 }
 
 __attribute__((used, retain, noreturn)) void load() {
+  // This is a single-byte fault case, not a test of an access range crossing 4 GiB.
   asm volatile(
       "lb a0, %[addr];"
       "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0xFFFFFFFF)
@@ -142,6 +143,7 @@ __attribute__((used, retain, noreturn)) void load() {
 }
 
 __attribute__((used, retain, noreturn)) void store() {
+  // This is a single-byte fault case, not a test of an access range crossing 4 GiB.
   asm volatile(
       "sb a0, %[addr];"
       "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0xFFFFFFFF));

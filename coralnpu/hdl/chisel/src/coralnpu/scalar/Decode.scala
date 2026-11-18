@@ -275,7 +275,7 @@ class Dispatch(p: Parameters) extends Module {
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
-        val lsuQueueCapacity = Input(UInt(3.W))
+        val lsuQueueCapacity = Input(UInt(4.W))
 
         // Multiplier interface.
         val mlu = Vec(p.instructionLanes, Decoupled(new MluCmd))

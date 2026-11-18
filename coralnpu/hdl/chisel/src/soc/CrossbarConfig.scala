@@ -17,6 +17,7 @@ package coralnpu.soc
 import chisel3._
 import coralnpu.Parameters
 import coralnpu.MemorySize
+import coralnpu.CoralMemoryMap
 
 /**
  * A simple case class for defining memory regions.
@@ -77,34 +78,20 @@ class CrossbarConfig(itcmSize: MemorySize, dtcmSize: MemorySize) {
     }
   }
 
-  val coralnpu_ranges = {
-    val defaultItcmSize = MemorySize.fromKBytes(Parameters.itcmSizeKBytesDefault)
-    val defaultDtcmSize = MemorySize.fromKBytes(Parameters.dtcmSizeKBytesDefault)
-
-    if (itcmSize == defaultItcmSize && dtcmSize == defaultDtcmSize) {
-      // Default configuration
-      Seq(
-        AddressRange(0x00000000, 0x00002000),    // 8kB ITCM
-        AddressRange(0x00010000, 0x00008000),    // 32kB DTCM
-        AddressRange(0x00030000, 0x00001000)     // 4kB peripheral space (default peripheral address)
-      )
-    } else {
-      // Custom configuration
-      Seq(
-        AddressRange(0x00000000, itcmSize.bytes),
-        AddressRange(0x00100000, dtcmSize.bytes),
-        AddressRange(0x00200000, 0x00001000)     // 4kB peripheral space (custom peripheral address)
-      )
-    }
-  }
+  private val memoryMap = CoralMemoryMap(itcmSize.kBytes, dtcmSize.kBytes)
+  val coralnpu_ranges = Seq(
+    AddressRange(memoryMap.itcmBase, memoryMap.itcmBytes),
+    AddressRange(memoryMap.dtcmBase, memoryMap.dtcmBytes),
+    AddressRange(memoryMap.peripheralBase, 0x1000),
+  )
 
   // List of all device (slave) interfaces with their address maps.
   val devices = Seq(
     DeviceConfig("coralnpu_device", coralnpu_ranges, width = 128),
-    DeviceConfig("rom",  Seq(AddressRange(0x10000000, 0x8000))),      // 32kB
-    DeviceConfig("uart0", Seq(AddressRange(0x40000000, 0x1000))),
-    DeviceConfig("dma", Seq(AddressRange(0x40050000, 0x1000))),
-    DeviceConfig("ddr_ctrl", Seq(AddressRange(0x70000000, 0x1000)), clockDomain = "ddr", width = 32), // 4kB for DDR Control
+    DeviceConfig("rom",  Seq(AddressRange(memoryMap.romBase, 0x8000))),
+    DeviceConfig("uart0", Seq(AddressRange(memoryMap.uartBase, 0x1000))),
+    DeviceConfig("dma", Seq(AddressRange(memoryMap.dmaBase, 0x1000))),
+    DeviceConfig("ddr_ctrl", Seq(AddressRange(memoryMap.ddrCtrlBase, 0x1000)), clockDomain = "ddr", width = 32),
     DeviceConfig("ddr_mem",  Seq(AddressRange(BigInt("80000000", 16), BigInt("80000000", 16))), clockDomain = "ddr", width = 128)     // 2GB for DDR Memory
   )
 

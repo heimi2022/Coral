@@ -81,8 +81,6 @@ class CoralNPUChiselSubsystem(val hostParams: Seq[bus.TLULParameters], val devic
   override val desiredName = {
     if (itcmSize.kBytes == Parameters.itcmSizeKBytesDefault && dtcmSize.kBytes == Parameters.dtcmSizeKBytesDefault) {
       "CoralNPUChiselSubsystem" + testHarnessSuffix
-    } else if (itcmSize.kBytes == Parameters.itcmSizeKBytesHighmem && dtcmSize.kBytes == Parameters.dtcmSizeKBytesHighmem) {
-      "CoralNPUChiselSubsystemHighmem" + testHarnessSuffix
     } else {
       s"CoralNPUChiselSubsystem_ITCM${itcmSize.kBytes}KB_DTCM${dtcmSize.kBytes}KB" + testHarnessSuffix
     }

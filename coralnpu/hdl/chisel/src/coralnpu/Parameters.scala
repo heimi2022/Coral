@@ -25,6 +25,48 @@ object MemoryRegionType extends ChiselEnum {
     val External = Value
 }
 
+object CoralMemoryMap {
+    val AddressBits = 20
+    val AddressSpaceBytes = 1 << AddressBits
+    val DefaultPeripheralBase = 0x00030000
+
+    case class Layout(
+        itcmBase: Int,
+        itcmBytes: Int,
+        dtcmBase: Int,
+        dtcmBytes: Int,
+        peripheralBase: Int,
+        romBase: Int,
+        uartBase: Int,
+        dmaBase: Int,
+        ddrCtrlBase: Int,
+    )
+
+    private def alignUp(value: Int, alignment: Int): Int =
+        (value + alignment - 1) & ~(alignment - 1)
+
+    def apply(itcmKBytes: Int, dtcmKBytes: Int): Layout = {
+        val itcmBytes = itcmKBytes * 1024
+        val dtcmBytes = dtcmKBytes * 1024
+        require(itcmBytes > 0 && dtcmBytes > 0)
+        require(dtcmBytes <= 512 * 1024,
+            "DTCM must not exceed 512 KiB in the 20-bit memory map")
+
+        val dtcmBase = alignUp(math.max(0x00010000, itcmBytes), 0x00010000)
+        val dtcmEnd = dtcmBase + dtcmBytes
+        val peripheralBase = alignUp(math.max(DefaultPeripheralBase, dtcmEnd), 0x1000)
+        val romBase = peripheralBase + 0x1000
+        val uartBase = romBase + 0x8000
+        val dmaBase = uartBase + 0x1000
+        val ddrCtrlBase = dmaBase + 0x1000
+        require(ddrCtrlBase + 0x1000 <= AddressSpaceBytes,
+            "Configured ITCM and DTCM do not leave room for all devices in the 20-bit map")
+
+        Layout(0, itcmBytes, dtcmBase, dtcmBytes, peripheralBase,
+            romBase, uartBase, dmaBase, ddrCtrlBase)
+    }
+}
+
 class MemoryRegion(
     val memStart: Int,
     val memSize: Int,
@@ -37,25 +79,22 @@ class MemoryRegion(
 }
 
 object MemoryRegions {
-    val default = Seq(
-        new MemoryRegion(0x0000000, 0x00002000, MemoryRegionType.IMEM), // ITCM
-        new MemoryRegion(0x0010000, 0x00008000, MemoryRegionType.DMEM), // DTCM
-        new MemoryRegion(0x0030000, 0x00001000, MemoryRegionType.Peripheral), // CSR
-    )
-    def highmem(itcmSizeKBytes: Int, dtcmSizeKBytes: Int) = Seq(
-        // The DTCM and CSR base addresses are deliberately offset in `highmem`
-        // to allow for varying size up to 1MB without affecting existing memory base addresses
-        new MemoryRegion(0x00000000, itcmSizeKBytes * 1024, MemoryRegionType.IMEM), // ITCM
-        new MemoryRegion(0x00100000, dtcmSizeKBytes * 1024, MemoryRegionType.DMEM), // DTCM
-        new MemoryRegion(0x00200000, 0x00001000, MemoryRegionType.Peripheral), // CSR
-    )
+    def configured(itcmSizeKBytes: Int, dtcmSizeKBytes: Int): Seq[MemoryRegion] = {
+        val map = CoralMemoryMap(itcmSizeKBytes, dtcmSizeKBytes)
+        Seq(
+            new MemoryRegion(map.itcmBase, map.itcmBytes, MemoryRegionType.IMEM),
+            new MemoryRegion(map.dtcmBase, map.dtcmBytes, MemoryRegionType.DMEM),
+            new MemoryRegion(map.peripheralBase, 0x1000, MemoryRegionType.Peripheral),
+        )
+    }
+
+    val default = configured(Parameters.itcmSizeKBytesDefault,
+        Parameters.dtcmSizeKBytesDefault)
 }
 
 object Parameters {
     val itcmSizeKBytesDefault = 8     // default itcm size for current IP design
     val dtcmSizeKBytesDefault = 32    // default dtcm size for current IP design
-    val itcmSizeKBytesHighmem = 1024
-    val dtcmSizeKBytesHighmem = 1024
     def apply(): Parameters = {
         return new Parameters()
     }

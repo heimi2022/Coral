@@ -101,14 +101,7 @@ object SoCChiselConfig {
 class SoCChiselConfig(itcmSize: MemorySize, dtcmSize: MemorySize) {
   // --- Memory Map ---
   val memoryRegions = {
-    val defaultItcmSize = MemorySize.fromKBytes(Parameters.itcmSizeKBytesDefault)
-    val defaultDtcmSize = MemorySize.fromKBytes(Parameters.dtcmSizeKBytesDefault)
-
-    if (itcmSize == defaultItcmSize && dtcmSize == defaultDtcmSize) {
-      MemoryRegions.default
-    } else {
-      MemoryRegions.highmem(itcmSize.kBytes, dtcmSize.kBytes)
-    }
+    MemoryRegions.configured(itcmSize.kBytes, dtcmSize.kBytes)
   }
 
   val crossbar = CrossbarConfig(itcmSize, dtcmSize)

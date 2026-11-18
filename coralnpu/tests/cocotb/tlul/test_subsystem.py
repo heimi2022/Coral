@@ -225,7 +225,7 @@ async def test_tlul_passthrough(dut):
 
     # --- Device Responder Task ---
     # This task mimics the behavior of the external ROM device.
-    ROM_BASE_ADDR = 0x10000000
+    ROM_BASE_ADDR = 0x31000
     TEST_SOURCE_ID = 5
     TEST_DATA = 0xCAFED00D
 
@@ -442,7 +442,7 @@ async def test_ddr_access(dut):
     await host_if.init()
 
     # --- AXI Responder Models ---
-    DDR_CTRL_BASE = 0x70000000
+    DDR_CTRL_BASE = 0x3B000
     DDR_MEM_BASE = 0x80000000
     TEST_DATA = 0x12345678
 

@@ -131,30 +131,6 @@ template_rule(
                 "VERILATOR_MODEL=VCoreMiniVerificationAxi",
             ],
         },
-        "core_mini_highmem_axi_tb": {
-            "srcs": [
-                "@coralnpu_hw//hdl/chisel/src/coralnpu:VCoreMiniHighmemAxi_parameters.h",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_SRCS,
-            "deps": [
-                "//hdl/chisel/src/coralnpu:core_mini_highmem_axi_cc_library",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_DEPS,
-            "defines": [
-                "VERILATOR_MODEL=VCoreMiniHighmemAxi",
-                "HIGHMEM_RTL",
-            ],
-        },
-        "core_mini_itcm512kb_dtcm512kb_axi_tb": {
-            "srcs": [
-                "@coralnpu_hw//hdl/chisel/src/coralnpu:VCoreMini_ITCM512KB_DTCM512KBAxi_parameters.h",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_SRCS,
-            "deps": [
-                "//hdl/chisel/src/coralnpu:core_mini_itcm512kb_dtcm512kb_axi_cc_library",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_DEPS,
-            "defines": [
-                "VERILATOR_MODEL=VCoreMini_ITCM512KB_DTCM512KBAxi",
-                "HIGHMEM_RTL",
-            ],
-        },
         "rvv_core_mini_axi_tb": {
             "srcs": [
                 "@coralnpu_hw//hdl/chisel/src/coralnpu:VRvvCoreMiniAxi_parameters.h",
@@ -164,30 +140,6 @@ template_rule(
             ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_DEPS,
             "defines": [
                 "VERILATOR_MODEL=VRvvCoreMiniAxi",
-            ],
-        },
-        "rvv_core_mini_highmem_axi_tb": {
-            "srcs": [
-                "@coralnpu_hw//hdl/chisel/src/coralnpu:VRvvCoreMiniHighmemAxi_parameters.h",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_SRCS,
-            "deps": [
-                "//hdl/chisel/src/coralnpu:rvv_core_mini_highmem_axi_cc_library",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_DEPS,
-            "defines": [
-                "VERILATOR_MODEL=VRvvCoreMiniHighmemAxi",
-                "HIGHMEM_RTL",
-            ],
-        },
-        "rvv_core_mini_itcm512kb_dtcm512kb_axi_tb": {
-            "srcs": [
-                "@coralnpu_hw//hdl/chisel/src/coralnpu:VRvvCoreMini_ITCM512KB_DTCM512KBAxi_parameters.h",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_SRCS,
-            "deps": [
-                "//hdl/chisel/src/coralnpu:rvv_core_mini_itcm512kb_dtcm512kb_axi_cc_library",
-            ] + CORE_MINI_AXI_TB_CC_LIBRARY_COMMON_DEPS,
-            "defines": [
-                "VERILATOR_MODEL=VRvvCoreMini_ITCM512KB_DTCM512KBAxi",
-                "HIGHMEM_RTL",
             ],
         },
         "rvv_core_mini_verification_axi_tb": {
@@ -228,29 +180,9 @@ template_rule(
                 ":core_mini_verification_axi_tb",
             ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
         },
-        "core_mini_highmem_axi_sim": {
-            "deps": [
-                ":core_mini_highmem_axi_tb",
-            ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
-        },
-        "core_mini_itcm512kb_dtcm512kb_axi_sim": {
-            "deps": [
-                ":core_mini_itcm512kb_dtcm512kb_axi_tb",
-            ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
-        },
         "rvv_core_mini_axi_sim": {
             "deps": [
                 ":rvv_core_mini_axi_tb",
-            ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
-        },
-        "rvv_core_mini_highmem_axi_sim": {
-            "deps": [
-                ":rvv_core_mini_highmem_axi_tb",
-            ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
-        },
-        "rvv_core_mini_itcm512kb_dtcm512kb_axi_sim": {
-            "deps": [
-                ":rvv_core_mini_itcm512kb_dtcm512kb_axi_tb",
             ] + CORE_MINI_AXI_SIM_CC_BINARY_COMMON_DEPS,
         },
         "rvv_core_mini_verification_axi_sim": {

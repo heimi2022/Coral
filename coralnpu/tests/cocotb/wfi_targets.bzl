@@ -8,16 +8,4 @@ def get_wfi_slot_targets():
         targets["wfi_slot_%d" % slot] = {
             "srcs": ["wfi_slot_%d.c" % slot],
         }
-        # Highmem
-        targets["wfi_slot_%d_highmem" % slot] = {
-            "srcs": ["wfi_slot_%d.c" % slot],
-            "itcm_size_kbytes": 1024,
-            "dtcm_size_kbytes": 1024,
-        }
-        # 512KB
-        targets["wfi_slot_%d_itcm512kb_dtcm512kb" % slot] = {
-            "srcs": ["wfi_slot_%d.c" % slot],
-            "itcm_size_kbytes": 512,
-            "dtcm_size_kbytes": 512,
-        }
     return targets

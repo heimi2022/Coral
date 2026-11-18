@@ -65,6 +65,13 @@ class SCore(p: Parameters) extends Module {
     }
 
     val lsu = Lsu(p)
+    // 访存调度与执行并列；未来 MatrixDma 可作为另一个独立执行端接入。
+    val memoryIssue = Module(new MemoryIssueUnit(p))
+    lsu.io.issue <> memoryIssue.io.lsuIssue
+    memoryIssue.io.rangeUpdate := lsu.io.memoryOrderRangeUpdate
+    memoryIssue.io.complete := lsu.io.memoryOrderComplete
+    val memoryActive = memoryIssue.io.pending || lsu.io.active
+
     val fault_manager = Module(new FaultManager(p))
     val retirement_buffer = Module(new RetirementBuffer(p, mini = !p.useRetirementBuffer))
     val rob_io = retirement_buffer.io
@@ -123,17 +130,17 @@ class SCore(p: Parameters) extends Module {
 
     // ---------------------------------------------------------------------------
     // Flush logic
-    io.dflush.valid := lsu.io.flush.valid && !lsu.io.flush.fencei
-    io.dflush.all   := lsu.io.flush.all
-    io.dflush.clean := lsu.io.flush.clean
+    io.dflush.valid := memoryIssue.io.flush.valid && !memoryIssue.io.flush.fencei
+    io.dflush.all   := memoryIssue.io.flush.all
+    io.dflush.clean := memoryIssue.io.flush.clean
 
-    io.iflush.valid  := lsu.io.flush.valid && lsu.io.flush.fencei
-    io.iflush.pcNext := lsu.io.flush.pcNext
-    fetch.io.iflush.valid := lsu.io.flush.valid && lsu.io.flush.fencei
-    fetch.io.iflush.pcNext := lsu.io.flush.pcNext
+    io.iflush.valid  := memoryIssue.io.flush.valid && memoryIssue.io.flush.fencei
+    io.iflush.pcNext := memoryIssue.io.flush.pcNext
+    fetch.io.iflush.valid := memoryIssue.io.flush.valid && memoryIssue.io.flush.fencei
+    fetch.io.iflush.pcNext := memoryIssue.io.flush.pcNext
 
-    lsu.io.flush.ready := lsu.io.flush.valid &&
-        Mux(lsu.io.flush.fencei, fetch.io.iflush.ready, io.dflush.ready)
+    memoryIssue.io.flush.ready := memoryIssue.io.flush.valid &&
+        Mux(memoryIssue.io.flush.fencei, fetch.io.iflush.ready, io.dflush.ready)
 
     // ---------------------------------------------------------------------------
     // Fetch
@@ -163,17 +170,17 @@ class SCore(p: Parameters) extends Module {
     decodeBuffer.io.feedIn.nValid := PopCount(
         fetch.io.inst.lanes.map(x => x.valid && x.ready))
     decodeBuffer.io.flush := branchTaken ||
-        (lsu.io.flush.valid && lsu.io.flush.fencei) ||
+        (memoryIssue.io.flush.valid && memoryIssue.io.flush.fencei) ||
         csr.io.dm.debug_pc.valid
     dispatch.io.inst <> decodeBuffer.io.out
     dispatch.io.halted := csr.io.halted || csr.io.wfi || csr.io.dm.debug_mode
     if (!p.enableMatrix) { dispatch.io.mactive := false.B }
-    dispatch.io.lsuActive := lsu.io.active
-    dispatch.io.lsuQueueCapacity := lsu.io.queueCapacity
+    dispatch.io.lsuActive := memoryActive
+    dispatch.io.lsuQueueCapacity := memoryIssue.io.queueCapacity
     dispatch.io.scoreboard.comb := regfile.io.scoreboard.comb
     dispatch.io.scoreboard.regd := regfile.io.scoreboard.regd
     dispatch.io.branchTaken := branchTaken
-    dispatch.io.interlock := bru(0).io.interlock.get || lsu.io.flush.valid
+    dispatch.io.interlock := bru(0).io.interlock.get || memoryIssue.io.flush.valid
 
     // Connect fault signaling to FaultManager.
     for (i <- 0 until p.instructionLanes) {
@@ -374,11 +381,11 @@ class SCore(p: Parameters) extends Module {
     csr.io.irq := io.irq
 
     // ---------------------------------------------------------------------------
-    // Load/Store Unit
-    lsu.io.busPort := regfile.io.busPort
-    lsu.io.req <> dispatch.io.lsu
+    // 访存入口读取操作数；LSU 执行端仅交换 RVV 数据片段。
+    memoryIssue.io.busPort := regfile.io.busPort
+    memoryIssue.io.req <> dispatch.io.lsu
     if (p.enableRvv) {
-        lsu.io.rvvState.get := io.rvvcore.get.configState
+        memoryIssue.io.rvvState.get := io.rvvcore.get.configState
         lsu.io.lsu2rvv.get <> io.rvvcore.get.lsu2rvv
         io.rvvcore.get.rvv2lsu <> lsu.io.rvv2lsu.get
     }
@@ -458,7 +465,7 @@ class SCore(p: Parameters) extends Module {
     val floatWritePorts = 2
     val fRegfile = Option.when(p.enableFloat)(Module(new FRegfile(p, floatReadPorts, floatWritePorts)))
     if (p.enableFloat) {
-        lsu.io.busPort_flt.get := fRegfile.get.io.busPort
+        memoryIssue.io.busPort_flt.get := fRegfile.get.io.busPort
         fRegfile.get.io.busPortAddr := dispatch.io.fbusPortAddr.get
         floatCore.get.io.read_ports <> fRegfile.get.io.read_ports
         floatCore.get.io.write_ports <> fRegfile.get.io.write_ports
@@ -593,7 +600,7 @@ class SCore(p: Parameters) extends Module {
         (regfile.io.scoreboard.regd === 0.U) &&  // Pending scalar operation
         floatIdle &&  // Pending float operation
         rvvIdle &&  // Could have vill
-        !lsu.io.active &&  // Could fault
+        !memoryActive &&  // Queued or executing memory operations could fault
         !hasFetchedInstructions
     fault_manager.io.in.fetchFault := MakeValid(fetchFaultValid, fetch.io.fault.bits)
 
