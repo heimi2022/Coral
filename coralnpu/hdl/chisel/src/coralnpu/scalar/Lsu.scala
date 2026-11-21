@@ -38,7 +38,7 @@ class Lsu(p: Parameters) extends Module {
         // 本地指令/数据存储器接口。
         val ibus = new IBusIO(p)
         val dbus = new DBusIO(p)
-        val fault = Valid(new FaultInfo(p))
+        val fault = Valid(new MemoryFaultInfo(p))
 
         // 外部数据总线：访问外部内存或外设，后续通常转换为 AXI/TileLink。
         val ebus = new EBusIO(p)
@@ -51,7 +51,9 @@ class Lsu(p: Parameters) extends Module {
 
         // 仅表示执行 slot 忙；排队状态由 MemoryIssueUnit 单独提供。
         val active = Output(Bool())
-        val storeComplete = Output(Valid(UInt(32.W)))
+        val storeComplete = Output(Valid(new RobAge(p)))
+        // 异常对应的 ROB 物理槽位；异常 PC 由 ROB 查询返回。
+        val faultRobIndex = Output(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
         val memoryOrderRangeUpdate = Output(Valid(
             new MemoryOrderRangeUpdate(p)))
         val memoryOrderComplete = Output(Valid(new RobAge(p)))
@@ -188,7 +190,6 @@ class LsuUOp(p: Parameters) extends Bundle {
   val store = Bool()
   val rd = UInt(5.W)
   val op = LsuOp()
-  val pc = UInt(32.W)
   val robAge = new RobAge(p)
   // addr 是访存基地址；data 对标量 store 保存写数据，对向量 strided 操作保存 stride。
   val addr = UInt(32.W)
@@ -208,7 +209,7 @@ class LsuUOp(p: Parameters) extends Bundle {
 
   override def toPrintable: Printable = {
     cf"LsuUOp(store -> ${store}, rd -> ${rd}, op -> ${op}, " +
-    cf"pc -> 0x${pc}%x, addr -> 0x${addr}%x, data -> ${data})"
+    cf"addr -> 0x${addr}%x, data -> ${data})"
   }
 }
 
@@ -229,7 +230,6 @@ object LsuUOp {
     result.store := cmd.store
     result.rd := cmd.addr
     result.op := cmd.op
-    result.pc := cmd.pc
     result.robAge := cmd.robAge
     if (fbus.isDefined) {
       result.addr := sbus.addr(i)
@@ -403,7 +403,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   val op = LsuOp()
   val rd = UInt(5.W)
   val store = Bool()
-  val pc = UInt(32.W)
   val robAge = new RobAge(p)
   val baseAddr = UInt(32.W)
   // active(i)=1 表示第 i 个 byte 尚待 load 或 store。
@@ -474,7 +473,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.op := op
     result.rd := rd
     result.store := store
-    result.pc := pc
     result.robAge := robAge
     result.pendingWriteback := pendingWriteback
     result.baseAddr := baseAddr
@@ -557,7 +555,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.op := op
     result.rd := rd
     result.store := store
-    result.pc := pc
     result.robAge := robAge
     result.baseAddr := baseAddr
     result.addrs := addrs
@@ -589,7 +586,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     val result = Wire(new LsuSlot(p, bytesPerSlot))
     result.op := op
     result.store := store
-    result.pc := pc
     result.robAge := robAge
     result.addrs := addrs
     result.active := active
@@ -659,7 +655,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.op := op
     result.rd := rd
     result.store := store
-    result.pc := pc
     result.robAge := robAge
     result.pendingWriteback := pendingWriteback
     result.active := (0 until bytesPerSlot).map(i => active(i) & ~selected(i))
@@ -701,7 +696,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   override def toPrintable: Printable = {
     val lines = (0 until bytesPerSlot).map(i =>
         cf"  $i: ${active(i)}, 0x${addrs(i)}%x, 0x${data(i)}%x\n")
-    cf"store: $store\n  op: ${op}\n  pc: 0x${pc}%x\n" +
+    cf"store: $store\n  op: ${op}\n" +
     cf"  baseAddr: 0x${baseAddr}%x\n" +
     cf"  pendingWriteback: ${pendingWriteback}\n" +
     cf"  vectorLoop:\n${vectorLoop.toPrintable}" +
@@ -722,7 +717,6 @@ object LsuSlot {
     result.op := uop.op
     result.rd := uop.rd
     result.store := uop.store
-    result.pc := uop.pc
     result.robAge := uop.robAge
     if (p.enableRvv) {
       // 分数 LMUL 在此按一个寄存器片段处理。
@@ -839,7 +833,6 @@ object LsuSlot {
 
 // 保留的通用控制/返回描述结构；当前 LsuV2 主路径未引用这两个 Bundle。
 class LsuCtrl(p: Parameters) extends Bundle {
-  val pc = UInt(32.W)
   val addr = UInt(32.W)
   val adrx = UInt(32.W)
   val data = UInt(32.W)
@@ -918,10 +911,11 @@ object FlushCmd {
 class LsuV2(p: Parameters) extends Lsu(p) {
     // faultReg 额外保存目的寄存器和操作类型，供异常时恢复指令上下文。
     class LsuFault(p: Parameters) extends Bundle {
-        val info = new FaultInfo(p)
+        val info = new MemoryFaultInfo(p)
         val rd = UInt(5.W)
         val op = LsuOp()
         val store = Bool()
+        val robIndex = UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)
     }
 
     // Tie-offs
@@ -1013,7 +1007,6 @@ class LsuV2(p: Parameters) extends Lsu(p) {
                                slot.activeTransaction(),
                                loadUpdatedSlot.activeTransaction()) && !faultReg.valid
   io.dbus.write := slot.store
-  io.dbus.pc := slot.pc
   io.dbus.addr := targetLineAddr
   io.dbus.adrx := targetLineAddr
   io.dbus.size := opSize
@@ -1030,7 +1023,6 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   io.ebus.dbus.size := opSize
   io.ebus.dbus.wdata := Cat(wdata.reverse)
   io.ebus.dbus.wmask := Cat(wmask.reverse)
-  io.ebus.dbus.pc := slot.pc
   io.ebus.internal := peri
 
   // 三条路径互斥；fire 表示该请求被目标总线接受。
@@ -1050,17 +1042,18 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     )))
 
   // 汇总外部总线错误和非法的 ITCM 写入，并锁存对应指令上下文。
-  val ibusFault = Wire(Valid(new FaultInfo(p)))
+  val ibusFault = Wire(Valid(new MemoryFaultInfo(p)))
   ibusFault.valid := loadUpdatedSlot.activeTransaction() && itcm && slot.store
   ibusFault.bits.write := true.B
   ibusFault.bits.addr := targetLineAddr
-  ibusFault.bits.epc := slot.pc
 
   io.fault.valid := faultReg.valid
   io.fault.bits := faultReg.bits.info
+  io.faultRobIndex.valid := faultReg.valid
+  io.faultRobIndex.bits := faultReg.bits.robIndex
   faultReg := {
     val f = Wire(Valid(new LsuFault(p)))
-    val nextFaultInfo = MuxCase(MakeInvalid(new FaultInfo(p)), Seq(
+    val nextFaultInfo = MuxCase(MakeInvalid(new MemoryFaultInfo(p)), Seq(
         io.ebus.fault.valid -> io.ebus.fault,
         ibusFault.valid -> ibusFault,
     ))
@@ -1069,6 +1062,7 @@ class LsuV2(p: Parameters) extends Lsu(p) {
     f.bits.rd := slot.rd
     f.bits.op := slot.op
     f.bits.store := slot.store
+    f.bits.robIndex := slot.robAge.index
     f
   }
 
@@ -1085,7 +1079,8 @@ class LsuV2(p: Parameters) extends Lsu(p) {
       lsu2RvvFire && io.lsu2rvv.get(0).bits.last
   } else { false.B }
   val storeComplete = scalarStoreComplete || vectorStoreComplete
-  io.storeComplete := Mux(storeComplete && !io.ebus.fault.valid, MakeValid(slot.pc), MakeInvalid(UInt(32.W)))
+  io.storeComplete := Mux(storeComplete && !io.ebus.fault.valid,
+      MakeValid(slot.robAge), MakeInvalid(new RobAge(p)))
 
 
   // ==========================================================================

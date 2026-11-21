@@ -147,8 +147,10 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     val rvvRegfileBaseAddr = 64
     val rvvRegCount = 32
     val retirementBufferSize = 64
+    // 硬件与验证配置统一限制退休宽度，避免为整个 ROB 生成顺序读取网络。
+    val retirementLanes = 16
     // Keep RVVI fanout independent from the architectural ROB size.
-    val rvviTraceDepth = 16
+    val rvviTraceDepth = retirementLanes
     val matrixScoreboardDepth = 8
     // Matrix commands can wait here independently of the MatrixCore execution
     // latency. Scoreboard depth remains a separate architectural choice.

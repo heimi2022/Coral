@@ -32,19 +32,17 @@ object DBus2Axi {
 class ReadCtrl(p: Parameters) extends Bundle {
   val addr = UInt(p.axi2AddrBits.W)
   val size = UInt(p.axi2DataBits.W)
-  val pc = UInt(p.programCounterBits.W)
 }
 
 class WriteCtrl(p: Parameters) extends Bundle {
   val addr = UInt(p.axi2AddrBits.W)
-  val pc = UInt(p.programCounterBits.W)
 }
 
 class DBus2Axi(p: Parameters) extends Module {
   val io = IO(new Bundle {
     val dbus = Flipped(new DBusIO(p))
     val axi = new AxiMasterIO(p.axi2AddrBits, p.axi2DataBits, p.axi2IdBits)
-    val fault = Valid(new FaultInfo(p))
+    val fault = Valid(new MemoryFaultInfo(p))
   })
 }
 
@@ -138,7 +136,6 @@ class DBus2AxiV2(p: Parameters, id: Int = 0) extends DBus2Axi(p) {
   // TODO(derekjchow): Make sure this targets the actual address instead of
   // line address (to report a more accurate exception).
   io.fault.bits.addr := io.dbus.addr
-  io.fault.bits.epc := io.dbus.pc
 }
 
 @nowarn

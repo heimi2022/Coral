@@ -103,7 +103,6 @@ class L1DCache(p: Parameters) extends Module {
   bank0.io.dbus.addr  := addrA
   bank0.io.dbus.adrx  := addrB
   bank0.io.dbus.wdata := io.dbus.wdata
-  bank0.io.dbus.pc    := 0.U
 
   bank1.io.dbus.valid := io.dbus.valid && (dsel1 || preread)
   bank1.io.dbus.write := io.dbus.write
@@ -112,7 +111,6 @@ class L1DCache(p: Parameters) extends Module {
   bank1.io.dbus.addr  := addrB
   bank1.io.dbus.adrx  := addrA
   bank1.io.dbus.wdata := io.dbus.wdata
-  bank1.io.dbus.pc    := 0.U
 
   val dbusready = (bank0.io.dbus.ready || !dsel0) &&
                   (bank1.io.dbus.ready || !dsel1)

@@ -97,6 +97,15 @@ chisel_test(
     ],
 )
 
+chisel_test(
+    name = "coralnpu_retirement_buffer_vector_tests",
+    srcs = ["RetirementBufferVectorTest.scala"],
+    deps = [
+        ":coralnpu_base",
+        ":retirement_buffer",
+    ],
+)
+
 chisel_library(
     name = "coralnpu_rvv",
     srcs = [

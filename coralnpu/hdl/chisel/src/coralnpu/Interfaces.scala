@@ -101,12 +101,17 @@ class FaultInfo(p: Parameters) extends Bundle {
   val epc = UInt(p.programCounterBits.W)
 }
 
+// LSU/外部数据总线只报告访存类型和地址；异常 PC 由 ROB 按槽位查询得到。
+class MemoryFaultInfo(p: Parameters) extends Bundle {
+  val write = Bool()
+  val addr = UInt(p.programCounterBits.W)
+}
+
 class DBusIO(p: Parameters, bank: Boolean = false) extends Bundle {
   // Control Phase.
   val valid = Output(Bool())
   val ready = Input(Bool())
   val write = Output(Bool())
-  val pc = Output(UInt(32.W))
   val addr = Output(UInt((p.lsuAddrBits - (if (bank) 1 else 0)).W))
   val adrx = Output(UInt((p.lsuAddrBits - (if (bank) 1 else 0)).W))
   val size = Output(UInt(p.dbusSize.W))
@@ -119,7 +124,7 @@ class DBusIO(p: Parameters, bank: Boolean = false) extends Bundle {
 class EBusIO(p: Parameters) extends Bundle {
   val dbus = new DBusIO(p)
   val internal = Output(Bool())
-  val fault = Flipped(Valid(new FaultInfo(p)))
+  val fault = Flipped(Valid(new MemoryFaultInfo(p)))
 }
 
 class IFlushIO(p: Parameters) extends Bundle {

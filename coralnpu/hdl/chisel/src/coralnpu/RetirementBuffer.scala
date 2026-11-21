@@ -25,7 +25,10 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
     val jalrTargets = Input(Vec(p.instructionLanes, UInt(32.W)))
     val jump = Input(Vec(p.instructionLanes, Bool()))
     val branch = Input(Vec(p.instructionLanes, Bool()))
-    val storeComplete = Input(Valid(UInt(32.W)))
+    // 按物理槽位查询仍在 ROB 中的指令 PC。
+    val pcQuery = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
+    val pcResponse = Output(Valid(UInt(32.W)))
+    val storeComplete = Input(Valid(new RobAge(p)))
     val writeAddrScalar = Input(Vec(p.instructionLanes, new RegfileWriteAddrIO))
     val writeDataScalar = Input(Vec(p.instructionLanes + 2, Valid(new RegfileWriteDataIO)))
     val writeAddrFloat = Option.when(p.enableFloat)(Input(new RegfileWriteAddrIO))
@@ -33,6 +36,8 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
     val writeAddrVector = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, new RegfileWriteAddrIO)))
     val writeDataVector = Option.when(p.enableRvv)(Input(Vec(p.instructionLanes, Valid(new VectorWriteDataIO(p)))))
     val fault = Input(Valid(new FaultManagerOutput))
+    // LSU 访存异常对应的 ROB 物理槽位；避免用 PC 匹配相同动态指令。
+    val memoryFaultIndex = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
     val nSpace = Output(UInt(32.W))
     val nRetired = Output(UInt(log2Ceil(p.retirementBufferSize + 1).W))
     val empty = Output(Bool())
@@ -78,18 +83,34 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val bufferSize = p.retirementBufferSize
     assert(bufferSize >= p.instructionLanes)
     assert(bufferSize >= io.writeDataScalar.length)
-    // Construct a circular buffer of `bufferSize`, that can enqueue and dequeue `bufferSize` elements
-    // per cycle. This will be used to store information about dispatched instructions.
-    val instBuffer = Module(new CircularBufferMulti(new Instruction,
-                                /* needs to be at least writeDataScalar count */ bufferSize,
-                                                /* chosen sort-of-arbitrarily */ bufferSize))
+    val retirementWidth = math.min(p.retirementLanes, bufferSize)
+    require(retirementWidth > 0)
+    require(!p.useRetirementBuffer || retirementWidth <= p.rvviTraceDepth)
+    val pointerWidth = math.max(1, log2Ceil(bufferSize))
+    // 指令与完成状态始终按物理槽位保存；只有退休端选择最老的 retirementWidth 项。
+    val instructionBuffer = RegInit(VecInit.fill(bufferSize)(0.U.asTypeOf(new Instruction)))
+    val enqPtr = RegInit(0.U(pointerWidth.W))
+    val deqPtr = RegInit(0.U(pointerWidth.W))
+    val enqPosition = RegInit(false.B)
+    val nEnqueued = RegInit(0.U(log2Ceil(bufferSize + 1).W))
+
+    // 读写指针之间的槽位有效；指针相等时，由数量区分空与满。
+    def occupied(index: UInt): Bool = Mux(deqPtr === enqPtr,
+        nEnqueued =/= 0.U,
+        Mux(deqPtr < enqPtr,
+            index >= deqPtr && index < enqPtr,
+            index >= deqPtr || index < enqPtr))
+    val slotValid = VecInit((0 until bufferSize).map(i => occupied(i.U)))
+    val queryIndex = io.pcQuery.bits
+    io.pcResponse.valid := io.pcQuery.valid
+    io.pcResponse.bits := instructionBuffer(queryIndex).addr
     val allocAgeBase = Wire(new RobAge(p))
-    allocAgeBase.position := instBuffer.io.enqPosition
-    allocAgeBase.index := instBuffer.io.enqPtr
+    allocAgeBase.position := enqPosition
+    allocAgeBase.index := enqPtr
     for (i <- 0 until p.instructionLanes) {
         io.allocAge(i) := RobAge.advance(allocAgeBase, i.U, p)
     }
-    io.empty := instBuffer.io.nEnqueued === 0.U
+    io.empty := nEnqueued === 0.U
     // Check that we see no instructions fire after the first non-fire.
     val instFires = io.inst.map(_.fire)
     val seenFalseV = (instFires.scanLeft(false.B) { (acc, curr) => acc || !curr }).drop(1)
@@ -98,6 +119,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val decodeFaultValid = (io.fault.valid && io.fault.bits.decode)
     // Valid fault, no fire, also not a load/store: those faults should be handled purely in the update stage
     val noFire0Fault = (io.fault.valid && !io.inst(0).fire && (io.fault.bits.mcause =/= 7.U) && (io.fault.bits.mcause =/= 5.U))
+    // 非访存异常仍使用 FaultManager 提供的 PC 做 Decode/控制流检查。
     val faultPc = io.fault.bits.mepc
 
     // Mini-mode optimization state: Track the expected PC of the next instruction across dispatch cycles.
@@ -239,14 +261,13 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     regLastIsBranch := Mux(hasFire, PriorityMux(instFires.reverse, branchList.reverse), regLastIsBranch)
 
     val instsWithWriteFired = PopCount(io.inst.map(_.fire))
-    instBuffer.io.enqValid := instsWithWriteFired +& (decodeFaultValid || noFire0Fault)
-    io.nSpace := instBuffer.io.nSpace
-
-    for (i <- 0 until p.instructionLanes) {
-        instBuffer.io.enqData(i) := insts(i)
-    }
-    for (i <- p.instructionLanes until bufferSize) {
-        instBuffer.io.enqData(i) := 0.U.asTypeOf(instBuffer.io.enqData(i))
+    val enqCount = instsWithWriteFired +& (decodeFaultValid || noFire0Fault)
+    io.nSpace := bufferSize.U - nEnqueued
+    // 只解码实际 Dispatch lane 的写位置，不再将整组宽 payload 旋转到写指针。
+    val tailSelect = UIntToOH(enqPtr, bufferSize)
+    val enqHits = (0 until bufferSize).map { i =>
+        VecInit((0 until p.instructionLanes).map(k =>
+            k.U < enqCount && tailSelect((i - k + bufferSize) % bufferSize)))
     }
 
     class InstructionUpdate extends Bundle {
@@ -260,14 +281,21 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         val idx = UInt(5.W)
     }
 
-    // Maintain a re-order buffer of instruction completion result.
-    // The order and alignment of these buffers should correspond to the
-    // output of `instBuffer`.
+    // 完成状态与指令使用相同的物理槽位，更新时无需旋转或反向映射。
     val dataWidth = if (mini) 0 else (if (p.enableRvv) p.lsuDataBits else 32)
     val resultBuffer = RegInit(VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))))
 
-    val accEnqPtr = RegInit(0.U(log2Ceil(bufferSize).W))
-    val accDeqPtr = RegInit(0.U(log2Ceil(bufferSize).W))
+    // 用读写指针判断完成通知指向的槽位是否仍被占用；指针相等时由数量区分空/满。
+    val storeCompleteIndex = storeComplete.bits.index
+    val storeCompleteBeforeTail = storeCompleteIndex < enqPtr
+    val storeCompleteOccupied = storeCompleteIndex < bufferSize.U && occupied(storeCompleteIndex)
+    // 写指针之前的已占用槽位属于当前轮，其余属于上一轮；无需逐项保存回绕位。
+    val storeCompletePosition = enqPosition ^ !storeCompleteBeforeTail
+    val storeCompleteMatches = storeComplete.valid && storeCompleteOccupied &&
+        (storeComplete.bits.position === storeCompletePosition)
+    val storeDonePhysical = UIntToOH(storeCompleteIndex, bufferSize) &
+        Fill(bufferSize, storeCompleteMatches)
+
     val vectorWriteAccumulator = Option.when(!mini && p.enableRvv)(
         RegInit(VecInit.fill(bufferSize)(VecInit.fill(8)(0.U.asTypeOf(Valid(new VectorWrite)))))
     )
@@ -275,32 +303,29 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val vectorAccumulatorNext = Option.when(!mini && p.enableRvv)(
         Wire(Vec(bufferSize, Vec(8, Valid(new VectorWrite))))
     )
-    val debugVectorWrites = Option.when(!mini && p.enableRvv)(
-        Wire(Vec(bufferSize, Vec(8, Valid(new VectorWrite))))
-    )
-    if (!mini && p.enableRvv) {
-        vectorAccumulatorNext.get := vectorWriteAccumulator.get
-        debugVectorWrites.get := vectorWriteAccumulator.get
-    }
-
-    // Compute update based on register writeback.
-    // Note: The shift when committing instructions will be handled in a later block.
+    // 完成比较和更新直接使用物理槽位下标。
     val resultUpdate = Wire(Vec(bufferSize, Valid(new InstructionUpdate)))
-    // Select the oldest unfinished match independently for each completion port.
-    // Merging before priority selection would lose simultaneous completions.
+    val lane0LinkOk = (io.inst(0).bits.addr === regLastTarget) ||
+        (regLastIsBranch && io.inst(0).bits.addr === regLastAddr + 4.U)
+    val faultLinkOk = (io.fault.bits.mepc === regLastTarget) ||
+        (regLastIsBranch && io.fault.bits.mepc === regLastAddr + 4.U)
+    // 每个完成端口独立选择最老的未完成匹配项：先搜索读指针及其后方，再回绕到低槽位。
+    // 只编码 1-bit 匹配标记，不为按 PC 完成的矩阵命令旋转整个指令数组。
     val matrixDoneEntries = io.matrixComplete.map { completions =>
         completions.map { completion =>
             val matches = VecInit((0 until bufferSize).map { i =>
-                val entry = instBuffer.io.dataOut(i)
-                completion.valid && (i.U < instBuffer.io.nEnqueued) && entry.isMatrix &&
+                val entry = instructionBuffer(i)
+                completion.valid && slotValid(i) && entry.isMatrix &&
                     !resultBuffer(i).valid && (completion.bits === entry.addr)
             })
-            PriorityEncoderOH(matches.asUInt)
+            val afterHead = VecInit((0 until bufferSize).map(i =>
+                matches(i) && i.U >= deqPtr)).asUInt
+            Mux(afterHead.orR, PriorityEncoderOH(afterHead), PriorityEncoderOH(matches.asUInt))
         }.reduce(_ | _)
     }.getOrElse(0.U(bufferSize.W))
 
     for (i <- 0 until bufferSize) {
-        val bufferEntry = instBuffer.io.dataOut(i)
+        val bufferEntry = instructionBuffer(i)
         // Check which incoming (scalar,float) write port matches this entry's needed address.
         val scalarWriteIdxMap = io.writeDataScalar.map(
             x => x.valid && (x.bits.addr === bufferEntry.idx))
@@ -317,10 +342,14 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         val nonWritingInstr = (bufferEntry.idx === noWriteRegIdx) && !bufferEntry.isMatrix
         val matrixDone = matrixDoneEntries(i)
         val storeInstr = bufferEntry.idx === storeRegIdx
-        // Check if this entry is the faulting instruction
-        val faultingInstr = io.fault.valid && (bufferEntry.addr === faultPc)
         // The entry is active if it's validly enqueued.
-        val validBufferEntry = (i.U < instBuffer.io.nEnqueued)
+        val validBufferEntry = slotValid(i)
+        // LSU 访存异常直接按物理槽位命中；其它异常继续按 PC 定位。
+        val indexedFault = io.memoryFaultIndex.valid && validBufferEntry &&
+            (io.memoryFaultIndex.bits === i.U)
+        val pcFault = io.fault.valid && !io.memoryFaultIndex.valid &&
+            (bufferEntry.addr === faultPc)
+        val faultingInstr = indexedFault || pcFault
 
         // Find the index of the first write port that provides the needed data.
         val scalarWriteIdx = PriorityEncoder(scalarWriteIdxMap)
@@ -332,8 +361,6 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         }).reduce(_|_)).getOrElse(false.B)
 
         if (!mini && p.enableRvv) {
-        val pIdx = CircularBufferMulti.advance(accDeqPtr, i.U, bufferSize)
-
         val nextEntry = Wire(Vec(8, Valid(new VectorWrite)))
 
         val portMatches = Wire(Vec(p.instructionLanes, Bool()))
@@ -360,12 +387,11 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
             }
 
             val anyHit = hits.asUInt.orR
-            nextEntry(k).valid := Mux(anyHit, true.B, vectorWriteAccumulator.get(pIdx)(k).valid)
-            nextEntry(k).bits.data := Mux(anyHit, PriorityMux(hits, datas), vectorWriteAccumulator.get(pIdx)(k).bits.data)
-            nextEntry(k).bits.idx := Mux(anyHit, PriorityMux(hits, idxs), vectorWriteAccumulator.get(pIdx)(k).bits.idx)
+            nextEntry(k).valid := Mux(anyHit, true.B, vectorWriteAccumulator.get(i)(k).valid)
+            nextEntry(k).bits.data := Mux(anyHit, PriorityMux(hits, datas), vectorWriteAccumulator.get(i)(k).bits.data)
+            nextEntry(k).bits.idx := Mux(anyHit, PriorityMux(hits, idxs), vectorWriteAccumulator.get(i)(k).bits.idx)
         }
-        vectorAccumulatorNext.get(pIdx) := Mux(validBufferEntry, nextEntry, vectorWriteAccumulator.get(pIdx))
-        debugVectorWrites.get(pIdx) := Mux(validBufferEntry, nextEntry, vectorWriteAccumulator.get(pIdx))
+        vectorAccumulatorNext.get(i) := Mux(validBufferEntry, nextEntry, vectorWriteAccumulator.get(i))
         }
 
         // If the entry is active and its data dependency is met (or it has no dependency)...
@@ -376,28 +402,24 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
                 floatWriteIdxMap.reduce(_|_) || 
                 vectorReady || 
                 nonWritingInstr || 
-                (storeInstr && storeComplete.valid && storeComplete.bits === bufferEntry.addr) ||
+                (storeInstr && storeDonePhysical(i)) ||
                 matrixDone
             )
         val isControlFlow = bufferEntry.isControlFlow
         val isBranch = bufferEntry.isBranch
-        // For the last entry in the buffer, we can't see the next instruction yet (it hasn't been enqueued or wrapped visibly).
-        // So we treat nextValid as false.
-        val nextValid = if (i < bufferSize - 1) ((i.U +& 1.U) < instBuffer.io.nEnqueued) else false.B
-        val nextAddr = if (i < bufferSize - 1) instBuffer.io.dataOut(i + 1).addr else 0.U
+        // 程序顺序相邻项总在相邻物理槽位，最后一槽静态连回槽位 0。
+        // 即使 ROB 已满，队尾也不能把回绕后的队首误当成自己的后继。
+        val nextIndex = (i + 1) % bufferSize
+        val nextValid = validBufferEntry && slotValid(nextIndex) && nextIndex.U =/= enqPtr
+        val nextAddr = instructionBuffer(nextIndex).addr
         val nextAddrValid = nextValid || noFire0Fault || io.inst(0).valid
 
-        val lane0LinkOk = (io.inst(0).bits.addr === regLastTarget) || (regLastIsBranch && io.inst(0).bits.addr === regLastAddr + 4.U)
-        val faultLinkOk = (io.fault.bits.mepc === regLastTarget) || (regLastIsBranch && io.fault.bits.mepc === regLastAddr + 4.U)
         val fallthrough = bufferEntry.addr + 4.U
 
-        // Check next instruction's linkOk bit to verify control flow continuity.
-        // If we are at the end of the buffer (i == bufferSize-1), we check the incoming instruction (lane 0) or fault.
-        // Note: We use a Scala conditional to prevent generating hardware for out-of-bounds access.
-        val nextLinkOk = if (i < bufferSize - 1) instBuffer.io.dataOut(i + 1).linkOk else true.B
+        val nextLinkOk = instructionBuffer(nextIndex).linkOk
 
         val targetMatch = MuxCase(true.B, Seq(
-            (nextValid && (i.U < (bufferSize - 1).U)) -> nextLinkOk,
+            nextValid -> nextLinkOk,
             noFire0Fault -> faultLinkOk,
             io.inst(0).valid -> lane0LinkOk
         ))
@@ -418,7 +440,7 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         val prevDataDone = resultBuffer(i).valid
         val prevCfDone = resultBuffer(i).valid && resultBuffer(i).bits.cfDone
 
-        // Only allow new data/cf updates if the entry is actually valid in instBuffer
+        // 只有有效物理槽位才接受新的完成与控制流状态。
         val newCfDone = validBufferEntry && cfReady
         val isMpause = bufferEntry.isMpause
         val currentTrap = resultBuffer(i).bits.trap || faultingInstr || (validBufferEntry && bufferEntry.trap) || (validBufferEntry && isControlFlow && newCfDone && (!cfMatch || noFire0Fault) && !isMpause)
@@ -457,52 +479,77 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         }
     }
 
-    val hasTrap = resultUpdate.map(x => x.valid && x.bits.trap).reduce(_||_)
-    val trapDetected = VecInit(resultUpdate.map(x => x.valid && x.bits.trap))
+    // 只有退休窗口按程序顺序读取；完成更新与向量累积不经过这些选择器。
+    val headSelect = UIntToOH(deqPtr, bufferSize)
+    // 读指针只译码一次；每个退休 lane 的 one-hot 选择通过固定连线偏移生成。
+    // Scala 中的取模均作用于常量，不生成加法器、取模器或动态旋转网络。
+    val retireSelects = (0 until retirementWidth).map { lane =>
+        VecInit((0 until bufferSize).map(slot =>
+            headSelect((slot - lane + bufferSize) % bufferSize)))
+    }
+    val retireInstructions = VecInit(retireSelects.map(select =>
+        Mux1H(select, instructionBuffer)))
+    val retireResults = VecInit(retireSelects.map(select => Mux1H(select, resultUpdate)))
+    val hasTrap = (0 until bufferSize).map(i =>
+        slotValid(i) && resultUpdate(i).valid && resultUpdate(i).bits.trap).reduce(_ || _)
+    val trapDetected = VecInit((0 until retirementWidth).map(i =>
+        i.U < nEnqueued && retireResults(i).valid && retireResults(i).bits.trap))
     val firstTrapIdx = PriorityEncoder(trapDetected)
-    val countValid = Cto(VecInit(resultUpdate.map(x => x.valid && x.bits.cfDone)).asUInt)
+    val countValid = Cto(VecInit((0 until retirementWidth).map(i =>
+        i.U < nEnqueued && retireResults(i).valid && retireResults(i).bits.cfDone)).asUInt)
 
-    val limit = firstTrapIdx + 1.U
-    val trapReadyToRetireRaw = hasTrap && (limit <= countValid)
-    val deqReadyRaw = Mux(trapReadyToRetireRaw, limit, countValid)
-    val trapReadyToRetire = if (p.useRetirementBuffer) {
-        trapReadyToRetireRaw && (limit <= p.rvviTraceDepth.U)
-    } else {
-        trapReadyToRetireRaw
-    }
-    // RVVI exposes a bounded number of retirement lanes. In verification
-    // builds, retire no more entries than the trace can represent; otherwise
-    // a completed ROB tail would disappear from the architectural trace.
-    val deqReady = if (p.useRetirementBuffer) {
-        Mux(deqReadyRaw > p.rvviTraceDepth.U, p.rvviTraceDepth.U, deqReadyRaw)
-    } else {
-        deqReadyRaw
-    }
-
-    instBuffer.io.deqReady := deqReady
+    // +& 保留进位，窗口最后一项发生异常时 limit 仍能表示 retirementWidth。
+    val limit = firstTrapIdx +& 1.U
+    val trapReadyToRetire = trapDetected.asUInt.orR && (limit <= countValid)
+    val deqReady = Mux(trapReadyToRetire, limit, countValid)
 
     val trapRetired = trapReadyToRetire
-    instBuffer.io.flush := trapRetired
+    val retiringSlots = retireSelects.zipWithIndex.map { case (select, lane) =>
+        select.asUInt & Fill(bufferSize, lane.U < deqReady)
+    }.reduce(_ | _)
 
-    if (!mini && p.enableRvv) {
-        accEnqPtr := Mux(trapRetired, 0.U,
-            CircularBufferMulti.advance(accEnqPtr, instBuffer.io.enqValid, bufferSize))
-        accDeqPtr := Mux(trapRetired, 0.U,
-            CircularBufferMulti.advance(accDeqPtr, deqReady, bufferSize))
+    val nextAllocAge = RobAge.advance(allocAgeBase, enqCount, p)
+    when(trapRetired) {
+        enqPtr := 0.U
+        enqPosition := false.B
+        deqPtr := 0.U
+        nEnqueued := 0.U
+    }.otherwise {
+        enqPtr := nextAllocAge.index
+        enqPosition := nextAllocAge.position
+        deqPtr := CircularBufferMulti.advance(deqPtr, deqReady, bufferSize)
+        nEnqueued := nEnqueued + enqCount - deqReady
+    }
+    assert(enqCount <= p.instructionLanes.U)
+    assert(enqCount <= bufferSize.U - nEnqueued)
+    assert(deqReady <= nEnqueued)
+    assert(enqPtr < bufferSize.U && deqPtr < bufferSize.U)
 
-        for (x <- 0 until bufferSize) {
-            val isEnqueuing = (0 until p.instructionLanes).map(k =>
-                (k.U < instBuffer.io.enqValid) &&
-                (x.U === CircularBufferMulti.advance(accEnqPtr, k.U, bufferSize))).reduce(_||_)
-            vectorWriteAccumulator.get(x) := Mux(trapRetired || isEnqueuing, 0.U.asTypeOf(vectorWriteAccumulator.get(0)), vectorAccumulatorNext.get(x))
+    for (x <- 0 until bufferSize) {
+        val isEnqueuing = enqHits(x).asUInt.orR
+        when(isEnqueuing) {
+            instructionBuffer(x) := Mux1H(enqHits(x), insts)
+        }
+
+        // 状态直接写回原物理槽位；释放或重新分配时清空，不旋转、不压缩。
+        when(trapRetired || isEnqueuing || retiringSlots(x) || !slotValid(x)) {
+            resultBuffer(x) := MakeInvalid(new InstructionUpdate)
+        }.otherwise {
+            resultBuffer(x) := resultUpdate(x)
+        }
+
+        if (!mini && p.enableRvv) {
+            // 累积数据只在 flush 或槽位重新分配时清空，避免退休控制扇出到整组向量数据。
+            when(trapRetired || isEnqueuing) {
+                vectorWriteAccumulator.get(x) := 0.U.asTypeOf(vectorWriteAccumulator.get(x))
+            }.otherwise {
+                vectorWriteAccumulator.get(x) := vectorAccumulatorNext.get(x)
+            }
         }
     }
 
-    resultBuffer := Mux(trapRetired,
-                        VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))),
-                        ShiftVectorRight(resultUpdate, deqReady))
-
-    val retiredEcalls = PopCount(VecInit((0 until bufferSize).map(i => (i.U < deqReady) && instBuffer.io.dataOut(i).isEcall)).asUInt)
+    val retiredEcalls = PopCount(VecInit((0 until retirementWidth).map(i =>
+        i.U < deqReady && retireInstructions(i).isEcall)).asUInt)
     // Register the retirement count at its producer.  The CSR performance
     // counter consumes this value in the following cycle, avoiding a long
     // retirement-control path into the CSR counter clock enable.
@@ -510,19 +557,26 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     io.trapPending := RegNext(hasTrap && !trapRetired, false.B)
 
     for (i <- 0 until bufferSize) {
-        val valid = (i.U < instBuffer.io.deqReady)
-        val allowDebug = resultUpdate(i).bits.trap && instBuffer.io.dataOut(i).isControlFlow && noFire0Fault
-        io.debug.inst(i).valid := valid
-        io.debug.inst(i).bits.pc := MuxOR(valid, instBuffer.io.dataOut(i).addr)
-        io.debug.inst(i).bits.inst := MuxOR(valid && !mini.B, instBuffer.io.dataOut(i).inst)
-        io.debug.inst(i).bits.data := MuxOR(valid && !mini.B, resultUpdate(i).bits.result)
-        io.debug.inst(i).bits.idx := MuxOR(valid, Mux(resultUpdate(i).bits.trap && !allowDebug, noWriteRegIdx, instBuffer.io.dataOut(i).idx))
-        io.debug.inst(i).bits.trap := MuxOR(valid, resultUpdate(i).bits.trap)
-        if (!mini && p.enableRvv) {
-        val pIdx = CircularBufferMulti.advance(accDeqPtr, i.U, bufferSize)
-        io.debug.inst(i).bits.vecWrites.get := debugVectorWrites.get(pIdx)
-        } else if (p.enableRvv) {
-        io.debug.inst(i).bits.vecWrites.get := 0.U.asTypeOf(io.debug.inst(i).bits.vecWrites.get)
+        // 保留外部调试接口的宽度；退休窗口之外恒无效，不生成宽 payload 的读取选择器。
+        if (i < retirementWidth) {
+            val valid = i.U < deqReady
+            val entry = retireInstructions(i)
+            val result = retireResults(i)
+            val allowDebug = result.bits.trap && entry.isControlFlow && noFire0Fault
+            io.debug.inst(i).valid := valid
+            io.debug.inst(i).bits.pc := MuxOR(valid, entry.addr)
+            io.debug.inst(i).bits.inst := MuxOR(valid && !mini.B, entry.inst)
+            io.debug.inst(i).bits.data := MuxOR(valid && !mini.B, result.bits.result)
+            io.debug.inst(i).bits.idx := MuxOR(valid,
+                Mux(result.bits.trap && !allowDebug, noWriteRegIdx, entry.idx))
+            io.debug.inst(i).bits.trap := MuxOR(valid, result.bits.trap)
+            if (!mini && p.enableRvv) {
+                io.debug.inst(i).bits.vecWrites.get := Mux1H(retireSelects(i), vectorAccumulatorNext.get)
+            } else if (p.enableRvv) {
+                io.debug.inst(i).bits.vecWrites.get := 0.U.asTypeOf(io.debug.inst(i).bits.vecWrites.get)
+            }
+        } else {
+            io.debug.inst(i) := 0.U.asTypeOf(io.debug.inst(i))
         }
     }
 }

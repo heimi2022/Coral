@@ -75,6 +75,19 @@ class SCore(p: Parameters) extends Module {
     val fault_manager = Module(new FaultManager(p))
     val retirement_buffer = Module(new RetirementBuffer(p, mini = !p.useRetirementBuffer))
     val rob_io = retirement_buffer.io
+    // LSU 异常仍在 ROB 中时，用其物理槽位查询原始指令 PC。
+    rob_io.pcQuery.valid := lsu.io.fault.valid
+    rob_io.pcQuery.bits := lsu.io.faultRobIndex.bits
+
+    // FaultManager 接口保留 FaultInfo；LSU 访存异常的 epc 统一来自 ROB。
+    val lsuMemoryFault = Wire(Valid(new FaultInfo(p)))
+    lsuMemoryFault.valid := lsu.io.fault.valid
+    lsuMemoryFault.bits.write := lsu.io.fault.bits.write
+    lsuMemoryFault.bits.addr := lsu.io.fault.bits.addr
+    lsuMemoryFault.bits.epc := rob_io.pcResponse.bits
+    when(lsu.io.fault.valid) {
+        assert(rob_io.pcResponse.valid)
+    }
 
     rob_io.inst := dispatch.io.inst
     dispatch.io.robAge := rob_io.allocAge
@@ -98,6 +111,8 @@ class SCore(p: Parameters) extends Module {
         })
     }
     rob_io.fault := fault_manager.io.out
+    rob_io.memoryFaultIndex := lsu.io.faultRobIndex
+    // Store 完成通过完整 ROB 年龄定位，不再用 PC 匹配。
     rob_io.storeComplete := lsu.io.storeComplete
 
     // matrix
@@ -197,7 +212,7 @@ class SCore(p: Parameters) extends Module {
         fault_manager.io.in.undef(i).inst := dispatch.io.inst(i).bits.inst
         fault_manager.io.in.jal(i).target := dispatch.io.bruTarget(i)
     }
-    fault_manager.io.in.memory_fault := lsu.io.fault
+    fault_manager.io.in.memory_fault := lsuMemoryFault
     if (p.enableRvv) {
         fault_manager.io.in.rvv_fault.get.valid := io.rvvcore.get.trap.valid
         fault_manager.io.in.rvv_fault.get.bits.mepc := io.rvvcore.get.trap.bits.pc
