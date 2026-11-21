@@ -24,7 +24,7 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
       val pcQuery = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val pcResponse = Output(Valid(UInt(32.W)))
       val done = Input(Vec(2, Valid(UInt(32.W))))
-      val storeComplete = Input(Valid(new RobAge(p)))
+      val storeComplete = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val allocAge = Output(Vec(p.instructionLanes, new RobAge(p)))
       val retired = Output(new RetirementBufferDebugIO(p))
       val empty = Output(Bool())
@@ -68,8 +68,7 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
       dut.io.storeComplete.valid.poke(false.B)
       dut.io.pcQuery.valid.poke(false.B)
       dut.io.pcQuery.bits.poke(0.U)
-      dut.io.storeComplete.bits.index.poke(0.U)
-      dut.io.storeComplete.bits.position.poke(false.B)
+      dut.io.storeComplete.bits.poke(0.U)
       for (pc <- dut.io.pcs) pc.poke(0.U)
       for (port <- dut.io.done) {
         port.valid.poke(false.B)
@@ -107,7 +106,6 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
         advanceEmpty(if (round == 0) dut.p.retirementBufferSize - 1
                      else dut.p.retirementBufferSize - 2)
         dut.io.allocAge(0).index.expect((dut.p.retirementBufferSize - 1).U)
-        val storePosition = dut.io.allocAge(0).position.peek().litToBoolean
         // 队首 Store 在末槽，向量指令在槽位 0；向量完成后必须等待更老的 Store。
         enqueue(0x100, store = true)
         enqueue(0x104, vector = true)
@@ -131,8 +129,7 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
         dut.clock.step()
 
         dut.io.storeComplete.valid.poke(true.B)
-        dut.io.storeComplete.bits.index.poke((dut.p.retirementBufferSize - 1).U)
-        dut.io.storeComplete.bits.position.poke(storePosition.B)
+        dut.io.storeComplete.bits.poke((dut.p.retirementBufferSize - 1).U)
         dut.clock.step()
         dut.io.storeComplete.valid.poke(false.B)
 

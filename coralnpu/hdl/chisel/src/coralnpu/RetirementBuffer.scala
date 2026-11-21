@@ -28,7 +28,7 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
     // 按物理槽位查询仍在 ROB 中的指令 PC。
     val pcQuery = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
     val pcResponse = Output(Valid(UInt(32.W)))
-    val storeComplete = Input(Valid(new RobAge(p)))
+    val storeComplete = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
     val writeAddrScalar = Input(Vec(p.instructionLanes, new RegfileWriteAddrIO))
     val writeDataScalar = Input(Vec(p.instructionLanes + 2, Valid(new RegfileWriteDataIO)))
     val writeAddrFloat = Option.when(p.enableFloat)(Input(new RegfileWriteAddrIO))
@@ -286,13 +286,9 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
     val resultBuffer = RegInit(VecInit(Seq.fill(bufferSize)(MakeInvalid(new InstructionUpdate))))
 
     // 用读写指针判断完成通知指向的槽位是否仍被占用；指针相等时由数量区分空/满。
-    val storeCompleteIndex = storeComplete.bits.index
-    val storeCompleteBeforeTail = storeCompleteIndex < enqPtr
-    val storeCompleteOccupied = storeCompleteIndex < bufferSize.U && occupied(storeCompleteIndex)
-    // 写指针之前的已占用槽位属于当前轮，其余属于上一轮；无需逐项保存回绕位。
-    val storeCompletePosition = enqPosition ^ !storeCompleteBeforeTail
-    val storeCompleteMatches = storeComplete.valid && storeCompleteOccupied &&
-        (storeComplete.bits.position === storeCompletePosition)
+    val storeCompleteIndex = storeComplete.bits
+    val storeCompleteMatches = storeComplete.valid &&
+        storeCompleteIndex < bufferSize.U && occupied(storeCompleteIndex)
     val storeDonePhysical = UIntToOH(storeCompleteIndex, bufferSize) &
         Fill(bufferSize, storeCompleteMatches)
 

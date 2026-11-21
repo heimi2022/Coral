@@ -112,7 +112,7 @@ class SCore(p: Parameters) extends Module {
     }
     rob_io.fault := fault_manager.io.out
     rob_io.memoryFaultIndex := lsu.io.faultRobIndex
-    // Store 完成通过完整 ROB 年龄定位，不再用 PC 匹配。
+    // Store 完成只需物理槽位；完成前 ROB 不会释放或复用该槽位。
     rob_io.storeComplete := lsu.io.storeComplete
 
     // matrix

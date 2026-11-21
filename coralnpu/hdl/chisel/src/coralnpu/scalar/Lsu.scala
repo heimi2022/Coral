@@ -51,7 +51,7 @@ class Lsu(p: Parameters) extends Module {
 
         // 仅表示执行 slot 忙；排队状态由 MemoryIssueUnit 单独提供。
         val active = Output(Bool())
-        val storeComplete = Output(Valid(new RobAge(p)))
+        val storeComplete = Output(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
         // 异常对应的 ROB 物理槽位；异常 PC 由 ROB 查询返回。
         val faultRobIndex = Output(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
         val memoryOrderRangeUpdate = Output(Valid(
@@ -1080,7 +1080,8 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   } else { false.B }
   val storeComplete = scalarStoreComplete || vectorStoreComplete
   io.storeComplete := Mux(storeComplete && !io.ebus.fault.valid,
-      MakeValid(slot.robAge), MakeInvalid(new RobAge(p)))
+      MakeValid(slot.robAge.index), MakeInvalid(
+          UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
 
 
   // ==========================================================================

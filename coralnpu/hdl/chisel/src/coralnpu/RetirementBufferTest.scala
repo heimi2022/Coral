@@ -21,7 +21,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       val pcResponse = Output(Valid(UInt(32.W)))
       val fault = Input(Valid(new FaultManagerOutput))
       val memoryFaultIndex = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
-      val storeComplete = Input(Valid(new RobAge(p)))
+      val storeComplete = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val done = Input(Vec(2, Valid(UInt(32.W))))
       val retired = Output(Vec(p.rvviTraceDepth, Valid(UInt(32.W))))
       val retiredTraps = Output(Vec(p.rvviTraceDepth, Bool()))
@@ -78,8 +78,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     dut.io.memoryFaultIndex.valid.poke(false.B)
     dut.io.memoryFaultIndex.bits.poke(0.U)
     dut.io.storeComplete.valid.poke(false.B)
-    dut.io.storeComplete.bits.index.poke(0.U)
-    dut.io.storeComplete.bits.position.poke(false.B)
+    dut.io.storeComplete.bits.poke(0.U)
     dut.io.pcQuery.valid.poke(false.B)
     dut.io.pcQuery.bits.poke(0.U)
     dut.io.enqueueCount.poke(pcs.size.U)
@@ -123,8 +122,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
         }
         for (port <- dut.io.done) port.valid.poke(false.B)
         dut.io.storeComplete.valid.poke(true.B)
-        dut.io.storeComplete.bits.index.poke(0.U)
-        dut.io.storeComplete.bits.position.poke(false.B)
+        dut.io.storeComplete.bits.poke(0.U)
         dut.clock.step()
         dut.io.storeComplete.valid.poke(false.B)
 
@@ -205,8 +203,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       }
       for (port <- dut.io.done) port.valid.poke(false.B)
       dut.io.storeComplete.valid.poke(true.B)
-      dut.io.storeComplete.bits.index.poke(0.U)
-      dut.io.storeComplete.bits.position.poke(false.B)
+      dut.io.storeComplete.bits.poke(0.U)
       dut.clock.step()
       dut.io.storeComplete.valid.poke(false.B)
 
@@ -256,8 +253,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
       dut.io.fault.valid.poke(false.B)
       dut.io.storeComplete.valid.poke(true.B)
-      dut.io.storeComplete.bits.index.poke(0.U)
-      dut.io.storeComplete.bits.position.poke(false.B)
+      dut.io.storeComplete.bits.poke(0.U)
       dut.clock.step()
       dut.io.storeComplete.valid.poke(false.B)
       expectRetired(dut, pcs.take(dut.p.retirementLanes))
@@ -274,12 +270,11 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "complete only the store identified by ROB age when PCs repeat" in {
+  "complete only the store identified by ROB index when PCs repeat" in {
     simulate(new Tester) { dut =>
       enqueue(dut, Seq(0x100, 0x100), stores = true)
       dut.io.storeComplete.valid.poke(true.B)
-      dut.io.storeComplete.bits.index.poke(1.U)
-      dut.io.storeComplete.bits.position.poke(false.B)
+      dut.io.storeComplete.bits.poke(1.U)
       // Store 完成通知保留一级流水，年轻项完成后也不能越过未完成的队首。
       expectRetired(dut, Seq.empty)
       dut.clock.step()
@@ -289,7 +284,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       expectRetired(dut, Seq.empty)
 
       dut.io.storeComplete.valid.poke(true.B)
-      dut.io.storeComplete.bits.index.poke(0.U)
+      dut.io.storeComplete.bits.poke(0.U)
       dut.clock.step()
       dut.io.storeComplete.valid.poke(false.B)
       expectRetired(dut, Seq(0x100, 0x100))
@@ -314,8 +309,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.io.fault.valid.poke(false.B)
       dut.io.memoryFaultIndex.valid.poke(false.B)
       dut.io.storeComplete.valid.poke(true.B)
-      dut.io.storeComplete.bits.index.poke(0.U)
-      dut.io.storeComplete.bits.position.poke(false.B)
+      dut.io.storeComplete.bits.poke(0.U)
       dut.clock.step()
 
       dut.io.storeComplete.valid.poke(false.B)
@@ -324,45 +318,6 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.io.retiredTraps(1).expect(true.B)
       dut.clock.step()
       dut.io.empty.expect(true.B)
-    }
-  }
-
-  "match store completion positions across physical slot reuse" in {
-    simulate(new Tester) { dut =>
-      for (allocation <- 0 to dut.p.retirementBufferSize) {
-        val index = allocation % dut.p.retirementBufferSize
-        val position = allocation >= dut.p.retirementBufferSize
-        enqueue(dut, Seq(0x100), stores = true)
-
-        if (position) {
-          // 同一物理槽位被新一轮指令复用后，上一轮年龄不能完成新指令。
-          dut.io.storeComplete.valid.poke(true.B)
-          dut.io.storeComplete.bits.index.poke(index.U)
-          dut.io.storeComplete.bits.position.poke(false.B)
-          dut.clock.step()
-          dut.io.storeComplete.valid.poke(false.B)
-          expectRetired(dut, Seq.empty)
-          dut.clock.step()
-          dut.io.empty.expect(false.B)
-        }
-
-        dut.io.storeComplete.valid.poke(true.B)
-        dut.io.storeComplete.bits.index.poke(index.U)
-        dut.io.storeComplete.bits.position.poke(position.B)
-        dut.clock.step()
-        dut.io.storeComplete.valid.poke(false.B)
-        expectRetired(dut, Seq(0x100))
-        dut.clock.step()
-        dut.io.empty.expect(true.B)
-
-        // 空槽上的完成通知不能留下状态，影响之后的槽位复用。
-        dut.io.storeComplete.valid.poke(true.B)
-        dut.clock.step()
-        dut.io.storeComplete.valid.poke(false.B)
-        expectRetired(dut, Seq.empty)
-        dut.clock.step()
-        dut.io.empty.expect(true.B)
-      }
     }
   }
 
@@ -413,8 +368,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
         dut.io.pcQuery.valid.poke(false.B)
 
         dut.io.storeComplete.valid.poke(true.B)
-        dut.io.storeComplete.bits.index.poke((i % dut.p.retirementBufferSize).U)
-        dut.io.storeComplete.bits.position.poke(false.B)
+        dut.io.storeComplete.bits.poke((i % dut.p.retirementBufferSize).U)
         dut.clock.step()
         dut.io.storeComplete.valid.poke(false.B)
         dut.clock.step()
