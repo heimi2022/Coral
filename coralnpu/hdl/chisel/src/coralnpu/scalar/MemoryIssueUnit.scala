@@ -6,7 +6,7 @@ import common._
 import coralnpu.rvv._
 
 // 访存入口：读取并锁存操作数，将队列和顺序检查集中管理。
-// LSU 只接收检查通过的命令，执行期间通过 robAge 更新和释放 Tracker 记录。
+// LSU 只接收检查通过的命令，执行完成后通过 robAge 释放 Tracker 记录。
 class MemoryIssueUnit(p: Parameters) extends Module {
     val io = IO(new Bundle {
         val req = Vec(p.instructionLanes, Flipped(Decoupled(new LsuCmd(p))))
@@ -20,7 +20,6 @@ class MemoryIssueUnit(p: Parameters) extends Module {
 
         val lsuIssue = Decoupled(new LsuIssueCommand(p))
         val complete = Flipped(Valid(new RobAge(p)))
-        val rangeUpdate = Flipped(Valid(new MemoryOrderRangeUpdate(p)))
     })
 
     private val queue = Module(new MemoryIssueQueue(p))
@@ -28,18 +27,16 @@ class MemoryIssueUnit(p: Parameters) extends Module {
     io.queueCapacity := queue.io.nSpace
     io.pending := queue.io.pending
 
-    tracker.io.probe := queue.io.probe
+    tracker.io.candidate := queue.io.candidate
+    tracker.io.issueReady := io.lsuIssue.ready
     queue.io.conflict := tracker.io.conflict
-    queue.io.trackerHasSpace := tracker.io.hasSpace
-    tracker.io.alloc := queue.io.alloc
-    tracker.io.promote := queue.io.promote
+    queue.io.trackerIssue := tracker.io.issue
+    queue.io.trackerReserved := tracker.io.reserved
     tracker.io.complete := io.complete
-    tracker.io.rangeUpdate := io.rangeUpdate
-    queue.io.recheckEvent := io.complete.valid || io.rangeUpdate.valid
+    queue.io.recheckEvent := io.complete.valid
 
     // 执行端 ready 仅表示 slot 空闲，不依赖本端 valid。
     // 队列获准交付时才移除命令，并分配或提升对应的 Tracker 记录。
-    queue.io.issueEnable := io.lsuIssue.ready
     io.lsuIssue.valid := queue.io.issue.valid
     io.lsuIssue.bits.uop := queue.io.issue.bits
 

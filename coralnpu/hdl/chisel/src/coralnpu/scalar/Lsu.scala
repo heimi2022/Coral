@@ -54,8 +54,6 @@ class Lsu(p: Parameters) extends Module {
         val storeComplete = Output(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
         // 异常对应的 ROB 物理槽位；异常 PC 由 ROB 查询返回。
         val faultRobIndex = Output(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
-        val memoryOrderRangeUpdate = Output(Valid(
-            new MemoryOrderRangeUpdate(p)))
         val memoryOrderComplete = Output(Valid(new RobAge(p)))
   })
 }
@@ -423,10 +421,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   // Number of time indices repeats (up to 4 times)
   val indexParitions = UInt(3.W)
   val vectorLoop = new LsuVectorLoop()
-  // Indexed-vector address envelope accumulated across all index subvectors.
-  val memoryRangeValid = Bool()
-  val memoryRangeStart = UInt(32.W)
-  val memoryRangeEnd = UInt(32.W)
 
   def pendingVector(): Bool = {
     !vectorLoop.subvector.isFull()
@@ -468,6 +462,7 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
   }
 
   // 接收 RVV 当前 subvector 的索引、源数据与 mask，并更新 slot 中逐 byte 状态。
+  // Indexed 指令只在这里计算实际访存地址，不再回传地址范围给 Tracker。
   def vectorUpdate(rvv2lsu: Rvv2Lsu): LsuSlot = {
     val result = Wire(new LsuSlot(p, bytesPerSlot))
     result.op := op
@@ -526,18 +521,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.data := Mux(shouldUpdate && LsuOp.isVector(op) && rvv2lsu.vregfile.valid,
         UIntToVec(rvv2lsu.vregfile.bits.data, 8), data)
 
-    val candidateMin = updateAddrs.reduce((a, b) => Mux(a <= b, a, b))
-    val candidateMax = updateAddrs.reduce((a, b) => Mux(a >= b, a, b))
-    val indexRangeUpdate = LsuOp.isIndexedVector(op) &&
-        shouldUpdate && rvv2lsu.idx.valid
-    result.memoryRangeValid := memoryRangeValid || indexRangeUpdate
-    result.memoryRangeStart := Mux(indexRangeUpdate && memoryRangeValid,
-        Mux(candidateMin < memoryRangeStart, candidateMin, memoryRangeStart),
-        Mux(indexRangeUpdate, candidateMin, memoryRangeStart))
-    result.memoryRangeEnd := Mux(indexRangeUpdate && memoryRangeValid,
-        Mux(candidateMax > memoryRangeEnd, candidateMax, memoryRangeEnd),
-        Mux(indexRangeUpdate, candidateMax, memoryRangeEnd))
-
     result
   }
 
@@ -569,9 +552,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.sew := sew
     result.indexParitions := indexParitions
     result.vectorLoop := vectorLoop
-    result.memoryRangeValid := memoryRangeValid
-    result.memoryRangeStart := memoryRangeStart
-    result.memoryRangeEnd := memoryRangeEnd
 
     result
   }
@@ -609,9 +589,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
                              finishedVectorLoop,
                              vectorLoopNext)
     result.pendingWriteback := !finished
-    result.memoryRangeValid := memoryRangeValid
-    result.memoryRangeStart := memoryRangeStart
-    result.memoryRangeEnd := memoryRangeEnd
 
     // TODO(davidgao): absorb baseAddr offset computation into vectorLoop
     val lmulUpdate = vectorWriteback && vectorLoop.segment.isFull()
@@ -667,9 +644,6 @@ class LsuSlot(p: Parameters, bytesPerSlot: Int) extends Bundle {
     result.sew := sew
     result.indexParitions := indexParitions
     result.vectorLoop := vectorLoop
-    result.memoryRangeValid := memoryRangeValid
-    result.memoryRangeStart := memoryRangeStart
-    result.memoryRangeEnd := memoryRangeEnd
     result
   }
 
@@ -770,10 +744,6 @@ object LsuSlot {
       result.indexParitions := 0.U
       result.vectorLoop := 0.U.asTypeOf(result.vectorLoop)
     }
-    result.memoryRangeValid := false.B
-    result.memoryRangeStart := 0.U
-    result.memoryRangeEnd := 0.U
-
     // Load 要向目的寄存器写回；RVV store 也要向 RVV 核回报操作完成。
     result.pendingWriteback := !uop.store || LsuOp.isVector(uop.op)
 
@@ -953,22 +923,6 @@ class LsuV2(p: Parameters) extends Lsu(p) {
   // 年龄直接复用 slot.robAge，只额外记录是否仍占用 Tracker 项。
   val memoryOrderActive = RegInit(false.B)
 
-  val indexedAddressSetComplete = if (p.enableRvv) {
-    vectorUpdate && io.rvv2lsu.get(0).bits.idx.valid &&
-      !vectorUpdatedSlot.vectorLoop.isActive()
-  } else {
-    false.B
-  }
-  io.memoryOrderRangeUpdate.valid := indexedAddressSetComplete &&
-    vectorUpdatedSlot.memoryRangeValid && memoryOrderActive
-  io.memoryOrderRangeUpdate.bits.robAge := slot.robAge
-  io.memoryOrderRangeUpdate.bits.hasAccess := true.B
-  io.memoryOrderRangeUpdate.bits.addressKnown := true.B
-  private val trackedAddressBits = MemoryOrderTracker.AddressBits
-  io.memoryOrderRangeUpdate.bits.rangeStart :=
-    vectorUpdatedSlot.memoryRangeStart(trackedAddressBits - 1, 0)
-  io.memoryOrderRangeUpdate.bits.rangeEnd :=
-    vectorUpdatedSlot.memoryRangeEnd(trackedAddressBits - 1, 0)
   io.issue.ready := slot.slotIdle() && !faultReg.valid
 
   // 读返回按地址分配到 slot 的 byte，并更新尚未完成的 byte 集合。

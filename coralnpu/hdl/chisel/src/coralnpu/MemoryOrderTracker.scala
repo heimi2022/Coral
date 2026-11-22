@@ -4,44 +4,47 @@ import chisel3._
 import chisel3.util._
 
 object MemoryOrderTracker {
+  // 地址范围使用本地内存映射的地址位宽，避免使用完整 32 位地址比较器。
   val DefaultDepth = 8
   val AddressBits = CoralMemoryMap.AddressBits
 }
 
-/** One memory operation presented to the ordering tracker. */
+/**
+  * 一条提交给访存顺序检查器的操作摘要。
+  *
+  * Tracker 不保存完整 LSU 指令，只保存判断内存依赖所需的最小信息。
+  */
 class MemoryOrderRequest(p: Parameters) extends Bundle {
+  // ROB 年龄用于判断当前记录是否比候选项更老。
   val robAge = new RobAge(p)
+  // Store 会影响后续 Load；Load-Load 不需要顺序阻塞。
   val isStore = Bool()
+  // false 表示本条指令没有实际的内存访问，例如 vl=0。
   val hasAccess = Bool()
+  // Indexed 指令在整个执行期间保持未知地址，直到 complete 释放记录。
   val addressKnown = Bool()
+  // 范围端点均为包含式地址。
   val rangeStart = UInt(MemoryOrderTracker.AddressBits.W)
   val rangeEnd = UInt(MemoryOrderTracker.AddressBits.W)
 }
 
-class MemoryOrderRangeUpdate(p: Parameters) extends Bundle {
-  val robAge = new RobAge(p)
-  val hasAccess = Bool()
-  val addressKnown = Bool()
-  val rangeStart = UInt(MemoryOrderTracker.AddressBits.W)
-  val rangeEnd = UInt(MemoryOrderTracker.AddressBits.W)
-}
-
-class MemoryOrderAllocation(p: Parameters) extends Bundle {
+// 队列提交候选项时说明它是否已经登记为 QUEUED。
+class MemoryOrderCandidate(p: Parameters) extends Bundle {
   val request = new MemoryOrderRequest(p)
-  val queued = Bool()
+  val tracked = Bool()
 }
 
 /** Tracks active scalar/vector memory operations and blocks conflicting younger ops. */
 class MemoryOrderTrackerIO(p: Parameters, depth: Int) extends Bundle {
-  val probe = Input(Valid(new MemoryOrderRequest(p)))
+  // 每周期最多处理一个候选项；LSU ready 决定能否立即交付。
+  val candidate = Input(Valid(new MemoryOrderCandidate(p)))
+  val issueReady = Input(Bool())
+  // 查询结果与登记结果均在当前周期返回。
   val conflict = Output(Bool())
-  val hasSpace = Output(Bool())
-  val alloc = Input(Valid(new MemoryOrderAllocation(p)))
-  val promote = Input(Valid(new RobAge(p)))
-  val rangeUpdate = Flipped(Valid(new MemoryOrderRangeUpdate(p)))
+  val issue = Output(Bool())
+  val reserved = Output(Bool())
+  // 访存执行完成，释放对应 Tracker 记录。
   val complete = Flipped(Valid(new RobAge(p)))
-  val active = Output(UInt(log2Ceil(depth + 1).W))
-  val queued = Output(UInt(log2Ceil(depth + 1).W))
 }
 
 /**
@@ -49,81 +52,87 @@ class MemoryOrderTrackerIO(p: Parameters, depth: Int) extends Bundle {
   * Ranges are inclusive byte addresses in the compact 20-bit memory map.
   */
 class MemoryOrderTracker(p: Parameters, depth: Int = MemoryOrderTracker.DefaultDepth) extends Module {
-  require(depth > 0)
+    require(depth > 0)
 
-  val io = IO(new MemoryOrderTrackerIO(p, depth))
+    val io = IO(new MemoryOrderTrackerIO(p, depth))
 
-  private val valid = RegInit(VecInit.fill(depth)(false.B))
-  private val ages = Reg(Vec(depth, new RobAge(p)))
-  private val stores = Reg(Vec(depth, Bool()))
-  private val hasAccess = Reg(Vec(depth, Bool()))
-  private val addressKnown = Reg(Vec(depth, Bool()))
-  private val rangeStarts = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
-  private val rangeEnds = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
-  private val queued = RegInit(VecInit.fill(depth)(false.B))
+    // Tracker 是可关联查找表，不要求记录按照程序顺序存放。
+    private val valid = RegInit(VecInit.fill(depth)(false.B))
+    // 每个槽位的完整 ROB 年龄，支持回绕后的精确匹配。
+    private val ages = Reg(Vec(depth, new RobAge(p)))
+    // 已登记操作是否为 Store；该字段不会在地址更新时改变。
+    private val stores = Reg(Vec(depth, Bool()))
+    // 以下字段组成内存依赖检查所需的地址摘要。
+    private val hasAccess = Reg(Vec(depth, Bool()))
+    private val addressKnown = Reg(Vec(depth, Bool()))
+    private val rangeStarts = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
+    private val rangeEnds = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
+    // true 表示操作已登记，但还没有真正送入 LSU 执行端。
+    private val queued = RegInit(VecInit.fill(depth)(false.B))
 
-  private val completeMatches = VecInit((0 until depth).map { i =>
-    valid(i) && io.complete.valid &&
-      (io.complete.bits.asUInt === ages(i).asUInt)
-  })
+    private val completeMatches = VecInit((0 until depth).map { i =>
+        valid(i) && io.complete.valid && (io.complete.bits.asUInt === ages(i).asUInt)
+    })
 
-  // Do not recycle a completing entry in the same cycle; this keeps completion
-  // and allocation writes independent and gives the allocator a one-cycle boundary.
-  private val freeSlots = VecInit((0 until depth).map(i => !valid(i)))
-  private val hasFreeSlot = freeSlots.asUInt.orR
-  private val allocIndex = PriorityEncoder(freeSlots.asUInt)
+    // Do not recycle a completing entry in the same cycle; this keeps completion
+    // and allocation writes independent and gives the allocator a one-cycle boundary.
+    // 完成当拍不复用槽位，避免同周期完成和分配之间产生写入优先级歧义。
+    private val freeSlots = VecInit((0 until depth).map(i => !valid(i)))
+    private val hasFreeSlot = freeSlots.asUInt.orR
+    private val allocIndex = PriorityEncoder(freeSlots.asUInt)
 
-  private val conflicts = (0 until depth).map { i =>
-    // 严格的年龄比较会自然排除重查项自身，无需额外的槽位标识。
-    val older = valid(i) && !completeMatches(i) &&
-      RobAge.olderThan(ages(i), io.probe.bits.robAge)
-    val orderingRelevant = stores(i) || io.probe.bits.isStore
-    val rangesOverlap = io.probe.bits.hasAccess && hasAccess(i) &&
-      (!io.probe.bits.addressKnown || !addressKnown(i) ||
-       (rangeStarts(i) <= io.probe.bits.rangeEnd &&
-        io.probe.bits.rangeStart <= rangeEnds(i)))
-    older && orderingRelevant && rangesOverlap
-  }.reduce(_ || _)
+    private val conflicts = (0 until depth).map { i =>
+        // 严格的年龄比较会自然排除重查项自身，无需额外的槽位标识。
+        val older = valid(i) && !completeMatches(i) &&
+        RobAge.olderThan(ages(i), io.candidate.bits.request.robAge)
+        // 只要已有操作或当前操作是 Store，就需要进行顺序检查。
+        val orderingRelevant = stores(i) || io.candidate.bits.request.isStore
+        // 两条指令均有访问时，未知地址保守视为重叠。
+        val rangesOverlap = io.candidate.bits.request.hasAccess && hasAccess(i) &&
+        (!io.candidate.bits.request.addressKnown || !addressKnown(i) ||
+        (rangeStarts(i) <= io.candidate.bits.request.rangeEnd &&
+            io.candidate.bits.request.rangeStart <= rangeEnds(i)))
+        older && orderingRelevant && rangesOverlap
+    }.reduce(_ || _)
 
-  io.conflict := conflicts
-  io.hasSpace := hasFreeSlot
-  io.active := PopCount(valid)
-  io.queued := PopCount(VecInit((0 until depth).map(i => valid(i) && queued(i))))
+    io.conflict := conflicts
+    private val issue = io.candidate.valid && !conflicts && io.issueReady &&
+        (io.candidate.bits.tracked || hasFreeSlot)
+    private val reserve = io.candidate.valid && !io.candidate.bits.tracked && hasFreeSlot &&
+        (conflicts || !io.issueReady)
+    private val allocate = (issue && !io.candidate.bits.tracked) || reserve
+    private val promote = issue && io.candidate.bits.tracked
+    io.issue := issue
+    io.reserved := reserve
 
-  private val promoteMatches = VecInit((0 until depth).map { i =>
-    valid(i) && io.promote.valid &&
-      (io.promote.bits.asUInt === ages(i).asUInt)
-  })
+    private val promoteMatches = VecInit((0 until depth).map { i =>
+        valid(i) && promote &&
+        (io.candidate.bits.request.robAge.asUInt === ages(i).asUInt)
+    })
 
   for (i <- 0 until depth) {
-    val allocMatches = io.alloc.valid && allocIndex === i.U
-    // 完成、范围更新和 QUEUED 提升均匹配完整年龄，包括回绕位。
-    val updateMatches = valid(i) && io.rangeUpdate.valid &&
-      (io.rangeUpdate.bits.robAge.asUInt === ages(i).asUInt)
-
+    // allocate 时只会写入一个空槽。
+    val allocMatches = allocate && allocIndex === i.U
     when(allocMatches) {
       valid(i) := true.B
-      ages(i) := io.alloc.bits.request.robAge
-      stores(i) := io.alloc.bits.request.isStore
+      ages(i) := io.candidate.bits.request.robAge
+      stores(i) := io.candidate.bits.request.isStore
     }.elsewhen(completeMatches(i)) {
+      // 完成记录只清除 valid；槽位的旧数据无需额外清零。
       valid(i) := false.B
     }
 
     when(allocMatches) {
-      addressKnown(i) := io.alloc.bits.request.addressKnown
-      hasAccess(i) := io.alloc.bits.request.hasAccess
-      rangeStarts(i) := io.alloc.bits.request.rangeStart
-      rangeEnds(i) := io.alloc.bits.request.rangeEnd
-    }.elsewhen(updateMatches && !completeMatches(i)) {
-      addressKnown(i) := io.rangeUpdate.bits.addressKnown
-      hasAccess(i) := io.rangeUpdate.bits.hasAccess
-      rangeStarts(i) := io.rangeUpdate.bits.rangeStart
-      rangeEnds(i) := io.rangeUpdate.bits.rangeEnd
+      addressKnown(i) := io.candidate.bits.request.addressKnown
+      hasAccess(i) := io.candidate.bits.request.hasAccess
+      rangeStarts(i) := io.candidate.bits.request.rangeStart
+      rangeEnds(i) := io.candidate.bits.request.rangeEnd
     }
 
     when(allocMatches) {
-      queued(i) := io.alloc.bits.queued
+      queued(i) := reserve
     }.elsewhen(completeMatches(i) || promoteMatches(i)) {
+      // 发射或完成后，记录不再属于 QUEUED 状态。
       queued(i) := false.B
     }
 
@@ -132,19 +141,15 @@ class MemoryOrderTracker(p: Parameters, depth: Int = MemoryOrderTracker.DefaultD
     }
   }
 
-  when(io.alloc.valid) {
+  when(allocate) {
     assert(hasFreeSlot)
-    assert(!io.alloc.bits.request.addressKnown ||
-      io.alloc.bits.request.rangeStart <= io.alloc.bits.request.rangeEnd)
+    assert(!io.candidate.bits.request.addressKnown ||
+      io.candidate.bits.request.rangeStart <= io.candidate.bits.request.rangeEnd)
   }
 
-  when(io.promote.valid) {
+  when(promote) {
+    // promote 必须命中一条当前仍处于 QUEUED 的记录，不能重复提升或提升已释放项。
     assert((0 until depth).map(i => promoteMatches(i) && queued(i)).reduce(_ || _))
   }
 
-  when(io.rangeUpdate.valid) {
-    when(io.rangeUpdate.bits.addressKnown) {
-      assert(io.rangeUpdate.bits.rangeStart <= io.rangeUpdate.bits.rangeEnd)
-    }
-  }
 }

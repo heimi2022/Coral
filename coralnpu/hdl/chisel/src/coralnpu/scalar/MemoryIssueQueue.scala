@@ -97,14 +97,12 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
         val enq = Input(Vec(p.instructionLanes, Valid(new LsuUOp(p))))
         val nSpace = Output(UInt(countBits.W))
         val pending = Output(Bool())
-        val issueEnable = Input(Bool())
         val issue = Output(Valid(new LsuUOp(p)))
 
-        val probe = Output(Valid(new MemoryOrderRequest(p)))
+        val candidate = Output(Valid(new MemoryOrderCandidate(p)))
         val conflict = Input(Bool())
-        val trackerHasSpace = Input(Bool())
-        val alloc = Output(Valid(new MemoryOrderAllocation(p)))
-        val promote = Output(Valid(new RobAge(p)))
+        val trackerIssue = Input(Bool())
+        val trackerReserved = Input(Bool())
         val recheckEvent = Input(Bool())
     })
 
@@ -142,11 +140,11 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     private val candidateTracked = tracked(candidateIndex)
     private val candidateRequest = LsuMemoryOrderRange(candidate, p)
 
-    io.probe.valid := candidateValid && !io.recheckEvent
-    io.probe.bits := candidateRequest
+    io.candidate.valid := candidateValid && !io.recheckEvent
+    io.candidate.bits.request := candidateRequest
+    io.candidate.bits.tracked := candidateTracked
 
     private val candidateConflicts = io.conflict
-    private val canAllocate = io.trackerHasSpace
 
     private val anyQueuedUnchecked = queuedUnchecked.asUInt.orR
     private val noOtherQueuedUnchecked = PopCount(VecInit((0 until visibleDepth).map(i =>
@@ -155,35 +153,19 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     when(io.recheckEvent) {
         recheckPending := true.B
     }.elsewhen(recheckPending && ( !anyQueuedUnchecked ||
-        (chooseQueued && io.probe.valid && candidateConflicts && noOtherQueuedUnchecked)
+        (chooseQueued && io.candidate.valid && candidateConflicts && noOtherQueuedUnchecked)
     )) {
         recheckPending := false.B
     }
 
     private val queuedCount = PopCount(VecInit((0 until visibleDepth).map(i =>
         (i.U < count) && tracked(i))))
-    // 最多预登记可见窗口数量的命令，限制等待重查项数量。
-    private val canReserve = canAllocate && queuedCount < visibleDepth.U &&
-        candidateIndex < visibleDepth.U
-    // QUEUED 项通过重查后提升原 Tracker 记录；普通新项则新分配 ISSUED 记录。
-    private val issueQueued = chooseQueued && !candidateConflicts && io.issueEnable
-    private val issueNew = !chooseQueued && !candidateTracked &&
-        !candidateConflicts && io.issueEnable && canAllocate
-    // 新项被冲突阻塞或 LSU 暂不可接收时，可先登记为 QUEUED，但不从本队列移除。
-    private val reserveNew = !chooseQueued && !candidateTracked && canReserve &&
-        !issueNew
-
-    io.alloc.valid := io.probe.valid && (reserveNew || issueNew)
-    io.alloc.bits.request := candidateRequest
-    io.alloc.bits.queued := reserveNew
-    io.promote.valid := io.probe.valid && issueQueued
-    io.promote.bits := candidate.robAge
-
-    io.issue.valid := io.probe.valid && (issueQueued || issueNew)
+    // Tracker 完成冲突检查和登记；只有实际交付 LSU 时才移除候选项。
+    io.issue.valid := io.trackerIssue
     io.issue.bits := candidate
 
     // 被阻塞或 LSU 忙的未登记项先占一个 QUEUED 槽；已登记项只在重查轮次中检查。
-    private val reserveFire = io.alloc.valid && reserveNew
+    private val reserveFire = io.trackerReserved
     private val remove = io.issue.valid
     private val removeIndex = candidateIndex
 
@@ -241,7 +223,7 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
             checked(i) := false.B
         }.elsewhen(reserveFire && candidateIndex === i.U) {
             checked(i) := true.B
-        }.elsewhen(chooseQueued && io.probe.valid && candidateConflicts &&
+        }.elsewhen(chooseQueued && io.candidate.valid && candidateConflicts &&
             candidateIndex === i.U) {
             checked(i) := true.B
         }.elsewhen(appendHit) {

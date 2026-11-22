@@ -68,7 +68,6 @@ class SCore(p: Parameters) extends Module {
     // 访存调度与执行并列；未来 MatrixDma 可作为另一个独立执行端接入。
     val memoryIssue = Module(new MemoryIssueUnit(p))
     lsu.io.issue <> memoryIssue.io.lsuIssue
-    memoryIssue.io.rangeUpdate := lsu.io.memoryOrderRangeUpdate
     memoryIssue.io.complete := lsu.io.memoryOrderComplete
     val memoryActive = memoryIssue.io.pending || lsu.io.active
 
