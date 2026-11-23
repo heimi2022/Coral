@@ -1,312 +1,229 @@
 package coralnpu.matrix
 
 import chisel3._
+import chisel3.util._
 import chisel3.simulator.scalatest.ChiselSim
+import coralnpu.{Parameters, RobAge}
 import org.scalatest.freespec.AnyFreeSpec
-import chisel3.util.Valid
 
 class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
-  // 与队列用例一致，限制 Verilator 编译并行度，便于低内存环境串行验证。
   override implicit def commonSettingsModifications: svsim.CommonSettingsModifications = {
     val inherited = super.commonSettingsModifications
     settings => inherited(settings).copy(
       availableParallelism = svsim.CommonCompilationSettings.AvailableParallelism.UpTo(1))
   }
 
+  private val p = new Parameters
+
   class Tester(depth: Int = 4) extends Module {
     val io = IO(new Bundle {
-      val inst = Input(UInt(32.W))
-      val pc = Input(UInt(32.W))
-      val issue = Input(Bool())
-      val done = Flipped(Valid(UInt(32.W)))
-      val canIssue = Output(Bool())
+      val allocate = Input(Bool())
+      val allocInst = Input(UInt(32.W))
+      val allocAge = Input(UInt(7.W))
+      val queryInst = Input(Vec(2, UInt(32.W)))
+      val queryAge = Input(Vec(2, UInt(7.W)))
+      val issue = Flipped(Valid(UInt(7.W)))
+      val done = Flipped(Valid(UInt(7.W)))
+      val allowed = Output(Vec(2, Bool()))
+      val full = Output(Bool())
+      val pending = Output(Bool())
     })
-
-    val scoreboard = Module(new MatrixScoreboard(depth))
-    scoreboard.io.candidates(0).valid := true.B
-    scoreboard.io.candidates(0).bits.pc := io.pc
-    scoreboard.io.candidates(0).bits.instruction := MatrixDecode(io.inst)
-    scoreboard.io.issued.valid := io.issue
-    scoreboard.io.issued.bits.pc := io.pc
-    scoreboard.io.issued.bits.instruction := MatrixDecode(io.inst)
-    scoreboard.io.completed := io.done
-    io.canIssue := scoreboard.io.issueAllowed(0)
+    val scoreboard = Module(new MatrixScoreboard(p, depth, 2))
+    scoreboard.io.allocated.valid := io.allocate
+    scoreboard.io.allocated.bits.robAge := io.allocAge.asTypeOf(new RobAge(p))
+    scoreboard.io.allocated.bits.instruction := MatrixDecode(io.allocInst)
+    for (q <- 0 until 2) {
+      scoreboard.io.candidates(q).valid := true.B
+      scoreboard.io.candidates(q).bits.robAge := io.queryAge(q).asTypeOf(new RobAge(p))
+      scoreboard.io.candidates(q).bits.instruction := MatrixDecode(io.queryInst(q))
+    }
+    scoreboard.io.issued.valid := io.issue.valid
+    scoreboard.io.issued.bits := io.issue.bits.asTypeOf(new RobAge(p))
+    scoreboard.io.completed.valid := io.done.valid
+    scoreboard.io.completed.bits := io.done.bits.asTypeOf(new RobAge(p))
+    io.allowed := scoreboard.io.issueAllowed
+    io.full := scoreboard.io.isFull
+    io.pending := scoreboard.io.hasPending
   }
 
-  private def storeC(reg: Int): BigInt =
-    (2L << 28) | (1L << 26) | (1L << 25) | (reg.toLong << 7) | 0x2bL
+  private def matmul(c: Int, a: Int = 0, b: Int = 1): BigInt =
+    BigInt(0x1980082bL) | (BigInt(a) << 15) | (BigInt(b) << 20) | (BigInt(c) << 7)
 
-  private def matmul(reg: Int): BigInt =
-    0x1800002bL | (2L << 20) | (2L << 10) | (reg.toLong << 7)
+  private def memory(family: Int, reg: Int, store: Boolean = false): BigInt =
+    (BigInt(family) << 28) | (BigInt(1) << 26) |
+      (if (store) BigInt(1) << 25 else BigInt(0)) | (BigInt(reg) << 7) | BigInt(0x2b)
 
-  "hold the configured number of commands and replace a completed command while full" in {
-    val depth = new coralnpu.Parameters().matrixScoreboardDepth
-    simulate(new Tester(depth = depth)) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.io.issue.poke(true.B)
-      for (i <- 0 until depth) {
-        dut.io.pc.poke((0x100 + 4 * i).U)
-        dut.io.canIssue.expect(true.B)
-        dut.clock.step()
-      }
-      dut.io.issue.poke(false.B)
-      dut.io.canIssue.expect(false.B)
+  private def initialize(dut: Tester): Unit = {
+    dut.io.allocate.poke(false.B)
+    dut.io.allocInst.poke(0.U)
+    dut.io.allocAge.poke(0.U)
+    dut.io.issue.valid.poke(false.B)
+    dut.io.issue.bits.poke(0.U)
+    dut.io.done.valid.poke(false.B)
+    dut.io.done.bits.poke(0.U)
+    for (q <- 0 until 2) query(dut, 0, 0, q)
+  }
 
-      // A completion frees one slot for a new issue on the same edge.
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x100.U)
-      dut.io.pc.poke(0x200.U)
-      dut.io.issue.poke(true.B)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-      dut.io.issue.poke(false.B)
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(false.B)
+  private def allocate(dut: Tester, inst: BigInt, age: Int): Unit = {
+    dut.io.full.expect(false.B)
+    dut.io.allocate.poke(true.B)
+    dut.io.allocInst.poke(inst.U)
+    dut.io.allocAge.poke(age.U)
+    dut.clock.step()
+    dut.io.allocate.poke(false.B)
+  }
 
-      dut.io.inst.poke(storeC(0).U)
-      for (i <- 1 until depth) {
-        dut.io.done.valid.poke(true.B)
-        dut.io.done.bits.poke((0x100 + 4 * i).U)
-        dut.io.canIssue.expect(false.B)
-        dut.clock.step()
-      }
-      // The replacement must still protect C until its own completion.
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x200.U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(true.B)
+  private def query(dut: Tester, inst: BigInt, age: Int, q: Int = 0): Unit = {
+    dut.io.queryInst(q).poke(inst.U)
+    dut.io.queryAge(q).poke(age.U)
+  }
+
+  private def issue(dut: Tester, age: Int): Unit = {
+    dut.io.issue.valid.poke(true.B)
+    dut.io.issue.bits.poke(age.U)
+    dut.clock.step()
+    dut.io.issue.valid.poke(false.B)
+  }
+
+  private def complete(dut: Tester, age: Int): Unit = {
+    dut.io.done.valid.poke(true.B)
+    dut.io.done.bits.poke(age.U)
+    dut.clock.step()
+    dut.io.done.valid.poke(false.B)
+  }
+
+  "Protect pending RAW dependencies across both query ports without blocking the older command" in {
+    simulate(new Tester) { dut =>
+      initialize(dut)
+      allocate(dut, memory(0, 0), 0)
+      allocate(dut, matmul(4), 1)
+      query(dut, memory(0, 0), 0, 0)
+      query(dut, matmul(4), 1, 1)
+      dut.io.allowed(0).expect(true.B)
+      dut.io.allowed(1).expect(false.B)
+      issue(dut, 0)
+      dut.io.allowed(1).expect(false.B)
+      complete(dut, 0)
+      dut.io.allowed(1).expect(true.B)
+      issue(dut, 1)
+      complete(dut, 1)
+      dut.io.pending.expect(false.B)
     }
   }
 
-  "serialize STORE_C and MATMUL to the same C register in program order" in {
+  "Protect pending WAR and WAW while allowing an independent register" in {
     simulate(new Tester) { dut =>
-      dut.io.pc.poke(0x100.U)
-      dut.io.inst.poke(storeC(1).U)
-      dut.io.issue.poke(true.B)
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.inst.poke(matmul(1).U)
-      dut.io.canIssue.expect(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x100.U)
-      dut.clock.step()
-
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(true.B)
+      initialize(dut)
+      allocate(dut, memory(2, 4, store = true), 0)
+      allocate(dut, matmul(4), 1)
+      allocate(dut, matmul(5), 2)
+      query(dut, matmul(4), 1)
+      query(dut, matmul(5), 2, 1)
+      dut.io.allowed(0).expect(false.B)
+      dut.io.allowed(1).expect(true.B)
+      issue(dut, 0)
+      dut.io.allowed(0).expect(false.B)
+      complete(dut, 0)
+      dut.io.allowed(0).expect(true.B)
+      allocate(dut, memory(2, 4), 3)
+      query(dut, memory(2, 4), 3, 1)
+      dut.io.allowed(1).expect(false.B)
+      dut.io.allowed(0).expect(true.B)
     }
   }
 
-  "serialize MATMUL and later STORE_C to the same C register" in {
+  "Relax MATMUL C hazards only after the older accumulation is issued" in {
     simulate(new Tester) { dut =>
-      dut.io.pc.poke(0x200.U)
-      dut.io.inst.poke(matmul(2).U)
-      dut.io.issue.poke(true.B)
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.inst.poke(storeC(2).U)
-      dut.io.canIssue.expect(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x200.U)
-      dut.clock.step()
-
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(true.B)
+      initialize(dut)
+      allocate(dut, matmul(4), 0)
+      allocate(dut, matmul(4, 2, 3), 1)
+      query(dut, matmul(4, 2, 3), 1)
+      dut.io.allowed(0).expect(false.B)
+      issue(dut, 0)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 1)
+      allocate(dut, memory(0, 0), 2)
+      query(dut, memory(0, 0), 2)
+      dut.io.allowed(0).expect(false.B) // AB WAR 仍需等待实际完成。
+      complete(dut, 0)
+      dut.io.allowed(0).expect(true.B)
     }
   }
 
-  "allow ordered MATMUL accumulation and independent C registers concurrently" in {
-    simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
+  "Count queued entries against capacity and issue an existing entry while full" in {
+    simulate(new Tester(1)) { dut =>
+      initialize(dut)
+      allocate(dut, matmul(4), 0)
+      dut.io.full.expect(true.B)
+      query(dut, matmul(4), 0)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 0)
+      dut.io.full.expect(true.B)
+      // 完成释放与新 Dispatch 登记可在同一拍发生。
+      dut.io.done.valid.poke(true.B)
       dut.io.done.bits.poke(0.U)
-      dut.io.pc.poke(0x300.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.io.issue.poke(true.B)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.pc.poke(0x304.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.pc.poke(0x308.U)
-      dut.io.inst.poke(matmul(1).U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.pc.poke(0x30c.U)
-      dut.io.inst.poke(storeC(3).U)
-      dut.io.canIssue.expect(true.B)
+      allocate(dut, matmul(5), 1)
+      dut.io.done.valid.poke(false.B)
+      dut.io.full.expect(true.B)
+      query(dut, matmul(5), 1)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 1)
+      complete(dut, 1)
+      dut.io.pending.expect(false.B)
     }
   }
 
-  "do not overwrite entries when an invalid issue arrives while full" in {
+  "Allow independent instances and release only the returned age" in {
     simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.issue.poke(true.B)
-
-      // Fill all four entries with independent C accumulations.
-      for ((pc, reg) <- Seq((0x400, 0), (0x404, 1), (0x408, 2), (0x40c, 3))) {
-        dut.io.pc.poke(pc.U)
-        dut.io.inst.poke(matmul(reg).U)
-        dut.io.canIssue.expect(true.B)
-        dut.clock.step()
-      }
-
-      // The table is full. An erroneous issue pulse must not replace entry 0.
-      dut.io.pc.poke(0x500.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.io.canIssue.expect(false.B)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x400.U)
-      dut.clock.step()
-
-      // Releasing entry 0 makes the slot available again, proving it was not
-      // overwritten by the invalid issue pulse.
-      dut.io.done.valid.poke(false.B)
-      dut.io.inst.poke(storeC(0).U)
-      dut.io.canIssue.expect(true.B)
+      initialize(dut)
+      allocate(dut, matmul(4), 0)
+      allocate(dut, matmul(5), 1)
+      query(dut, matmul(5), 1)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 0)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 1)
+      complete(dut, 1) // 年轻实例先完成，也不能释放较老实例。
+      dut.io.pending.expect(true.B)
+      query(dut, memory(2, 4, store = true), 2)
+      allocate(dut, memory(2, 4, store = true), 2)
+      dut.io.allowed(0).expect(false.B)
+      complete(dut, 0)
+      dut.io.allowed(0).expect(true.B)
+      issue(dut, 2)
+      complete(dut, 2)
+      dut.io.pending.expect(false.B)
     }
   }
 
-  "release the oldest matching issue after an earlier slot was reused" in {
+  "Compare ROB ages across wrap and after reusing a lower table slot" in {
     simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.issue.poke(true.B)
-
-      dut.io.pc.poke(0x600.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.clock.step()
-
-      dut.io.pc.poke(0x604.U)
-      dut.io.inst.poke(matmul(1).U)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x600.U)
-      dut.clock.step()
-
-      // Reuse the space released by the older instruction. Distinct masks
-      // make it observable which same-PC entry is released next.
-      dut.io.done.valid.poke(false.B)
-      dut.io.issue.poke(true.B)
-      dut.io.pc.poke(0x604.U)
-      dut.io.inst.poke(matmul(2).U)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.pc.poke(0x608.U)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x604.U)
-      dut.io.inst.poke(storeC(1).U)
-      dut.io.canIssue.expect(true.B)
-      dut.io.inst.poke(storeC(2).U)
-      dut.io.canIssue.expect(false.B)
-      dut.clock.step()
-
-      dut.io.done.valid.poke(false.B)
-      dut.io.inst.poke(storeC(1).U)
-      dut.io.canIssue.expect(true.B)
-      dut.io.inst.poke(storeC(2).U)
-      dut.io.canIssue.expect(false.B)
+      initialize(dut)
+      allocate(dut, matmul(5), 61)
+      issue(dut, 61)
+      allocate(dut, memory(0, 0), 62)
+      complete(dut, 61)
+      // 年轻项复用物理槽位 0；依赖顺序必须按 ROB 年龄判断。
+      allocate(dut, matmul(4), 64)
+      query(dut, matmul(4), 64)
+      dut.io.allowed(0).expect(false.B)
+      query(dut, memory(0, 0), 62, 1)
+      dut.io.allowed(1).expect(true.B)
+      issue(dut, 62)
+      complete(dut, 62)
+      dut.io.allowed(0).expect(true.B)
     }
   }
 
-  "accept a new issue on the cycle a full queue releases one" in {
+  "Reject unregistered candidates and ignore completions for unissued records" in {
     simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.issue.poke(true.B)
-      for ((pc, reg) <- Seq((0x700, 0), (0x704, 1), (0x708, 2), (0x70c, 3))) {
-        dut.io.pc.poke(pc.U)
-        dut.io.inst.poke(matmul(reg).U)
-        dut.clock.step()
-      }
-
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x704.U)
-      dut.io.pc.poke(0x710.U)
-      dut.io.inst.poke(matmul(1).U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.done.valid.poke(false.B)
-      dut.io.inst.poke(storeC(1).U)
-      dut.io.canIssue.expect(false.B)
-
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x710.U)
-      dut.io.canIssue.expect(true.B)
-    }
-  }
-
-  "release only one same-PC command per completion" in {
-    simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.issue.poke(true.B)
-      dut.io.pc.poke(0x800.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.clock.step()
-      dut.clock.step()
-
-      dut.io.issue.poke(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x800.U)
-      dut.io.inst.poke(storeC(0).U)
-      dut.io.canIssue.expect(false.B)
-      dut.clock.step()
-
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(true.B)
-    }
-  }
-
-  "reject a repeated PC even with independent registers until completion" in {
-    simulate(new Tester) { dut =>
-      dut.io.done.valid.poke(false.B)
-      dut.io.done.bits.poke(0.U)
-      dut.io.pc.poke(0x900.U)
-      dut.io.inst.poke(matmul(0).U)
-      dut.io.issue.poke(true.B)
-      dut.clock.step()
-      dut.io.issue.poke(false.B)
-      dut.io.inst.poke(matmul(1).U)
-      dut.io.canIssue.expect(false.B)
-      dut.io.done.valid.poke(true.B)
-      dut.io.done.bits.poke(0x900.U)
-      dut.io.canIssue.expect(true.B)
-      dut.clock.step()
-      dut.io.done.valid.poke(false.B)
-      dut.io.canIssue.expect(true.B)
+      initialize(dut)
+      query(dut, matmul(4), 0)
+      dut.io.allowed(0).expect(false.B)
+      allocate(dut, matmul(4), 0)
+      complete(dut, 0)
+      dut.io.pending.expect(true.B)
+      dut.io.allowed(0).expect(true.B)
     }
   }
 }

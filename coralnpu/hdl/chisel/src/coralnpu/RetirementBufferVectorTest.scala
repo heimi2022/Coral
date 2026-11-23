@@ -23,7 +23,7 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
       val vectorWrites = Input(Vec(p.instructionLanes, Valid(new VectorWriteDataIO(p))))
       val pcQuery = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val pcResponse = Output(Valid(UInt(32.W)))
-      val done = Input(Vec(2, Valid(UInt(32.W))))
+      val done = Input(Vec(2, Valid(new RobAge(p))))
       val storeComplete = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val allocAge = Output(Vec(p.instructionLanes, new RobAge(p)))
       val retired = Output(new RetirementBufferDebugIO(p))
@@ -72,7 +72,8 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
       for (pc <- dut.io.pcs) pc.poke(0.U)
       for (port <- dut.io.done) {
         port.valid.poke(false.B)
-        port.bits.poke(0.U)
+        port.bits.index.poke(0.U)
+        port.bits.position.poke(false.B)
       }
       for (port <- dut.io.vectorWrites) {
         port.valid.poke(false.B)
@@ -93,9 +94,12 @@ class RetirementBufferVectorSpec extends AnyFreeSpec with ChiselSim {
 
       def advanceEmpty(count: Int): Unit = {
         for (_ <- 0 until count) {
+          val ageIndex = dut.io.allocAge(0).index.peek().litValue
+          val agePosition = dut.io.allocAge(0).position.peek().litToBoolean
           enqueue(0x80)
           dut.io.done(0).valid.poke(true.B)
-          dut.io.done(0).bits.poke(0x80.U)
+          dut.io.done(0).bits.index.poke(ageIndex.U)
+          dut.io.done(0).bits.position.poke(agePosition.B)
           dut.clock.step()
           dut.io.done(0).valid.poke(false.B)
           dut.io.empty.expect(true.B)

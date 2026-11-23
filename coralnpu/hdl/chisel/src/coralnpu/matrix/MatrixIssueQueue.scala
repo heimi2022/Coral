@@ -2,7 +2,7 @@ package coralnpu.matrix
 
 import chisel3._
 import chisel3.util._
-import coralnpu.{MatrixCfgCmd, MatrixCfgOp, Parameters}
+import coralnpu.{MatrixCfgCmd, MatrixCfgOp, Parameters, RobAge}
 
 object MatrixIssueKind extends ChiselEnum {
   // 窗口中只保存一种通用编码，kind 用来说明 payload 应按哪类命令解释。
@@ -59,41 +59,41 @@ class MatrixIssueWindow(entryBits: Int, depth: Int, visibleDepth: Int) extends M
 class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     require(depth > 0)
 
-    // Entry 保留矩阵访存的 ROB 年龄标签，低 73 位仍是原有 MEM payload。
-    private val robAgeBits = 1 + log2Ceil(p.retirementBufferSize)
+    private val issueLookahead = math.min(p.matrixIssueLookahead, depth)
+    require(issueLookahead > 0)
+    // 所有命令共用 MEM payload 高位的年龄位置，不再单独存储 PC。
+    private val robAgeBits = (new RobAge(p)).getWidth
     private val payloadBits = 73 + robAgeBits
     private val kindBits = 2
-    private val pcBits = 32
-    private val entryBits = payloadBits + kindBits + pcBits
+    private val entryBits = payloadBits + kindBits
 
-    // 以下位号均针对完整 entry；payload 占低位，PC 固定放在最高 32 位。
+    // entry 布局：[kind][robAge][payload:73]。
     private val payloadLo = 0
     private val payloadHi = payloadBits - 1
     private val kindLo = payloadBits
     private val kindHi = kindLo + kindBits - 1
-    private val pcLo = kindHi + 1
-    private val pcHi = entryBits - 1
 
     val io = IO(new Bundle {
         // 按命令类型提供数据输入，共用 enqReady 作为唯一入队反压信号。
-        val matmulEnq = Flipped(Valid(new MatrixInstCmd))
-        val zeroEnq = Flipped(Valid(new MatrixZeroCmd))
+        val matmulEnq = Flipped(Valid(new MatrixInstCmd(p)))
+        val zeroEnq = Flipped(Valid(new MatrixZeroCmd(p)))
         val memEnq = Flipped(Valid(new MatrixMemExecReq(p)))
-        val configEnq = Flipped(Valid(new MatrixCfgCmd))
+        val configEnq = Flipped(Valid(new MatrixCfgCmd(p)))
         val enqReady = Output(Bool())
 
         // 每周期至多选择一项；只有对应出队端口 valid，握手后才移除。
-        val matmulDeq = Decoupled(new MatrixInstCmd)
-        val zeroDeq = Decoupled(new MatrixZeroCmd)
+        val matmulDeq = Decoupled(new MatrixInstCmd(p))
+        val zeroDeq = Decoupled(new MatrixZeroCmd(p))
         val memDeq = Decoupled(new MatrixMemExecReq(p))
-        val configDeq = Decoupled(new MatrixCfgCmd)
-        val completed = Flipped(Valid(UInt(32.W)))
+        val configDeq = Decoupled(new MatrixCfgCmd(p))
+        val candidates = Output(Vec(issueLookahead, Valid(new MatrixScoreboardIssue(p))))
+        val issueAllowed = Input(Vec(issueLookahead, Bool()))
+        val issued = Output(Valid(new RobAge(p)))
+        val scoreboardPending = Input(Bool())
         val empty = Output(Bool())
         val active = Output(Bool())
     })
 
-    private val issueLookahead = math.min(p.matrixIssueLookahead, depth)
-    require(issueLookahead > 0)
     // 物理窗口仍可容纳 depth 条命令，但调度逻辑只观察最老的 issueLookahead 条。
     private val queue = Module(new MatrixIssueWindow(entryBits, depth, issueLookahead))
 
@@ -102,8 +102,7 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
 
     // MEM payload 高位保存 ROB age，低 73 位沿用原布局。
     private val memPayload = Cat(
-        io.memEnq.bits.req.robAge.position,
-        io.memEnq.bits.req.robAge.index,
+        io.memEnq.bits.req.robAge.asUInt,
         io.memEnq.bits.req.op.asUInt,
         io.memEnq.bits.req.reg,
         io.memEnq.bits.req.elemWidth,
@@ -113,7 +112,8 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
 
     // MATMUL 有效字段为 11 位：[op:2][ms1:3][ms2:3][md:3]；高位补零。
     private val matmulPayload = Cat(
-        0.U((payloadBits - 11).W),
+        io.matmulEnq.bits.robAge.asUInt,
+        0.U((73 - 11).W),
         io.matmulEnq.bits.op.asUInt,
         io.matmulEnq.bits.ms1,
         io.matmulEnq.bits.ms2,
@@ -122,27 +122,29 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
 
     // ZERO 有效字段为 6 位：[md:3][regCount:3]；高位补零。
     private val zeroPayload = Cat(
-        0.U((payloadBits - 6).W),
+        io.zeroEnq.bits.robAge.asUInt,
+        0.U((73 - 6).W),
         io.zeroEnq.bits.md,
         io.zeroEnq.bits.regCount
     )
 
     // CONFIG payload 低 34 位：[value:32][op:2]。
     private val configPayload = Cat(
-        0.U((payloadBits - 34).W),
+        io.configEnq.bits.robAge.asUInt,
+        0.U((73 - 34).W),
         io.configEnq.bits.value,
         io.configEnq.bits.op.asUInt
     )
 
     // one-hot 选择对应类型并编码，新命令统一追加在窗口末尾。
     private val memEntry = Cat(
-        io.memEnq.bits.req.pc, MatrixIssueKind.MEM.asUInt, memPayload)
+        MatrixIssueKind.MEM.asUInt, memPayload)
     private val matmulEntry = Cat(
-        io.matmulEnq.bits.pc, MatrixIssueKind.MATMUL.asUInt, matmulPayload)
+        MatrixIssueKind.MATMUL.asUInt, matmulPayload)
     private val zeroEntry = Cat(
-        io.zeroEnq.bits.pc, MatrixIssueKind.ZERO.asUInt, zeroPayload)
+        MatrixIssueKind.ZERO.asUInt, zeroPayload)
     private val configEntry = Cat(
-        io.configEnq.bits.pc, MatrixIssueKind.CONFIG.asUInt, configPayload)
+        MatrixIssueKind.CONFIG.asUInt, configPayload)
     queue.io.enq.valid := io.memEnq.valid || io.matmulEnq.valid || io.zeroEnq.valid ||
         io.configEnq.valid
     queue.io.enq.bits := Mux1H(Seq(
@@ -197,26 +199,22 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     }
 
     private val instructions = VecInit(queue.io.entries.map(e => decodeEntry(e.bits)))
-    private val accesses = instructions.map(i => MatrixScoreboardAccess(i))
-    private val scoreboard = Module( new MatrixScoreboard(p.matrixScoreboardDepth, issueLookahead))
-    scoreboard.io.completed := io.completed
     // 命令当前是否允许被选择发射。它只做资格判断，还没有在这里选出最终命令。
     private val eligible = Wire(Vec(issueLookahead, Bool()))
     for (i <- 0 until issueLookahead) {
         val candidate = queue.io.entries(i)
-        scoreboard.io.candidates(i).valid := candidate.valid
-        scoreboard.io.candidates(i).bits.pc := candidate.bits(pcHi, pcLo)
-        scoreboard.io.candidates(i).bits.instruction := instructions(i)
+        io.candidates(i).valid := candidate.valid
+        io.candidates(i).bits.robAge := candidate.bits(payloadHi, 73).asTypeOf(new RobAge(p))
+        io.candidates(i).bits.instruction := instructions(i)
         val blockedByOlder = (0 until i).map { j =>
             val older = queue.io.entries(j)
             older.valid && (
                 // CONFIG 必须等更老项交付执行端，任何年轻项也不能跨过 CONFIG。
                 instructions(i).isConfig() || instructions(j).isConfig() ||
                 // 第三步仍保持全部矩阵访存命令的交付顺序，不做地址消歧。
-                (instructions(i).isMemory() && instructions(j).isMemory()) ||
-                MatrixScoreboardAccess.conflict(accesses(j), accesses(i)))
+                (instructions(i).isMemory() && instructions(j).isMemory()))
         }.reduceOption(_ || _).getOrElse(false.B)
-        eligible(i) := scoreboard.io.issueAllowed(i) && !blockedByOlder
+        eligible(i) := io.issueAllowed(i) && !blockedByOlder
     }
 
     // 最低下标就是最老的可发射项。不将 ready 纳入选择，避免与执行端组合反馈。
@@ -235,17 +233,15 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     private val isZero = headKind === MatrixIssueKind.ZERO
     private val isMem = headKind === MatrixIssueKind.MEM
     private val isConfig = headKind === MatrixIssueKind.CONFIG
-    private val instruction = instructions(selectedIndex)
     private val issueAllowed = held || eligible(selectedIndex)
 
-    // 只有 MatrixCore 真正接收命令才登记；入队和端口反压都不占在途表。
-    scoreboard.io.issued.valid := io.matmulDeq.fire || io.memDeq.fire || io.zeroDeq.fire
-    scoreboard.io.issued.bits.pc := head(pcHi, pcLo)
-    scoreboard.io.issued.bits.instruction := instruction
+    // Dispatch 已登记；只有执行端真正接收时才将原记录标记为已发射。
+    io.issued.valid := io.matmulDeq.fire || io.memDeq.fire || io.zeroDeq.fire
+    io.issued.bits := headPayload(payloadHi, 73).asTypeOf(new RobAge(p))
 
     // MATMUL payload 低 11 位布局：[op:2][ms1:3][ms2:3][md:3]。
     io.matmulDeq.valid := selected.valid && isMatmul && issueAllowed
-    io.matmulDeq.bits.pc := head(pcHi, pcLo)
+    io.matmulDeq.bits.robAge := io.issued.bits
     io.matmulDeq.bits.op := headPayload(10, 9).asTypeOf(MatrixInstOp())
     io.matmulDeq.bits.ms1 := headPayload(8, 6)
     io.matmulDeq.bits.ms2 := headPayload(5, 3)
@@ -253,15 +249,13 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
 
     // ZERO payload 低 6 位布局：[md:3][regCount:3]。
     io.zeroDeq.valid := selected.valid && isZero && issueAllowed
-    io.zeroDeq.bits.pc := head(pcHi, pcLo)
+    io.zeroDeq.bits.robAge := io.issued.bits
     io.zeroDeq.bits.md := headPayload(5, 3)
     io.zeroDeq.bits.regCount := headPayload(2, 0)
 
     // MEM payload 占满 73 位，按入队时的字段顺序还原访存请求。
     io.memDeq.valid := selected.valid && isMem && issueAllowed
-    io.memDeq.bits.req.pc := head(pcHi, pcLo)
-    io.memDeq.bits.req.robAge.position := headPayload(payloadHi, payloadHi)
-    io.memDeq.bits.req.robAge.index := headPayload(payloadHi - 1, 73)
+    io.memDeq.bits.req.robAge := io.issued.bits
     io.memDeq.bits.req.op := headPayload(72, 69).asTypeOf(MatrixMemOp())
     io.memDeq.bits.req.reg := headPayload(68, 66)
     io.memDeq.bits.req.elemWidth := headPayload(65, 64)
@@ -270,7 +264,7 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
 
     // CONFIG 只会在窗口最老位置被选中；value 已在入队前捕获。
     io.configDeq.valid := selected.valid && isConfig && issueAllowed
-    io.configDeq.bits.pc := head(pcHi, pcLo)
+    io.configDeq.bits.robAge := io.issued.bits
     io.configDeq.bits.value := headPayload(33, 2)
     io.configDeq.bits.op := headPayload(1, 0).asTypeOf(MatrixCfgOp())
 
@@ -289,5 +283,5 @@ class MatrixIssueQueue(p: Parameters, depth: Int) extends Module {
     // 有效项连续排列，最老项无效就表示整个窗口为空。
     io.empty := !queue.io.entries(0).valid
     // 窗口为空并不表示已发射的命令完成，排空判断必须同时覆盖两者。
-    io.active := !io.empty || scoreboard.io.hasInFlight
+    io.active := !io.empty || io.scoreboardPending
 }

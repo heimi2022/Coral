@@ -45,7 +45,7 @@ class RetirementBufferIO(p: Parameters) extends Bundle {
     val debug = Output(new RetirementBufferDebugIO(p))
     // matrix 
     val matrixInstr = Option.when(p.enableMatrix)(Input(Vec(p.instructionLanes, Bool())))
-    val matrixComplete = Option.when(p.enableMatrix)(Input(Vec(2, Valid(UInt(32.W)))))
+    val matrixComplete = Option.when(p.enableMatrix)(Input(Vec(2, Valid(new RobAge(p)))))
 }
 
 /**
@@ -305,18 +305,11 @@ class RetirementBuffer(p: Parameters, mini: Boolean = false) extends Module {
         (regLastIsBranch && io.inst(0).bits.addr === regLastAddr + 4.U)
     val faultLinkOk = (io.fault.bits.mepc === regLastTarget) ||
         (regLastIsBranch && io.fault.bits.mepc === regLastAddr + 4.U)
-    // 每个完成端口独立选择最老的未完成匹配项：先搜索读指针及其后方，再回绕到低槽位。
-    // 只编码 1-bit 匹配标记，不为按 PC 完成的矩阵命令旋转整个指令数组。
+    // 矩阵完成前不会退休或复用物理槽位，直接按返回 index 更新，无需搜索 PC。
     val matrixDoneEntries = io.matrixComplete.map { completions =>
         completions.map { completion =>
-            val matches = VecInit((0 until bufferSize).map { i =>
-                val entry = instructionBuffer(i)
-                completion.valid && slotValid(i) && entry.isMatrix &&
-                    !resultBuffer(i).valid && (completion.bits === entry.addr)
-            })
-            val afterHead = VecInit((0 until bufferSize).map(i =>
-                matches(i) && i.U >= deqPtr)).asUInt
-            Mux(afterHead.orR, PriorityEncoderOH(afterHead), PriorityEncoderOH(matches.asUInt))
+            Mux(completion.valid, UIntToOH(completion.bits.index, bufferSize),
+                0.U(bufferSize.W))
         }.reduce(_ | _)
     }.getOrElse(0.U(bufferSize.W))
 

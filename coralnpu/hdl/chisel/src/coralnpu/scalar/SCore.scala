@@ -22,7 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.RvvCoreIO
 import _root_.circt.stage.ChiselStage
-import coralnpu.matrix.{MatrixCoreIO, MatrixIssueQueue, MatrixMemExecReq, MatrixMemOp}
+import coralnpu.matrix.{MatrixCoreIO, MatrixIssueQueue, MatrixMemExecReq, MatrixMemOp, MatrixScoreboard}
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -62,6 +62,11 @@ class SCore(p: Parameters) extends Module {
     val dispatch = Module(new DispatchV2(p))
     val matrixIssueQueue = Option.when(p.enableMatrix) {
         Module(new MatrixIssueQueue(p, p.matrixIssueQueueDepth))
+    }
+    // 独立于发射队列，后续可同时接受矩阵计算和统一访存队列的查询。
+    val matrixScoreboard = Option.when(p.enableMatrix) {
+        Module(new MatrixScoreboard(p, p.matrixScoreboardDepth,
+            math.min(p.matrixIssueLookahead, p.matrixIssueQueueDepth)))
     }
 
     val lsu = Lsu(p)
@@ -116,10 +121,15 @@ class SCore(p: Parameters) extends Module {
 
     // matrix
     if (p.enableMatrix){
-        matrixIssueQueue.get.io.completed.valid := io.matrixcore.get.status.done
-        matrixIssueQueue.get.io.completed.bits := io.matrixcore.get.status.donePc
+        matrixScoreboard.get.io.allocated := dispatch.io.matrixAllocated.get
+        matrixScoreboard.get.io.candidates := matrixIssueQueue.get.io.candidates
+        matrixIssueQueue.get.io.issueAllowed := matrixScoreboard.get.io.issueAllowed
+        matrixIssueQueue.get.io.scoreboardPending := matrixScoreboard.get.io.hasPending
+        matrixScoreboard.get.io.issued := matrixIssueQueue.get.io.issued
+        matrixScoreboard.get.io.completed.valid := io.matrixcore.get.status.done
+        matrixScoreboard.get.io.completed.bits := io.matrixcore.get.status.doneRobAge
         rob_io.matrixComplete.get(0).valid := io.matrixcore.get.status.done
-        rob_io.matrixComplete.get(0).bits := io.matrixcore.get.status.donePc
+        rob_io.matrixComplete.get(0).bits := io.matrixcore.get.status.doneRobAge
         
         // 矩阵命令和配置命令均等待各自的完成事件后退休。
         rob_io.matrixInstr.get := VecInit(Seq.tabulate(p.instructionLanes) { i =>
@@ -273,10 +283,11 @@ class SCore(p: Parameters) extends Module {
         val matrixMemValid = RegInit(false.B)
         val matrixMemCommand = Reg(new MatrixMemExecReq(p))
         val matrixCfgOperandsPending = RegNext(dispatch.io.matrixCfg.get.valid, false.B)
-        val matrixCfgCommand = Reg(new MatrixCfgCmd)
+        val matrixCfgCommand = RegEnable(dispatch.io.matrixCfg.get.bits,
+            dispatch.io.matrixCfg.get.valid)
         val matrixCfgApplyPending = RegNext(matrixIssueQueue.get.io.configDeq.fire, false.B)
-        val matrixCfgAppliedPc = RegEnable(
-            matrixIssueQueue.get.io.configDeq.bits.pc,
+        val matrixCfgAppliedAge = RegEnable(
+            matrixIssueQueue.get.io.configDeq.bits.robAge,
             matrixIssueQueue.get.io.configDeq.fire
         )
         val matrixMemStageBusy = matrixMemOperandsPending || matrixMemValid
@@ -285,12 +296,14 @@ class SCore(p: Parameters) extends Module {
         dispatch.io.mactive := matrixMemStageBusy || matrixCfgStageBusy ||
             matrixIssueQueue.get.io.active || matrixCfgApplyPending ||
             io.matrixcore.get.status.busy
-        val matrixDispatchReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
+        val matrixQueueReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
             matrixIssueQueue.get.io.enqReady
+        // 依赖未解除仍可入队，但必须同时取得队列和依赖表的空间。
+        val matrixDispatchReady = matrixQueueReady && !matrixScoreboard.get.io.isFull
 
         // Reserve queue space for a config at dispatch; a matrix command cannot
         // enter during the cycle in which its scalar operand is being captured.
-        dispatch.io.matrixIssueQueueReady.get := matrixDispatchReady
+        dispatch.io.matrixIssueQueueReady.get := matrixQueueReady
 
         // Only one matrix command is accepted into the shared FIFO per cycle.
         dispatch.io.matrixMul.get.ready := matrixDispatchReady
@@ -298,25 +311,18 @@ class SCore(p: Parameters) extends Module {
         dispatch.io.matrixMem.get.ready := matrixDispatchReady
         dispatch.io.matrixMemPending.get := matrixMemOperandsPending || matrixMemValid
 
-        matrixIssueQueue.get.io.matmulEnq.valid := dispatch.io.matrixMul.get.valid &&
-            !matrixMemStageBusy
+        matrixIssueQueue.get.io.matmulEnq.valid := dispatch.io.matrixMul.get.fire
         matrixIssueQueue.get.io.matmulEnq.bits := dispatch.io.matrixMul.get.bits
-        matrixIssueQueue.get.io.zeroEnq.valid := dispatch.io.matrixZero.get.valid &&
-            !matrixMemStageBusy
+        matrixIssueQueue.get.io.zeroEnq.valid := dispatch.io.matrixZero.get.fire
         matrixIssueQueue.get.io.zeroEnq.bits := dispatch.io.matrixZero.get.bits
         matrixIssueQueue.get.io.memEnq.valid := matrixMemValid
         matrixIssueQueue.get.io.memEnq.bits := matrixMemCommand
         matrixIssueQueue.get.io.configEnq.valid := matrixCfgOperandsPending
-        matrixIssueQueue.get.io.configEnq.bits.pc := matrixCfgCommand.pc
-        matrixIssueQueue.get.io.configEnq.bits.op := matrixCfgCommand.op
+        matrixIssueQueue.get.io.configEnq.bits := matrixCfgCommand
         matrixIssueQueue.get.io.configEnq.bits.value := regfile.io.readData(0).data
 
         when(dispatch.io.matrixMem.get.fire) {
             matrixMemCommand.req := dispatch.io.matrixMem.get.bits
-        }
-        when(dispatch.io.matrixCfg.get.valid) {
-            matrixCfgCommand.pc := dispatch.io.matrixCfg.get.bits.pc
-            matrixCfgCommand.op := dispatch.io.matrixCfg.get.bits.op
         }
         val matrixMemIsWhole = matrixMemCommand.req.op.isOneOf(
             MatrixMemOp.LD_WHOLE,
@@ -339,7 +345,7 @@ class SCore(p: Parameters) extends Module {
         csr.io.matrixCfg.get.bits := matrixIssueQueue.get.io.configDeq.bits
         matrixIssueQueue.get.io.configDeq.ready := !matrixCfgApplyPending
         rob_io.matrixComplete.get(1).valid := matrixCfgApplyPending
-        rob_io.matrixComplete.get(1).bits := matrixCfgAppliedPc
+        rob_io.matrixComplete.get(1).bits := matrixCfgAppliedAge
         val matrixCfgBarrier = matrixCfgApplyPending
 
         // 队列按依赖选择一个候选，只有 MatrixCore 对应端口握手才移除。

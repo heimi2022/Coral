@@ -2,10 +2,13 @@ package coralnpu.matrix
 
 import chisel3._
 import chisel3.util.HasBlackBoxResource
-import coralnpu.Parameters
+import coralnpu.{Parameters, RobAge}
 import bus.AxiMasterIO
-class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResource {
+class MatrixCoreBlackBox(p: Parameters) extends BlackBox(Map(
+    "ROB_AGE_W" -> (new RobAge(p)).getWidth))
+    with HasBlackBoxResource {
   override def desiredName: String = "MatrixCore"
+  private val robAgeBits = (new RobAge(p)).getWidth
 
   val io = IO(new Bundle {
     val clk = Input(Clock())
@@ -13,7 +16,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
 
     val matmul_valid_i = Input(Bool())
     val matmul_ready_o = Output(Bool())
-    val matmul_pc_i = Input(UInt(32.W))
+    val matmul_rob_age_i = Input(UInt(robAgeBits.W))
     val matmul_op_i = Input(UInt(2.W))
     val matmul_ms1_i = Input(UInt(3.W))
     val matmul_ms2_i = Input(UInt(3.W))
@@ -21,13 +24,13 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
 
     val zero_valid_i = Input(Bool())
     val zero_ready_o = Output(Bool())
-    val zero_pc_i = Input(UInt(32.W))
+    val zero_rob_age_i = Input(UInt(robAgeBits.W))
     val zero_md_i = Input(UInt(3.W))
     val zero_reg_count_i = Input(UInt(3.W))
 
     val mem_valid_i = Input(Bool())
     val mem_ready_o = Output(Bool())
-    val mem_pc_i = Input(UInt(32.W))
+    val mem_rob_age_i = Input(UInt(robAgeBits.W))
     val mem_op_i = Input(UInt(4.W))
     val mem_reg_i = Input(UInt(3.W))
     val mem_elem_width_i = Input(UInt(2.W))
@@ -42,7 +45,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox with HasBlackBoxResourc
     val busy_o = Output(Bool())
     val done_valid_o = Output(Bool())
     val done_illegal_o = Output(Bool())
-    val done_pc_o = Output(UInt(32.W))
+    val done_rob_age_o = Output(UInt(robAgeBits.W))
 
     val xmsat_set_valid_o = Output(Bool())
     val xmsat_set_bits_o = Output(Bool())
@@ -121,7 +124,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.rst_n := !reset.asBool
 
   matrixCore.io.matmul_valid_i := io.core.cmd.valid
-  matrixCore.io.matmul_pc_i := io.core.cmd.bits.pc
+  matrixCore.io.matmul_rob_age_i := io.core.cmd.bits.robAge.asUInt
   matrixCore.io.matmul_op_i := io.core.cmd.bits.op.asUInt
   matrixCore.io.matmul_ms1_i := io.core.cmd.bits.ms1
   matrixCore.io.matmul_ms2_i := io.core.cmd.bits.ms2
@@ -129,13 +132,13 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.core.cmd.ready := matrixCore.io.matmul_ready_o
 
   matrixCore.io.zero_valid_i := io.core.zero.valid
-  matrixCore.io.zero_pc_i := io.core.zero.bits.pc
+  matrixCore.io.zero_rob_age_i := io.core.zero.bits.robAge.asUInt
   matrixCore.io.zero_md_i := io.core.zero.bits.md
   matrixCore.io.zero_reg_count_i := io.core.zero.bits.regCount
   io.core.zero.ready := matrixCore.io.zero_ready_o
 
   matrixCore.io.mem_valid_i := io.core.mem.valid
-  matrixCore.io.mem_pc_i := io.core.mem.bits.req.pc
+  matrixCore.io.mem_rob_age_i := io.core.mem.bits.req.robAge.asUInt
   matrixCore.io.mem_op_i := io.core.mem.bits.req.op.asUInt
   matrixCore.io.mem_reg_i := io.core.mem.bits.req.reg
   matrixCore.io.mem_elem_width_i := io.core.mem.bits.req.elemWidth
@@ -151,7 +154,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   io.core.status.busy := matrixCore.io.busy_o
   io.core.status.done := matrixCore.io.done_valid_o
   io.core.status.illegal := matrixCore.io.done_illegal_o
-  io.core.status.donePc := matrixCore.io.done_pc_o
+  io.core.status.doneRobAge := matrixCore.io.done_rob_age_o.asTypeOf(new RobAge(p))
 
   io.core.csr.xmsat_set.valid := matrixCore.io.xmsat_set_valid_o
   io.core.csr.xmsat_set.bits := matrixCore.io.xmsat_set_bits_o

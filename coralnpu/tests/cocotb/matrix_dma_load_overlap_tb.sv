@@ -9,12 +9,14 @@ module matrix_dma_load_overlap_tb;
     reg rst_n = 0;
     reg mem_valid_i = 0;
     wire mem_ready_o, busy_o, done_valid_o, done_fault_o;
-    reg [31:0] mem_pc_i = 0, mem_base_i = 0, mem_stride_i = 0;
+    reg [6:0] mem_rob_age_i = 0;
+    reg [31:0] mem_base_i = 0, mem_stride_i = 0;
     reg [2:0] mem_reg_i = 0;
     reg mem_ab_scale_sel_i = 0;
     reg [1:0] mem_elem_bytes_i = 0;
     reg [7:0] mem_rows_i = 0, mem_cols_i = 0;
-    wire [31:0] done_pc_o, done_fault_addr_o;
+    wire [6:0] done_rob_age_o;
+    wire [31:0] done_fault_addr_o;
     wire ab_wr_en_o, ab_wr_dst_sel_o, c_wr_en_o, c_wr_half_o, c_wr_nblock_o;
     wire [1:0] ab_wr_reg_o;
     wire [5:0] ab_wr_row_o;
@@ -163,7 +165,7 @@ module matrix_dma_load_overlap_tb;
                     @(negedge clk);
                     mem_valid_i=(sent<COMMANDS);
                     if (sent<COMMANDS) begin
-                        mem_pc_i='h100+sent*4; mem_base_i=bases[sent];
+                        mem_rob_age_i=60+sent; mem_base_i=bases[sent];
                         mem_stride_i=strides[sent]; mem_reg_i=regs[sent];
                         mem_ab_scale_sel_i=scales[sent]; mem_elem_bytes_i=elems[sent];
                         mem_rows_i=rows[sent]; mem_cols_i=cols[sent];
@@ -217,10 +219,10 @@ module matrix_dma_load_overlap_tb;
                     if (done_valid_o) begin
                         if (completed>=COMMANDS) $fatal(1, "Extra completion");
                         expected_fault=(completed==fault_cmd);
-                        if (done_pc_o !== ('h100+completed*4) ||
+                        if (done_rob_age_o !== (60+completed) ||
                             done_fault_o !== expected_fault || !response_done[completed])
-                            $fatal(1, "Wrong/early completion LOAD=%0d PC=%h fault=%b",
-                                   completed, done_pc_o, done_fault_o);
+                            $fatal(1, "Wrong/early completion LOAD=%0d ROB_AGE=%h fault=%b",
+                                   completed, done_rob_age_o, done_fault_o);
                         if (expected_fault && !fault_drained[completed])
                             $fatal(1, "Fault completion without error");
                         expected_writes=rows[completed]*(((cols[completed]<<elems[completed])+63)/64);

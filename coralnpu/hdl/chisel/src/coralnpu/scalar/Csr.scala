@@ -232,7 +232,7 @@ class Csr(p: Parameters) extends Module {
         val bru = Flipped(new CsrBruIO(p))
         val float = Option.when(p.enableFloat) { Flipped(new CsrFloatIO(p)) }
         val rvv = Option.when(p.enableRvv) { new CsrRvvIO(p) }
-        val matrixCfg = Option.when(p.enableMatrix) { Flipped(Valid(new MatrixCfgCmd)) }
+        val matrixCfg = Option.when(p.enableMatrix) { Flipped(Valid(new MatrixCfgCmd(p))) }
         val matrix = Option.when(p.enableMatrix) { new CsrMatrixIO(p) }
         val counters = Input(new CsrCounters(p))
 
@@ -273,7 +273,7 @@ class Csr(p: Parameters) extends Module {
     val req = RegInit(MakeInvalid(new CsrCmd))
     req := MakeValid(io.req.valid, io.req.bits, bitsWhenInvalid = req.bits)
     val matrixCfgReq = Option.when(p.enableMatrix) {
-        val req = RegInit(MakeInvalid(new MatrixCfgCmd))
+        val req = RegInit(MakeInvalid(new MatrixCfgCmd(p)))
         req := MakeValid(
             io.matrixCfg.get.valid,
             io.matrixCfg.get.bits,

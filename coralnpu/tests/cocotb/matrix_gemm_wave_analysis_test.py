@@ -17,7 +17,7 @@ def overlap_samples():
     samples = []
     for index in range(3):
         s = idle()
-        s.update(cmd_valid_i=1, cmd_ready_o=1, cmd_pc_i=0x100 + 4 * index)
+        s.update(cmd_valid_i=1, cmd_ready_o=1, cmd_rob_age_i=62 + index)
         s[TILING + "block_queue_wr_en"] = 1
         for prefix in QUEUES.values():
             s[prefix + "do_write"] = 1
@@ -28,7 +28,7 @@ def overlap_samples():
     samples.append((30, s))
     for index in range(3):
         s = idle()
-        s.update(done_valid_o=1, done_ready_i=1, done_pc_o=0x100 + 4 * index)
+        s.update(done_valid_o=1, done_ready_i=1, done_rob_age_o=62 + index)
         for prefix in QUEUES.values():
             s[prefix + "do_read"] = 1
         samples.append((40 + 10 * index, s))
@@ -49,7 +49,7 @@ class WaveAnalysisTest(unittest.TestCase):
                 header.extend("$upscope $end\n" for _ in parts[:-1])
             header.append("$upscope $end\n$upscope $end\n$enddefinitions $end\n")
             initial = idle()
-            initial.update(cmd_valid_i=1, cmd_ready_o=1, cmd_pc_i=0x100)
+            initial.update(cmd_valid_i=1, cmd_ready_o=1, cmd_rob_age_i=62)
             body = ["#0\n"] + [f"b{initial[name]:b} v{index}\n"
                                     for index, name in enumerate(SIGNALS)]
             changes = [f"b0 v{SIGNALS.index('cmd_ready_o')}\n", "b1 v0\n"]
@@ -102,7 +102,7 @@ $enddefinitions $end
 
     def test_rejects_wrong_completion_order_and_truncated_trace(self):
         samples = overlap_samples()
-        samples[4][1]["done_pc_o"] = 0x104
+        samples[4][1]["done_rob_age_o"] = 63
         self.assertFalse(analyze(samples)["verified"])
         self.assertFalse(analyze(overlap_samples()[:4])["verified"])
 

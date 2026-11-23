@@ -575,6 +575,7 @@ chisel_cc_library(
         "--enableFloat=True",
         "--enableVerification=True",
     ],
+    emit_jvm_flags = ["-Xmx2500m"],
     vopts = CORE_MINI_AXI_VOPTS,
 )
 

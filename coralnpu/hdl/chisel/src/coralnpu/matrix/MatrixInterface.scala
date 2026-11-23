@@ -11,23 +11,23 @@ object MatrixInstOp extends ChiselEnum {
     val MMACCSU_W_B = Value // 11
 }
 
-class MatrixInstCmd extends Bundle {
-    val pc = UInt(32.W)
+class MatrixInstCmd(p: Parameters) extends Bundle {
+    val robAge = new RobAge(p)
     val op  = MatrixInstOp()
     val ms1 = UInt(3.W)
     val ms2 = UInt(3.W)
     val md  = UInt(3.W)
 }
-class MatrixStatusIO extends Bundle {
+class MatrixStatusIO(p: Parameters) extends Bundle {
     val busy = Output(Bool())
     val done = Output(Bool())
     val illegal = Output(Bool())
-    val donePc = Output(UInt(32.W))
+    val doneRobAge = Output(new RobAge(p))
 }
 
 // 上游保证指令合法、目标对齐，并已处理全部目标寄存器依赖。
-class MatrixZeroCmd extends Bundle {
-    val pc = UInt(32.W)
+class MatrixZeroCmd(p: Parameters) extends Bundle {
+    val robAge = new RobAge(p)
     val md = UInt(3.W)
     // 数量减一编码：000/001/011/111 对应 1/2/4/8 个寄存器。
     val regCount = UInt(3.W)
@@ -51,7 +51,6 @@ object MatrixMemOp extends ChiselEnum {
 }
 
 class MatrixMemCmd(p: Parameters) extends Bundle {
-    val pc = UInt(32.W)
     val robAge = new RobAge(p)
     val op = MatrixMemOp()
     val reg = UInt(3.W)
@@ -81,9 +80,9 @@ class MatrixMemDirectIO(p: Parameters) extends Bundle {
 
 
 class MatrixCoreIO(p: Parameters) extends Bundle {
-    val cmd = Flipped(Decoupled(new MatrixInstCmd))
-    val zero = Flipped(Decoupled(new MatrixZeroCmd))
+    val cmd = Flipped(Decoupled(new MatrixInstCmd(p)))
+    val zero = Flipped(Decoupled(new MatrixZeroCmd(p)))
     val mem = Flipped(Decoupled(new MatrixMemExecReq(p)))
     val csr = Flipped(new CsrMatrixIO(p))
-    val status = new MatrixStatusIO
+    val status = new MatrixStatusIO(p)
 }

@@ -13,9 +13,9 @@ QUEUES = {
     "act_psum": TILING + "u_act_psum_block_fifo.",
 }
 SIGNALS = (
-    "clk", "rst_n", "cmd_valid_i", "cmd_ready_o", "cmd_pc_i",
+    "clk", "rst_n", "cmd_valid_i", "cmd_ready_o", "cmd_rob_age_i",
     "cfg_m_i", "cfg_n_i", "cfg_k_i", "done_valid_o", "done_ready_i",
-    "done_pc_o", "cmd_decode_busy", TILING + "block_queue_wr_en",
+    "done_rob_age_o", "cmd_decode_busy", TILING + "block_queue_wr_en",
 ) + tuple(prefix + suffix for prefix in QUEUES.values()
           for suffix in ("full_o", "do_write", "do_read"))
 
@@ -113,19 +113,19 @@ def analyze(samples, min_inflight=3, expected_commands=None):
             raise ValueError(f"Unknown required signal before edge at {ns:g} ns")
         counts["observed_cycles"] += 1
         if s["done_valid_o"] and s["done_ready_i"]:
-            pc = s["done_pc_o"]
-            completions.append({"pc": pc, "ns": ns})
-            check(bool(pending) and pending[0] == pc,
-                  "Completion PC does not match oldest accepted command", ns)
+            rob_age = s["done_rob_age_o"]
+            completions.append({"rob_age": rob_age, "ns": ns})
+            check(bool(pending) and pending[0] == rob_age,
+                  "Completion ROB age does not match oldest accepted command", ns)
             if pending:
                 pending.popleft()
         if s["cmd_valid_i"] and s["cmd_ready_o"]:
-            pc = s["cmd_pc_i"]
+            rob_age = s["cmd_rob_age_i"]
             m, n, k = (s[f"cfg_{axis}_i"] for axis in "mnk")
             check(all(1 <= dim <= 64 for dim in (m, n, k)),
                   "Accepted command has invalid tile dimensions", ns)
-            pending.append(pc)
-            accepts.append({"pc": pc, "ns": ns, "m": m, "n": n, "k": k})
+            pending.append(rob_age)
+            accepts.append({"rob_age": rob_age, "ns": ns, "m": m, "n": n, "k": k})
             expected_pairs += ((n + 31) // 32) * ((k + 31) // 32)
         peak = max(peak, len(pending))
         counts["cycles_with_multiple_outstanding_commands"] += len(pending) >= 2

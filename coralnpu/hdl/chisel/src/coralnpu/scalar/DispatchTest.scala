@@ -9,6 +9,7 @@ import org.scalatest.freespec.AnyFreeSpec
 class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
   val p = new Parameters
   p.enableMatrix = true
+  private val matrixTestAge = 0x53
 
   class Tester(testRobSpace: Boolean = false, testMatrixActive: Boolean = false) extends Module {
     val io = IO(new Bundle {
@@ -17,9 +18,12 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       val undef_fault = Output(Bool())
       val matrixZero_ready = Input(Bool())
       val matrixZero_valid = Output(Bool())
-      val matrixZero_pc = Output(UInt(32.W))
+      val matrixZero_age = Output(UInt((new RobAge(p)).getWidth.W))
       val matrixZero_md = Output(UInt(3.W))
       val matrixZero_regCount = Output(UInt(3.W))
+      val matrixAllocated_valid = Output(Bool())
+      val matrixAllocated_age = Output(UInt((new RobAge(p)).getWidth.W))
+      val matrixAllocated_writeC = Output(UInt(4.W))
       val inst_addr = Input(UInt(p.programCounterBits.W))
       val inst_bits = Input(UInt(p.instructionBits.W))
       val inst_brchFwd = Input(Bool())
@@ -35,17 +39,18 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       val matrixCfg_valid = Output(Bool())
       val matrixCfg_op = Output(UInt(2.W))
+      val matrixCfg_age = Output(UInt((new RobAge(p)).getWidth.W))
       val matrix_valid = Output(Bool())
       val matrix_op = Output(UInt(MatrixInstOp.getWidth.W))
       val matrix_ms1 = Output(UInt(3.W))
       val matrix_ms2 = Output(UInt(3.W))
       val matrix_md = Output(UInt(3.W))
-      val matrix_pc = Output(UInt(32.W))
+      val matrix_age = Output(UInt((new RobAge(p)).getWidth.W))
       val matrixMem_valid = Output(Bool())
       val matrixMem_op = Output(UInt(MatrixMemOp.getWidth.W))
       val matrixMem_reg = Output(UInt(3.W))
       val matrixMem_elemWidth = Output(UInt(2.W))
-      val matrixMem_pc = Output(UInt(32.W))
+      val matrixMem_age = Output(UInt((new RobAge(p)).getWidth.W))
 
       val rs1Read_valid = Output(Bool())
       val rs1Read_addr = Output(UInt(5.W))
@@ -71,6 +76,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.retirement_buffer_nSpace :=
       io.retirement_buffer_nSpace.getOrElse(p.instructionLanes.U)
     dispatch.io.robAge := 0.U.asTypeOf(dispatch.io.robAge)
+    dispatch.io.robAge(0) := matrixTestAge.U.asTypeOf(new RobAge(p))
     dispatch.io.retirement_buffer_empty := io.retirement_buffer_empty
     dispatch.io.matrixMemPending.get := io.matrixMemPending
     dispatch.io.matrixIssueQueueReady.get := true.B
@@ -79,9 +85,12 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     dispatch.io.debug_mode := false.B
     dispatch.io.matrixZero.get.ready := io.matrixZero_ready
     io.matrixZero_valid := dispatch.io.matrixZero.get.valid
-    io.matrixZero_pc := dispatch.io.matrixZero.get.bits.pc
+    io.matrixZero_age := dispatch.io.matrixZero.get.bits.robAge.asUInt
     io.matrixZero_md := dispatch.io.matrixZero.get.bits.md
     io.matrixZero_regCount := dispatch.io.matrixZero.get.bits.regCount
+    io.matrixAllocated_valid := dispatch.io.matrixAllocated.get.valid
+    io.matrixAllocated_age := dispatch.io.matrixAllocated.get.bits.robAge.asUInt
+    io.matrixAllocated_writeC := dispatch.io.matrixAllocated.get.bits.instruction.writeC
     io.inst_ready := dispatch.io.inst(0).ready
     io.undef_fault := dispatch.io.undefFault(0)
     dispatch.io.matrixMul.get.ready := true.B
@@ -108,17 +117,18 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     io.alu_addr := dispatch.io.alu(0).bits.addr
     io.matrixCfg_valid := dispatch.io.matrixCfg.get.valid
     io.matrixCfg_op := dispatch.io.matrixCfg.get.bits.op.asUInt
+    io.matrixCfg_age := dispatch.io.matrixCfg.get.bits.robAge.asUInt
     io.matrix_valid := dispatch.io.matrixMul.get.valid
     io.matrix_op := dispatch.io.matrixMul.get.bits.op.asUInt
     io.matrix_ms1 := dispatch.io.matrixMul.get.bits.ms1
     io.matrix_ms2 := dispatch.io.matrixMul.get.bits.ms2
     io.matrix_md := dispatch.io.matrixMul.get.bits.md
-    io.matrix_pc := dispatch.io.matrixMul.get.bits.pc
+    io.matrix_age := dispatch.io.matrixMul.get.bits.robAge.asUInt
     io.matrixMem_valid := dispatch.io.matrixMem.get.valid
     io.matrixMem_op := dispatch.io.matrixMem.get.bits.op.asUInt
     io.matrixMem_reg := dispatch.io.matrixMem.get.bits.reg
     io.matrixMem_elemWidth := dispatch.io.matrixMem.get.bits.elemWidth
-    io.matrixMem_pc := dispatch.io.matrixMem.get.bits.pc
+    io.matrixMem_age := dispatch.io.matrixMem.get.bits.robAge.asUInt
     io.rs1Read_valid := dispatch.io.rs1Read(0).valid
     io.rs1Read_addr := dispatch.io.rs1Read(0).addr
     io.rs1Set_valid := dispatch.io.rs1Set(0).valid
@@ -206,6 +216,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_K.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(false.B)
       dut.io.rs1Set_valid.expect(true.B)
       dut.io.rs1Set_value.expect(4.U)
@@ -228,6 +239,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_K.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(true.B)
       dut.io.rs1Read_addr.expect(6.U)
       dut.io.rs1Set_valid.expect(false.B)
@@ -250,6 +262,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_M.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(false.B)
       dut.io.rs1Set_valid.expect(true.B)
       dut.io.rs1Set_value.expect(5.U)
@@ -272,6 +285,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_M.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(true.B)
       dut.io.rs1Read_addr.expect(7.U)
       dut.io.rs1Set_valid.expect(false.B)
@@ -294,6 +308,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_N.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(false.B)
       dut.io.rs1Set_valid.expect(true.B)
       dut.io.rs1Set_value.expect(9.U)
@@ -316,6 +331,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       dut.io.matrixCfg_valid.expect(true.B)
       dut.io.matrixCfg_op.expect(MatrixCfgOp.SET_N.litValue.U)
+      dut.io.matrixCfg_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(true.B)
       dut.io.rs1Read_addr.expect(8.U)
       dut.io.rs1Set_valid.expect(false.B)
@@ -495,7 +511,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.matrix_ms1.expect(1.U)
       dut.io.matrix_ms2.expect(3.U)
       dut.io.matrix_md.expect(6.U)
-      dut.io.matrix_pc.expect("h12345678".U)
+      dut.io.matrix_age.expect(matrixTestAge.U)
       dut.io.matrixMem_valid.expect(false.B)
       dut.io.matrixZero_valid.expect(false.B)
       dut.io.rs1Read_valid.expect(false.B)
@@ -520,7 +536,7 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.matrixMem_op.expect(MatrixMemOp.ST_C.litValue.U)
       dut.io.matrixMem_reg.expect(5.U)
       dut.io.matrixMem_elemWidth.expect(2.U)
-      dut.io.matrixMem_pc.expect("h20000100".U)
+      dut.io.matrixMem_age.expect(matrixTestAge.U)
       dut.io.rs1Read_valid.expect(true.B)
       dut.io.rs1Read_addr.expect(7.U)
       dut.io.rs2Read_valid.expect(true.B)
@@ -541,8 +557,9 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
 
       for (_ <- 0 until 3) {
         dut.io.matrixZero_valid.expect(true.B)
+        dut.io.matrixAllocated_valid.expect(false.B)
         dut.io.inst_ready.expect(false.B)
-        dut.io.matrixZero_pc.expect("h20000200".U)
+        dut.io.matrixZero_age.expect(matrixTestAge.U)
         dut.io.matrixZero_md.expect(4)
         dut.io.matrixZero_regCount.expect(3)
         dut.io.matrix_valid.expect(false.B)
@@ -557,9 +574,13 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.matrixZero_ready.poke(true.B)
       dut.io.inst_ready.expect(true.B)
       dut.io.matrixZero_valid.expect(true.B)
+      dut.io.matrixAllocated_valid.expect(true.B)
+      dut.io.matrixAllocated_age.expect(matrixTestAge.U)
+      dut.io.matrixAllocated_writeC.expect("b1111".U)
       dut.clock.step()
       dut.io.inst_valid.poke(false.B)
       dut.io.matrixZero_valid.expect(false.B)
+      dut.io.matrixAllocated_valid.expect(false.B)
     }
   }
 

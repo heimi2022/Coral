@@ -1,4 +1,5 @@
 module MatrixDma #(
+    parameter int ROB_AGE_W = 7,
     parameter int AXI_ADDR_W = 32,
     parameter int AXI_DATA_W = 512,
     parameter int AXI_ID_W   = 1,
@@ -12,7 +13,7 @@ module MatrixDma #(
     input  logic                     mem_valid_i,
     output logic                     mem_ready_o,
     input  logic                     mem_store_i,
-    input  logic [31:0]              mem_pc_i,
+    input  logic [ROB_AGE_W-1:0]              mem_rob_age_i,
     input  logic [2:0]               mem_reg_i,
     input  logic                     mem_ab_scale_sel_i, // 0: AB matrix, 1: AB scale
     input  logic [1:0]               mem_elem_bytes_i,
@@ -35,7 +36,7 @@ module MatrixDma #(
     output logic                     done_valid_o,
     output logic                     done_illegal_o,
     output logic                     done_fault_o,
-    output logic [31:0]              done_pc_o,
+    output logic [ROB_AGE_W-1:0]              done_rob_age_o,
     output logic [31:0]              done_fault_addr_o,
 
     // AB 数据/scale 寄存器整行写口。
@@ -94,13 +95,13 @@ module MatrixDma #(
     logic load_busy_w;
     logic load_done_valid_w;
     logic load_done_fault_w;
-    logic [31:0] load_done_pc_w;
+    logic [ROB_AGE_W-1:0] load_done_rob_age_w;
     logic [31:0] load_done_fault_addr_w;
     logic store_mem_ready_w;
     logic store_busy_w;
     logic store_done_valid_w;
     logic store_done_fault_w;
-    logic [31:0] store_done_pc_w;
+    logic [ROB_AGE_W-1:0] store_done_rob_age_w;
     logic [AXI_ADDR_W-1:0] store_done_fault_addr_w;
     logic store_awvalid_w;
     logic store_wvalid_w;
@@ -122,7 +123,7 @@ module MatrixDma #(
 
     logic store_done_pending_q;
     logic store_fault_q;
-    logic [31:0] store_pc_q;
+    logic [ROB_AGE_W-1:0] store_rob_age_q;
     logic [31:0] store_fault_addr_q;
     wire store_accept_enable = !store_done_pending_q && !store_done_valid_w;
 
@@ -132,13 +133,13 @@ module MatrixDma #(
     // completion until the shared port is free; block new stores meanwhile.
     assign done_valid_o = load_done_valid_w || store_done_pending_q;
     assign done_fault_o = done_valid_o && (load_done_valid_w ? load_done_fault_w : store_fault_q);
-    assign done_pc_o = load_done_valid_w ? load_done_pc_w : store_pc_q;
+    assign done_rob_age_o = load_done_valid_w ? load_done_rob_age_w : store_rob_age_q;
     assign done_fault_addr_o = load_done_valid_w ? load_done_fault_addr_w : store_fault_addr_q;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             store_done_pending_q <= 1'b0;
             store_fault_q <= 1'b0;
-            store_pc_q <= '0;
+            store_rob_age_q <= '0;
             store_fault_addr_q <= '0;
         end else begin
             if (store_done_pending_q && !load_done_valid_w)
@@ -146,7 +147,7 @@ module MatrixDma #(
             if (store_done_valid_w) begin
                 store_done_pending_q <= 1'b1;
                 store_fault_q <= store_done_fault_w;
-                store_pc_q <= store_done_pc_w;
+                store_rob_age_q <= store_done_rob_age_w;
                 store_fault_addr_q <= store_done_fault_addr_w;
             end
         end
@@ -164,6 +165,7 @@ module MatrixDma #(
     assign m_axi_bready_o  = store_bready_w;
 
     MatrixDmaLoad #(
+        .ROB_AGE_W              ( ROB_AGE_W            ),
         .AXI_ADDR               ( AXI_ADDR_W           ),
         .AXI_DATA               ( AXI_DATA_W           ),
         .AXI_ID                 ( AXI_ID_W             ),
@@ -176,7 +178,7 @@ module MatrixDma #(
         .rst_n            ( rst_n                  ),
         .mem_valid_i      ( mem_valid_i && !mem_store_i ),
         .mem_ready_o      ( load_mem_ready_w       ),
-        .mem_pc_i         ( mem_pc_i               ),
+        .mem_rob_age_i         ( mem_rob_age_i               ),
         .mem_reg_i        ( mem_reg_i              ),
         .mem_ab_scale_sel_i ( mem_ab_scale_sel_i   ),
         .mem_elem_bytes_i ( mem_elem_bytes_i       ),
@@ -187,7 +189,7 @@ module MatrixDma #(
         .busy_o           ( load_busy_w             ),
         .done_valid_o     ( load_done_valid_w       ),
         .done_fault_o     ( load_done_fault_w       ),
-        .done_pc_o        ( load_done_pc_w          ),
+        .done_rob_age_o        ( load_done_rob_age_w          ),
         .done_fault_addr_o( load_done_fault_addr_w  ),
         .ab_wr_en_o       ( ab_wr_en_o             ),
         .ab_wr_reg_o      ( ab_wr_reg_o            ),
@@ -241,6 +243,7 @@ module MatrixDma #(
                                     (mem_ab_scale_sel_i ? 2'd1 : 2'd0);
                                     
     MatrixDmaStore #(
+        .ROB_AGE_W        ( ROB_AGE_W ),
         .AXI_ADDR_W       ( AXI_ADDR_W ),
         .AXI_DATA_W       ( AXI_DATA_W ),
         .AXI_ID_W         ( AXI_ID_W   ),
@@ -251,7 +254,7 @@ module MatrixDma #(
         .rst_n                  ( rst_n                  ),
         .cmd_valid_i            ( store_cmd_valid_w        ),
         .cmd_ready_o            ( store_mem_ready_w       ),
-        .cmd_pc_i               ( mem_pc_i                ),
+        .cmd_rob_age_i               ( mem_rob_age_i                ),
         .cmd_reg_i              ( mem_reg_i[REG_IDX_W-1:0] ),
         .cmd_source_sel_i       ( store_cmd_source_sel_w   ),
         .cmd_elem_bytes_i       ( mem_elem_bytes_i         ),
@@ -262,7 +265,7 @@ module MatrixDma #(
         .busy_o                 ( store_busy_w             ),
         .done_valid_o           ( store_done_valid_w       ),
         .done_fault_o           ( store_done_fault_w       ),
-        .done_pc_o              ( store_done_pc_w          ),
+        .done_rob_age_o              ( store_done_rob_age_w          ),
         .done_fault_addr_o      ( store_done_fault_addr_w  ),
         .matrix_rd_en_o         ( matrix_rd_en_o            ),
         .matrix_rd_reg_o        ( matrix_rd_reg_o           ),

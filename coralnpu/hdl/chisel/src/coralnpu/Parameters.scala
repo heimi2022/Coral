@@ -151,6 +151,7 @@ class Parameters(var m: Seq[MemoryRegion] = Seq(), val hartId: Int = 0) {
     val retirementLanes = 16
     // Keep RVVI fanout independent from the architectural ROB size.
     val rvviTraceDepth = retirementLanes
+    // Shared dependency capacity for queued and issued matrix register commands.
     val matrixScoreboardDepth = 8
     // Matrix commands can wait here independently of the MatrixCore execution
     // latency. Scoreboard depth remains a separate architectural choice.

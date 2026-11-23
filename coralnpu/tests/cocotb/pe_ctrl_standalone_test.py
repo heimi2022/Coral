@@ -77,7 +77,7 @@ async def run_m64_n3_k64(dut, check_c_bank_conflicts, n_override=None, debug=Fal
     dut.rs2_i.value = 1
     dut.rd_i.value = 7
     dut.cmd_valid_i.value = 0
-    dut.cmd_pc_i.value = 0x13C
+    dut.cmd_rob_age_i.value = 63
     dut.done_ready_i.value = 1
     dut.rs1_data_i.value = 0
     dut.rs1_data_valid_i.value = 0
@@ -223,7 +223,7 @@ async def run_m64_n3_k64(dut, check_c_bank_conflicts, n_override=None, debug=Fal
     for _ in range(20000):
         await RisingEdge(dut.clk)
         if value(dut.done_valid_o):
-            assert value(dut.done_pc_o) == 0x13C
+            assert value(dut.done_rob_age_o) == 63
             break
     else:
         raise AssertionError(f"pe_ctrl did not complete M{m}/N{n}/K{k} command")
@@ -311,7 +311,7 @@ async def run_stream_weight_prefetch(dut, n, launch_rows, expect_bank_wait=False
 
     dut.rst_n.value = 0
     dut.cmd_valid_i.value = 0
-    dut.cmd_pc_i.value = 0x100
+    dut.cmd_rob_age_i.value = 62
     dut.cfg_m_i.value = m
     dut.cfg_n_i.value = n
     dut.cfg_k_i.value = k
@@ -364,7 +364,7 @@ async def run_stream_weight_prefetch(dut, n, launch_rows, expect_bank_wait=False
             if first or at_launch:
                 dut.rs2_i.value = issued + 1
                 dut.rd_i.value = 4 if same_c else 4 + issued
-                dut.cmd_pc_i.value = 0x100 + 4 * issued
+                dut.cmd_rob_age_i.value = 62 + issued
                 armed = True
         dut.cmd_valid_i.value = int(armed)
         await Timer(1, unit="ns")
@@ -413,7 +413,7 @@ async def run_stream_weight_prefetch(dut, n, launch_rows, expect_bank_wait=False
                 c_mem[reg][row][col] = actual
             writes[command_index].append(cycle)
         if value(dut.done_valid_o):
-            done.append(value(dut.done_pc_o))
+            done.append(value(dut.done_rob_age_o))
         if value(dut.begin_weight_prefetch):
             assert value(dut.weight_pop) and not value(dut.stream_pop), (
                 "Weight prefetch must not consume the next activation descriptor"
@@ -442,7 +442,7 @@ async def run_stream_weight_prefetch(dut, n, launch_rows, expect_bank_wait=False
     else:
         raise AssertionError(f"Late weight prefetch stalled: issued={issued}, done={done}")
 
-    assert done == [0x100 + 4 * index for index in range(commands)]
+    assert done == [62 + index for index in range(commands)]
     assert len(activations) == commands * m
     assert len(prefetches) == commands - 1
     for index in range(commands):

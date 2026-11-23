@@ -22,7 +22,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       val fault = Input(Valid(new FaultManagerOutput))
       val memoryFaultIndex = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
       val storeComplete = Input(Valid(UInt(math.max(1, log2Ceil(p.retirementBufferSize)).W)))
-      val done = Input(Vec(2, Valid(UInt(32.W))))
+      val done = Input(Vec(2, Valid(UInt(7.W))))
       val retired = Output(Vec(p.rvviTraceDepth, Valid(UInt(32.W))))
       val retiredTraps = Output(Vec(p.rvviTraceDepth, Bool()))
       val retiredCount = Output(UInt(log2Ceil(p.retirementBufferSize + 1).W))
@@ -37,7 +37,10 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     io.allocAge := rob.io.allocAge
     rob.io.fault := io.fault
     rob.io.memoryFaultIndex := io.memoryFaultIndex
-    rob.io.matrixComplete.get := io.done
+    for (port <- 0 until 2) {
+      rob.io.matrixComplete.get(port).valid := io.done(port).valid
+      rob.io.matrixComplete.get(port).bits := io.done(port).bits.asTypeOf(new RobAge(p))
+    }
     for (port <- rob.io.writeDataScalar) {
       port := 0.U.asTypeOf(port)
     }
@@ -115,7 +118,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
         for (batch <- pcs.drop(1).grouped(2)) {
           for (port <- 0 until 2) {
             dut.io.done(port).valid.poke((port < batch.size).B)
-            dut.io.done(port).bits.poke(batch.lift(port).getOrElse(0).U)
+            dut.io.done(port).bits.poke(batch.lift(port).map(pc => (pc - 0x100) / 4).getOrElse(0).U)
           }
           expectRetired(dut, Seq.empty)
           dut.clock.step()
@@ -135,20 +138,20 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "select the oldest repeated PC across wrap while enqueueing and retiring together" in {
+  "complete repeated PCs by physical ROB index across wrap while enqueueing and retiring together" in {
     simulate(new Tester) { dut =>
-      for (_ <- 0 until dut.p.retirementBufferSize - 1) {
+      for (age <- 0 until dut.p.retirementBufferSize - 1) {
         enqueue(dut, Seq(0x80))
         dut.io.done(0).valid.poke(true.B)
-        dut.io.done(0).bits.poke(0x80.U)
+        dut.io.done(0).bits.poke(age.U)
         dut.clock.step()
       }
       // 两条同 PC 指令分别占据槽位 63 和 0，较大的物理下标反而更老。
       enqueue(dut, Seq(0x100, 0x100, 0x104))
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x100.U)
+      dut.io.done(0).bits.poke(63.U)
       dut.io.done(1).valid.poke(true.B)
-      dut.io.done(1).bits.poke(0x104.U)
+      dut.io.done(1).bits.poke(65.U)
       dut.io.enqueueCount.poke(1.U)
       dut.io.pcs(0).poke(0x108.U)
       expectRetired(dut, Seq(0x100))
@@ -158,9 +161,9 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       expectRetired(dut, Seq.empty)
 
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x100.U)
+      dut.io.done(0).bits.poke(64.U)
       dut.io.done(1).valid.poke(true.B)
-      dut.io.done(1).bits.poke(0x108.U)
+      dut.io.done(1).bits.poke(66.U)
       expectRetired(dut, Seq(0x100, 0x104, 0x108))
       dut.clock.step()
       dut.io.empty.expect(true.B)
@@ -169,15 +172,15 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
 
   "check a control-flow successor across the last physical slot" in {
     simulate(new Tester) { dut =>
-      for (_ <- 0 until dut.p.retirementBufferSize - 1) {
+      for (age <- 0 until dut.p.retirementBufferSize - 1) {
         enqueue(dut, Seq(0x80))
         dut.io.done(0).valid.poke(true.B)
-        dut.io.done(0).bits.poke(0x80.U)
+        dut.io.done(0).bits.poke(age.U)
         dut.clock.step()
       }
       enqueue(dut, Seq(0x100, 0x200), jumpTarget = Some(0x200))
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x200.U)
+      dut.io.done(0).bits.poke(64.U)
       expectRetired(dut, Seq(0x100, 0x200))
       dut.io.retiredTraps(0).expect(false.B)
       dut.io.retiredTraps(1).expect(false.B)
@@ -197,7 +200,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       for (batch <- pcs.slice(1, pcs.size - 1).grouped(2)) {
         for (port <- 0 until 2) {
           dut.io.done(port).valid.poke((port < batch.size).B)
-          dut.io.done(port).bits.poke(batch.lift(port).getOrElse(0).U)
+          dut.io.done(port).bits.poke(batch.lift(port).map(pc => (pc - 0x100) / 4).getOrElse(0).U)
         }
         dut.clock.step()
       }
@@ -223,7 +226,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
       dut.io.enqueueCount.poke(0.U)
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x500.U)
+      dut.io.done(0).bits.poke(64.U)
       expectRetired(dut, Seq(0x500))
       dut.clock.step()
       dut.io.empty.expect(true.B)
@@ -242,7 +245,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       for (batch <- pcs.slice(1, dut.p.retirementLanes - 1).grouped(2)) {
         for (port <- 0 until 2) {
           dut.io.done(port).valid.poke((port < batch.size).B)
-          dut.io.done(port).bits.poke(batch.lift(port).getOrElse(0).U)
+          dut.io.done(port).bits.poke(batch.lift(port).map(pc => (pc - 0x100) / 4).getOrElse(0).U)
         }
         dut.clock.step()
       }
@@ -265,7 +268,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.io.allocAge(0).position.expect(false.B)
       enqueue(dut, Seq(0x400))
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x400.U)
+      dut.io.done(0).bits.poke(0.U)
       expectRetired(dut, Seq(0x400))
     }
   }
@@ -323,10 +326,10 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
 
   "allocation ages follow the ROB pointer across wrap" in {
     simulate(new Tester) { dut =>
-      for (_ <- 0 until dut.p.retirementBufferSize - 2) {
+      for (age <- 0 until dut.p.retirementBufferSize - 2) {
         enqueue(dut, Seq(0x100))
         dut.io.done(0).valid.poke(true.B)
-        dut.io.done(0).bits.poke(0x100.U)
+        dut.io.done(0).bits.poke(age.U)
         dut.clock.step()
         dut.io.done(0).valid.poke(false.B)
       }
@@ -390,7 +393,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
         for (port <- 0 until 2) {
           dut.io.done(port).valid.poke(true.B)
           val entry = if (reversePorts) 1 - port else port
-          dut.io.done(port).bits.poke((0x100 + 4 * entry).U)
+          dut.io.done(port).bits.poke(entry.U)
         }
         expectRetired(dut, Seq(0x100, 0x104))
         dut.clock.step()
@@ -399,13 +402,13 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "complete only the oldest repeated PC per notification" in {
+  "complete only the specified index when matrix PCs repeat" in {
     simulate(new Tester) { dut =>
       enqueue(dut, Seq(0x100, 0x100, 0x104))
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x100.U)
+      dut.io.done(0).bits.poke(0.U)
       dut.io.done(1).valid.poke(true.B)
-      dut.io.done(1).bits.poke(0x104.U)
+      dut.io.done(1).bits.poke(2.U)
       expectRetired(dut, Seq(0x100))
       dut.clock.step()
       for (port <- dut.io.done) { port.valid.poke(false.B) }
@@ -413,7 +416,7 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
       dut.clock.step()
       dut.io.empty.expect(false.B)
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x100.U)
+      dut.io.done(0).bits.poke(1.U)
       expectRetired(dut, Seq(0x100, 0x104))
       dut.clock.step()
       dut.io.empty.expect(true.B)
@@ -424,12 +427,12 @@ class RetirementBufferSpec extends AnyFreeSpec with ChiselSim {
     simulate(new Tester) { dut =>
       enqueue(dut, Seq(0x100, 0x104))
       dut.io.done(1).valid.poke(true.B)
-      dut.io.done(1).bits.poke(0x104.U)
+      dut.io.done(1).bits.poke(1.U)
       expectRetired(dut, Seq.empty)
       dut.clock.step()
       dut.io.done(1).valid.poke(false.B)
       dut.io.done(0).valid.poke(true.B)
-      dut.io.done(0).bits.poke(0x100.U)
+      dut.io.done(0).bits.poke(0.U)
       expectRetired(dut, Seq(0x100, 0x104))
       dut.clock.step()
       dut.io.empty.expect(true.B)

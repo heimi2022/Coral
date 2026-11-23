@@ -22,6 +22,7 @@
 */
 
 module MatrixDmaLoad #(
+    parameter int ROB_AGE_W = 7,
     parameter int AXI_ADDR = 32,
     parameter int AXI_DATA = 512,
     parameter int AXI_ID   = 1,
@@ -45,7 +46,7 @@ module MatrixDmaLoad #(
     // ------------------------------------------------------------------------
     input  logic                     mem_valid_i,
     output logic                     mem_ready_o,
-    input  logic [31:0]              mem_pc_i,
+    input  logic [ROB_AGE_W-1:0]              mem_rob_age_i,
     input  logic [2:0]               mem_reg_i,
     input  logic                     mem_ab_scale_sel_i, // 0: ABMatrixReg，1: ABScaleReg
     input  logic [1:0]               mem_elem_bytes_i,  // 0: 1 byte, 1: 2 bytes, 2: 4 bytes
@@ -60,7 +61,7 @@ module MatrixDmaLoad #(
     output logic                     busy_o,
     output logic                     done_valid_o,
     output logic                     done_fault_o,
-    output logic [31:0]              done_pc_o,
+    output logic [ROB_AGE_W-1:0]              done_rob_age_o,
     output logic [31:0]              done_fault_addr_o,
 
     // ------------------------------------------------------------------------
@@ -106,10 +107,10 @@ module MatrixDmaLoad #(
     // 接收侧只需知道目标寄存器、目的类型、行大小和总行数，不携带地址或 stride。
     localparam int INFLIGHT_DATA = 12 + ROW_BYTE_W;
     // 限制已接收但尚未完成的 LOAD 总数，包含排队、发射及接收中的命令。
-    localparam int PC_QUEUE_DEPTH = CMD_QUEUE_DEPTH + 1;
-    logic [31:0] pc_fifo_data_out;
-    logic pc_fifo_full;
-    logic pc_fifo_pop;
+    localparam int AGE_QUEUE_DEPTH = CMD_QUEUE_DEPTH + 1;
+    logic [ROB_AGE_W-1:0] age_fifo_data_out;
+    logic age_fifo_full;
+    logic age_fifo_pop;
 
     logic [CMD_DATA-1:0]           issue_cmd_fifo_data_in;
     logic [CMD_DATA-1:0]           issue_cmd_fifo_rd_data;
@@ -225,25 +226,25 @@ module MatrixDmaLoad #(
 // =========================================================================
 
     // 先缓存完整矩阵 load 命令；一条命令可连续发出多个 row burst。
-    assign mem_ready_o = !issue_cmd_fifo_full && !pc_fifo_full;
+    assign mem_ready_o = !issue_cmd_fifo_full && !age_fifo_full;
     assign issue_cmd_push = mem_valid_i && mem_ready_o;
     assign mem_row_byte_num = mem_cols_i[6:0] << mem_elem_bytes_i;
     assign issue_cmd_fifo_data_in =
         {mem_reg_i, mem_ab_scale_sel_i, mem_row_byte_num, mem_base_i, mem_stride_i, mem_rows_i};
 
-    // PC 只按整条命令保存；完成沿锁存当前队头，同时弹出。
-    assign pc_fifo_pop = recv_cmd_success_done || recv_cmd_fault_done;
+    // ROB 年龄只按整条命令保存；完成沿锁存当前队头，同时弹出。
+    assign age_fifo_pop = recv_cmd_success_done || recv_cmd_fault_done;
     fifo #(
-        .DATA_WIDTH ( 32             ),
-        .DEPTH      ( PC_QUEUE_DEPTH )
-    ) u_load_pc_fifo (
+        .DATA_WIDTH ( ROB_AGE_W      ),
+        .DEPTH      ( AGE_QUEUE_DEPTH )
+    ) u_load_rob_age_fifo (
         .clk       ( clk              ),
         .rst_n     ( rst_n            ),
         .wr_en_i   ( issue_cmd_push   ),
-        .wr_data_i ( mem_pc_i         ),
-        .full_o    ( pc_fifo_full     ),
-        .rd_en_i   ( pc_fifo_pop      ),
-        .rd_data_o ( pc_fifo_data_out ),
+        .wr_data_i ( mem_rob_age_i         ),
+        .full_o    ( age_fifo_full     ),
+        .rd_en_i   ( age_fifo_pop      ),
+        .rd_data_o ( age_fifo_data_out ),
         .empty_o   ()
     );
 
@@ -654,7 +655,7 @@ module MatrixDmaLoad #(
         if (!rst_n) begin
             done_valid_o <= 1'b0;
             done_fault_o <= 1'b0;
-            done_pc_o <= '0;
+            done_rob_age_o <= '0;
             done_fault_addr_o <= '0;
         end else begin
             done_valid_o <= 1'b0;
@@ -662,11 +663,11 @@ module MatrixDmaLoad #(
 
             if (recv_cmd_success_done) begin
                 done_valid_o <= 1'b1;
-                done_pc_o <= pc_fifo_data_out;
+                done_rob_age_o <= age_fifo_data_out;
             end else if (recv_cmd_fault_done) begin
                 done_valid_o <= 1'b1;
                 done_fault_o <= 1'b1;
-                done_pc_o <= pc_fifo_data_out;
+                done_rob_age_o <= age_fifo_data_out;
                 // 接收侧不再携带请求地址 metadata，当前无法精确回报故障地址。
                 done_fault_addr_o <= '0;
             end

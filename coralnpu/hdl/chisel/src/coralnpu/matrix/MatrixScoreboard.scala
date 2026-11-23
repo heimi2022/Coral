@@ -2,9 +2,10 @@ package coralnpu.matrix
 
 import chisel3._
 import chisel3.util._
+import coralnpu.{Parameters, RobAge}
 
-class MatrixScoreboardIssue extends Bundle {
-  val pc = UInt(32.W)
+class MatrixScoreboardIssue(p: Parameters) extends Bundle {
+  val robAge = new RobAge(p)
   val instruction = new MatrixInstruction
 }
 
@@ -36,7 +37,7 @@ object MatrixScoreboardAccess {
   // RAW/WAR/WAW 共用这套 mask 比较。只有已按顺序发射的 MATMUL 可以
   // 交给 MatrixCore 重叠累加；窗口内尚未发射的同 C MATMUL 不能越序。
   def conflict(older: MatrixScoreboardAccess, younger: MatrixScoreboardAccess,
-               allowMatmulOverlap: Boolean = false): Bool = {
+               allowMatmulOverlap: Bool = false.B): Bool = {
     def hazard(readOlder: UInt, writeOlder: UInt,
                readYounger: UInt, writeYounger: UInt): Bool = {
       ((writeOlder & (readYounger | writeYounger)) |
@@ -47,78 +48,89 @@ object MatrixScoreboardAccess {
     val abScale = hazard(older.readAbScale, older.writeAbScale,
                          younger.readAbScale, younger.writeAbScale)
     val c = hazard(older.readC, older.writeC, younger.readC, younger.writeC)
-    val overlap = if (allowMatmulOverlap) older.isMatmul && younger.isMatmul else false.B
+    val overlap = allowMatmulOverlap && older.isMatmul && younger.isMatmul
     abData || abScale || (c && !overlap)
   }
 }
 
-class MatrixScoreboardIO(queryCount: Int) extends Bundle {
-  // 多个候选共享同一份在途表；查询端口只增加组合比较，不复制存储。
-  val candidates = Flipped(Vec(queryCount, Valid(new MatrixScoreboardIssue)))
+class MatrixScoreboardIO(p: Parameters, queryCount: Int) extends Bundle {
+  // Dispatch 真正接收命令时登记，尚未发射的命令也参与依赖检查。
+  val allocated = Input(Valid(new MatrixScoreboardIssue(p)))
+  val candidates = Flipped(Vec(queryCount, Valid(new MatrixScoreboardIssue(p))))
   val issueAllowed = Output(Vec(queryCount, Bool()))
-  val issued = Input(Valid(new MatrixScoreboardIssue))
-  val completed = Flipped(Valid(UInt(32.W)))
-  val hasInFlight = Output(Bool())
+  // 执行端握手只更新原记录，不再分配第二条记录。
+  val issued = Input(Valid(new RobAge(p)))
+  val completed = Flipped(Valid(new RobAge(p)))
+  val hasPending = Output(Bool())
   val isFull = Output(Bool())
 }
 
-/** Tracks matrix-register accesses until the corresponding MatrixCore command completes. */
-class MatrixScoreboard(depth: Int, queryCount: Int = 1) extends Module {
+/** Tracks queued and issued matrix-register accesses from dispatch to completion. */
+class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1) extends Module {
     require(depth > 0 && queryCount > 0)
 
-    val io = IO(new MatrixScoreboardIO(queryCount))
-    val count_q = RegInit(0.U(log2Ceil(depth + 1).W))
-    val pc_q = Reg(Vec(depth, UInt(32.W)))
+    val io = IO(new MatrixScoreboardIO(p, queryCount))
+    val valid = RegInit(VecInit.fill(depth)(false.B))
+    val issued = RegInit(VecInit.fill(depth)(false.B))
+    val ages = Reg(Vec(depth, new RobAge(p)))
     val access_q = Reg(Vec(depth, new MatrixScoreboardAccess))
 
-    val doneMatches = VecInit((0 until depth).map(i =>
-        (i.U < count_q) && io.completed.valid && (pc_q(i) === io.completed.bits))
-    )
-    val releaseSlot = Wire(Vec(depth, Bool()))
-    for (i <- 0 until depth) {
-        val earlierMatch = if (i == 0) false.B else doneMatches.take(i).reduce(_ || _)
-        releaseSlot(i) := doneMatches(i) && !earlierMatch
-    }
-    val release = releaseSlot.asUInt.orR
-
-    val hasSpace = (count_q < depth.U) || release
+    // 完整年龄定位已发射记录；不同动态实例即使 PC 相同也不会混淆。
+    val releaseSlot = VecInit((0 until depth).map(i =>
+        valid(i) && issued(i) && io.completed.valid &&
+            (ages(i).asUInt === io.completed.bits.asUInt)))
+    val freeSlots = VecInit((0 until depth).map(i => !valid(i) || releaseSlot(i)))
+    val hasSpace = freeSlots.asUInt.orR
+    val allocIndex = PriorityEncoder(freeSlots.asUInt)
 
     for (q <- 0 until queryCount) {
         val candidate = io.candidates(q)
         val access = MatrixScoreboardAccess(candidate.bits.instruction)
+        val registered = (0 until depth).map(i => valid(i) && !issued(i) &&
+            ages(i).asUInt === candidate.bits.robAge.asUInt).reduce(_ || _)
         val conflict = (0 until depth).map { i =>
-            val active = (i.U < count_q) && !releaseSlot(i)
-            // 完成接口只有 PC，禁止同 PC 的不同动态实例同时在途，避免误退休。
-            active && ((pc_q(i) === candidate.bits.pc) ||
-                MatrixScoreboardAccess.conflict(access_q(i), access, allowMatmulOverlap = true))
+            val active = valid(i) && !releaseSlot(i)
+            val older = RobAge.olderThan(ages(i), candidate.bits.robAge)
+            // 仅已交付执行单元的老 MATMUL 可以放宽 C 冲突；待发射累加不能越序。
+            val registerHazard = older && MatrixScoreboardAccess.conflict(
+                access_q(i), access, allowMatmulOverlap = issued(i))
+            active && registerHazard
         }.reduce(_ || _)
-        // CONFIG 不占在途表，也不需要等待无关计算结束，但仍受重复 PC 保护。
+        // CONFIG 仍由队列维持顺序，不占寄存器依赖表；其它候选必须已登记。
         io.issueAllowed(q) := candidate.valid && !conflict &&
-            (candidate.bits.instruction.isConfig() || hasSpace)
+            (candidate.bits.instruction.isConfig() || registered)
     }
-    io.hasInFlight := count_q =/= 0.U
+    io.hasPending := valid.asUInt.orR
     io.isFull := !hasSpace
 
-    // 正常情况下 issue.valid 来自实际执行端口的 fire，必然不会在满表时出现。
-    // 这里仍显式保护分配条件，避免异常上游握手覆盖仍在途的 entry。
-    val issueAccepted = io.issued.valid && hasSpace
-    val appendIndex = count_q - release.asUInt
-    when (issueAccepted =/= release) {
-        count_q := Mux(issueAccepted, count_q + 1.U, count_q - 1.U)
-    }
-
-    // 槽位按发射顺序排列。移除最早匹配项后压紧队列，新指令追加在尾部。
+    // 关联表不搬移记录，程序顺序只由 ROB 年龄决定。
+    val allocate = io.allocated.valid && hasSpace
+    val issueMatches = VecInit((0 until depth).map(i =>
+        valid(i) && io.issued.valid && ages(i).asUInt === io.issued.bits.asUInt))
     for (i <- 0 until depth) {
-        val shift = if (i == depth - 1) false.B
-                    else releaseSlot.take(i + 1).reduce(_ || _)
-        when (issueAccepted && appendIndex === i.U) {
-            pc_q(i) := io.issued.bits.pc
-            access_q(i) := MatrixScoreboardAccess(io.issued.bits.instruction)
-        }.elsewhen(shift) {
-            if (i < depth - 1) {
-                pc_q(i) := pc_q(i + 1)
-                access_q(i) := access_q(i + 1)
-            }
+        when(allocate && allocIndex === i.U) {
+            valid(i) := true.B
+            ages(i) := io.allocated.bits.robAge
+            access_q(i) := MatrixScoreboardAccess(io.allocated.bits.instruction)
+        }.elsewhen(releaseSlot(i)) {
+            valid(i) := false.B
+        }
+        when(allocate && allocIndex === i.U) {
+            issued(i) := false.B
+        }.elsewhen(releaseSlot(i)) {
+            issued(i) := false.B
+        }.elsewhen(issueMatches(i)) {
+            issued(i) := true.B
         }
     }
+    when(io.allocated.valid) {
+        assert(hasSpace)
+    }
+    when(io.issued.valid) {
+        assert(PopCount(issueMatches) === 1.U)
+        for (i <- 0 until depth) {
+            when(issueMatches(i)) { assert(!issued(i)) }
+        }
+    }
+    assert(PopCount(releaseSlot) <= 1.U)
 }

@@ -305,8 +305,8 @@ object MatrixCfgOp extends ChiselEnum {
     val SET_N = Value
 }
 
-class MatrixCfgCmd extends Bundle {
-    val pc = UInt(32.W)
+class MatrixCfgCmd(p: Parameters) extends Bundle {
+    val robAge = new RobAge(p)
     val op = MatrixCfgOp()
     val value = UInt(32.W)
 }

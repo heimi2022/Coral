@@ -9,7 +9,9 @@
 */
 
 
-module MatrixCore (
+module MatrixCore #(
+    parameter int ROB_AGE_W = 7
+) (
     input  logic         clk,
     input  logic         rst_n,
 
@@ -19,7 +21,7 @@ module MatrixCore (
     // 计算命令由 pe_ctrl 接收，最多两条在途；依赖由上游 Scoreboard 排除。
     input  logic         matmul_valid_i,
     output logic         matmul_ready_o,
-    input  logic [31:0]  matmul_pc_i,
+    input  logic [ROB_AGE_W-1:0]  matmul_rob_age_i,
     input  logic [1:0]   matmul_op_i,
     input  logic [2:0]   matmul_ms1_i,
     input  logic [2:0]   matmul_ms2_i,
@@ -29,14 +31,14 @@ module MatrixCore (
     // 000/001/011/111 分别表示清零 1/2/4/8 个矩阵寄存器。
     input  logic          zero_valid_i,
     output logic          zero_ready_o,
-    input  logic [31:0]   zero_pc_i,
+    input  logic [ROB_AGE_W-1:0]   zero_rob_age_i,
     input  logic [2:0]    zero_md_i,
     input  logic [2:0]    zero_reg_count_i,
 
     // mem load/store 命令通道
     input  logic         mem_valid_i,
     output logic         mem_ready_o,
-    input  logic [31:0]  mem_pc_i,
+    input  logic [ROB_AGE_W-1:0]  mem_rob_age_i,
     input  logic [3:0]   mem_op_i,
     input  logic [2:0]   mem_reg_i,
     input  logic [1:0]   mem_elem_width_i,
@@ -52,7 +54,7 @@ module MatrixCore (
     output logic         busy_o,
     output logic         done_valid_o,
     output logic         done_illegal_o,
-    output logic [31:0]  done_pc_o,
+    output logic [ROB_AGE_W-1:0]  done_rob_age_o,
 
     output logic         xmsat_set_valid_o,
     output logic         xmsat_set_bits_o,
@@ -128,9 +130,9 @@ module MatrixCore (
     logic                           pe_busy_w;
     logic                           pe_ready_w;
     logic                           pe_done_valid_w;
-    logic [31:0]                    pe_done_pc_w;
+    logic [ROB_AGE_W-1:0]                    pe_done_rob_age_w;
     logic                           zero_done_pending_q;
-    logic [31:0]                    zero_pc_q;
+    logic [ROB_AGE_W-1:0]                    zero_rob_age_q;
     logic                           zero_issue_w;
     logic                           zero_done_grant_w;
     logic [7:0]                     zero_reg_mask_w;
@@ -212,7 +214,7 @@ module MatrixCore (
     logic         dma_done_valid_w;
     logic         dma_done_illegal_w;
     logic         dma_done_fault_w;
-    logic [31:0]  dma_done_pc_w;
+    logic [ROB_AGE_W-1:0]  dma_done_rob_age_w;
     logic [31:0]  dma_done_fault_addr_w;
     logic         dma_m_axi_awvalid_w;
     logic [0:0]   dma_m_axi_awid_w;
@@ -242,19 +244,19 @@ module MatrixCore (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             zero_done_pending_q <= 1'b0;
-            zero_pc_q <= '0;
+            zero_rob_age_q <= '0;
         end else begin
             case ({zero_issue_w, zero_done_grant_w})
                 2'b10: begin
                     zero_done_pending_q <= 1'b1;
-                    zero_pc_q <= zero_pc_i;
+                    zero_rob_age_q <= zero_rob_age_i;
                 end
                 2'b01: begin
                     zero_done_pending_q <= 1'b0;
                 end
                 2'b11: begin
                     zero_done_pending_q <= 1'b1;
-                    zero_pc_q <= zero_pc_i;
+                    zero_rob_age_q <= zero_rob_age_i;
                 end
                 default: begin
                 end
@@ -359,13 +361,13 @@ module MatrixCore (
         endcase
     end
 
-    // 完成返回优先级为 DMA、计算、ZERO；计算 PC 由 pe_ctrl 保持到握手。
+    // 完成返回优先级为 DMA、计算、ZERO；计算年龄由 pe_ctrl 保持到握手。
     assign matmul_ready_o = pe_ready_w;
     assign busy_o = dma_busy_w || dma_done_valid_w || pe_busy_w || zero_done_pending_q;
     assign done_valid_o = dma_done_valid_w || pe_done_valid_w || zero_done_pending_q;
     assign done_illegal_o = dma_done_valid_w && dma_done_illegal_w;
-    assign done_pc_o = dma_done_valid_w ? dma_done_pc_w :
-                    pe_done_valid_w ? pe_done_pc_w : zero_pc_q;
+    assign done_rob_age_o = dma_done_valid_w ? dma_done_rob_age_w :
+                    pe_done_valid_w ? pe_done_rob_age_w : zero_rob_age_q;
 
     // 当前 pe_ctrl 实现的是普通 32-bit 累加，不产生饱和事件。
     assign xmsat_set_valid_o = 1'b0;
@@ -484,13 +486,13 @@ module MatrixCore (
     assign m_axi_bready_o  = dma_m_axi_bready_w;
 
     // DMA 共享 512-bit 数据、reg 和 row，分别使能 AB/scale 或 C 写口。
-    MatrixDma dma (
+    MatrixDma #(.ROB_AGE_W(ROB_AGE_W)) dma (
         .clk                    (clk                    ),
         .rst_n                  (rst_n                  ),
         .mem_valid_i            (dma_mem_valid_w        ),
         .mem_ready_o            (dma_mem_ready_w        ),
         .mem_store_i            (dma_mem_store_w        ),
-        .mem_pc_i               (mem_pc_i               ),
+        .mem_rob_age_i               (mem_rob_age_i               ),
         .mem_reg_i              (mem_reg_i              ),
         .mem_ab_scale_sel_i     (mem_ab_scale_sel_w     ),
         .mem_elem_bytes_i       (mem_elem_bytes_w       ),
@@ -510,7 +512,7 @@ module MatrixCore (
         .done_valid_o           (dma_done_valid_w       ),
         .done_illegal_o         (dma_done_illegal_w     ),
         .done_fault_o           (dma_done_fault_w       ),
-        .done_pc_o              (dma_done_pc_w          ),
+        .done_rob_age_o              (dma_done_rob_age_w          ),
         .done_fault_addr_o      (dma_done_fault_addr_w  ),
         .ab_wr_en_o             (dma_ab_wr_en_w         ),
         .ab_wr_reg_o            (dma_ab_wr_reg_w        ),
@@ -554,6 +556,7 @@ module MatrixCore (
     // Coral 的 mmacc.w.b 使用 int8 A/B 和 32-bit C。pe_ctrl 负责 K 分块、
     // 权重 ping/pong、脉动阵列推进以及逐行 C 写回。
     pe_ctrl #(
+        .ROB_AGE_W ( ROB_AGE_W ),
         .MAX_ELEM_WIDTH ( PE_MAX_ELEM_WIDTH ),
         .ACC_WIDTH  ( PE_ACC_WIDTH  ),
         .TILE_COLS  ( PE_TILE_COLS  ),
@@ -607,12 +610,12 @@ module MatrixCore (
         .rd_read_valid_o        ( pe_rd_read_valid_w            ),
         .cmd_busy_o             (                               ),
         .matmul_finish_o        (                               ),
-        .cmd_pc_i               ( matmul_pc_i                   ),
+        .cmd_rob_age_i               ( matmul_rob_age_i                   ),
         .cmd_ready_o            ( pe_ready_w                    ),
         .busy_o                 ( pe_busy_w                     ),
         .done_valid_o           ( pe_done_valid_w               ),
         .done_ready_i           ( !dma_done_valid_w             ),
-        .done_pc_o              ( pe_done_pc_w                  ),
+        .done_rob_age_o              ( pe_done_rob_age_w                  ),
         .pe_array_o             ( pe_result_data_w              )
     );
 

@@ -10,7 +10,7 @@ PE 控制模块
 2. `pe_ctrl` 在真正进入某个 block 前，先把队头描述 pop 出来并锁存，后续整块执行只使用本地寄存器。
 3. `LoadWeight` 负责纯装权重，`Stream` 负责纯计算，`StreamPreloadWeight` 负责一边计算当前块一边预装下一块权重。
 4. 输出侧单独维护一条 metadata FIFO，记录每个输出 block 对应的 m / n / rd / last，并在 `psum_valid` 拉起时切到写回路径。
-5. 深度为 2 的 PC FIFO 保存已接收命令，最终写回后经完成握手出队；最多两条在途。
+5. 深度为 2 的年龄 FIFO 保存已接收命令，最终写回后经完成握手出队；最多两条在途。
 6. 尽管 C reg 做了奇偶bank设计, 但是当矩阵乘负载的 M 为偶数时(且M 大于28 左右)，仍然会出现 tile 边界的 bank 冲突。
     为避免冲突，在 tile 边界插入一个 bubble，暂停新的 rs1 读取，但不影响前一个 tile 已经进入阵列的数据。
     wjj 2026-09 decode 时,为带宽受限,bubble带来的延迟会完全被 weight block 的装载时间覆盖,因此不影响吞吐。
@@ -36,6 +36,7 @@ PE 控制模块
 */
 
 module pe_ctrl #(
+    parameter int ROB_AGE_W = 7,
     parameter int MAX_ELEM_WIDTH = 8,
     parameter int ACC_WIDTH  = 32,
     parameter int TILE_COLS  = 32,
@@ -52,12 +53,12 @@ module pe_ctrl #(
     input  logic [2:0]                                  rs2_i                       ,
     input  logic [2:0]                                  rd_i                        ,
     input  logic                                        cmd_valid_i                 ,
-    input  logic [31:0]                                 cmd_pc_i                    ,
+    input  logic [ROB_AGE_W-1:0]                                 cmd_rob_age_i                    ,
     output logic                                        cmd_ready_o                 ,
     output logic                                        busy_o                      ,
     output logic                                        done_valid_o                ,
     input  logic                                        done_ready_i                ,
-    output logic [31:0]                                 done_pc_o                   ,
+    output logic [ROB_AGE_W-1:0]                                 done_rob_age_o                   ,
 
     input  logic [TILE_COLS * MAX_ELEM_WIDTH - 1 : 0]   rs1_data_i                  ,
     input  logic                                        rs1_data_valid_i            ,
@@ -262,33 +263,33 @@ module pe_ctrl #(
     logic                                       tiling_act_psum_empty;
     logic                                       cmd_decode_busy;
 
-    logic pc_full, pc_empty;
+    logic age_full, age_empty;
     logic tiling_start_q;
     logic [31:0] cfg_m_q, cfg_n_q, cfg_k_q;
     logic [2:0] rs1_q, rs2_q, rd_q;
     logic [1:0] completed_count_q;
     logic cmd_writeback_done;
 
-    // 两条命令包含执行中和等待完成返回的命令；PC 一直保留到完成握手。
+    // 两条命令包含执行中和等待完成返回的命令；ROB 年龄一直保留到完成握手。
     // 上游解码保证接收的计算命令合法。
-    assign cmd_ready_o = !pc_full && !cmd_decode_busy && !tiling_start_q;
+    assign cmd_ready_o = !age_full && !cmd_decode_busy && !tiling_start_q;
     assign cmd_accept = cmd_valid_i && cmd_ready_o;
     assign cmd_retire = done_valid_o && done_ready_i;
-    assign busy_o = !pc_empty;
-    assign done_valid_o = !pc_empty && (completed_count_q != 0);
+    assign busy_o = !age_empty;
+    assign done_valid_o = !age_empty && (completed_count_q != 0);
 
     fifo #(
-        .DATA_WIDTH(32), 
+        .DATA_WIDTH(ROB_AGE_W),
         .DEPTH(3)
-    ) u_matmul_pc_fifo (
+    ) u_matmul_rob_age_fifo (
         .clk(clk), 
         .rst_n(rst_n),
         .wr_en_i(cmd_accept), 
-        .wr_data_i(cmd_pc_i),
-        .full_o(pc_full), 
+        .wr_data_i(cmd_rob_age_i),
+        .full_o(age_full),
         .rd_en_i(cmd_retire),
-        .rd_data_o(done_pc_o), 
-        .empty_o(pc_empty)
+        .rd_data_o(done_rob_age_o),
+        .empty_o(age_empty)
     );
 
     // 最后一个 block 的最后一行写回计为完成；DMA 反压时可累计两次完成。

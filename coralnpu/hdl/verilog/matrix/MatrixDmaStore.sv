@@ -5,6 +5,7 @@
 
 */
 module MatrixDmaStore #(
+    parameter int ROB_AGE_W = 7,
     parameter int AXI_ADDR_W              = 32,
     parameter int AXI_DATA_W              = 512,
     parameter int AXI_ID_W                = 1,
@@ -18,7 +19,7 @@ module MatrixDmaStore #(
 
     input  logic                         cmd_valid_i,
     output logic                         cmd_ready_o,
-    input  logic [31:0]                  cmd_pc_i,
+    input  logic [ROB_AGE_W-1:0]                  cmd_rob_age_i,
     input  logic [REG_IDX_W-1:0]         cmd_reg_i,
     input  logic [1:0]                   cmd_source_sel_i,
     input  logic [1:0]                   cmd_elem_bytes_i,
@@ -30,7 +31,7 @@ module MatrixDmaStore #(
     output logic                         busy_o,
     output logic                         done_valid_o,
     output logic                         done_fault_o,
-    output logic [31:0]                  done_pc_o,
+    output logic [ROB_AGE_W-1:0]                  done_rob_age_o,
     output logic [AXI_ADDR_W-1:0]        done_fault_addr_o,
 
     output logic                         matrix_rd_en_o,
@@ -86,9 +87,9 @@ module MatrixDmaStore #(
     logic                       cmd_fifo_empty;
     logic                       cmd_fifo_push;
     logic                       cmd_fifo_pop;
-    logic [31:0]                pc_fifo_data_out;
-    logic                       pc_fifo_full;
-    logic                       pc_fifo_empty;
+    logic [ROB_AGE_W-1:0]                age_fifo_data_out;
+    logic                       age_fifo_full;
+    logic                       age_fifo_empty;
     logic [REG_IDX_W-1:0]       cmd_fifo_reg;
     logic [1:0]                 cmd_fifo_source_sel;
     logic [AXI_ADDR_W-1:0]      cmd_fifo_base;
@@ -195,7 +196,7 @@ module MatrixDmaStore #(
 
     assign cmd_fifo_data_in = { cmd_reg_i,cmd_source_sel_i,cmd_base_i,cmd_stride_i,
                                 cmd_rows_i,cmd_row_bytes_calc,cmd_len_calc};
-    assign cmd_ready_o   = !cmd_fifo_full && !pc_fifo_full;
+    assign cmd_ready_o   = !cmd_fifo_full && !age_fifo_full;
     assign cmd_fifo_push = cmd_valid_i && cmd_ready_o;
     assign cmd_fifo_pop  = !gen_active_q && !cmd_fifo_empty;
 
@@ -534,27 +535,27 @@ module MatrixDmaStore #(
         end
     end
 
-    // 相同 AXI ID 保证 B 按序返回；只有命令最后一个 B 握手才释放 PC。
+    // 相同 AXI ID 保证 B 按序返回；只有命令最后一个 B 握手才释放 ROB 年龄。
     fifo #(
-        .DATA_WIDTH (32),
+        .DATA_WIDTH (ROB_AGE_W),
         .DEPTH      (CMD_QUEUE_DEPTH)
-    ) u_store_pc_fifo (
+    ) u_store_rob_age_fifo (
         .clk        (clk),
         .rst_n      (rst_n),
         .wr_en_i    (cmd_fifo_push),
-        .wr_data_i  (cmd_pc_i),
-        .full_o     (pc_fifo_full),
+        .wr_data_i  (cmd_rob_age_i),
+        .full_o     (age_fifo_full),
         .rd_en_i    (done_valid_o),
-        .rd_data_o  (pc_fifo_data_out),
-        .empty_o    (pc_fifo_empty)
+        .rd_data_o  (age_fifo_data_out),
+        .empty_o    (age_fifo_empty)
     );
     
     assign done_valid_o = resp_fifo_pop && resp_fifo_command_last;
     assign done_fault_o = done_valid_o && (done_fault_q || m_axi_bresp_i[1]);
-    assign done_pc_o    = pc_fifo_data_out;
+    assign done_rob_age_o    = age_fifo_data_out;
     assign done_fault_addr_o = done_fault_q ? done_fault_addr_q : resp_fifo_addr;
 
-    assign busy_o = gen_active_q || !cmd_fifo_empty || !pc_fifo_empty ||
+    assign busy_o = gen_active_q || !cmd_fifo_empty || !age_fifo_empty ||
                     !aw_ctx_empty || read_active_q || !w_ctx_empty ||
                     w_active_q || (read_reserved_q != 0) || !data_fifo_empty ||
                     !resp_fifo_empty;

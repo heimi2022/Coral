@@ -15,7 +15,7 @@ import chisel3.util._
 import common._
 import coralnpu.float.{FloatInstruction, FloatOpcode}
 import coralnpu.rvv._
-import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd}
+import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd, MatrixScoreboardIssue}
 
 class DecodedInstruction(p: Parameters) extends Bundle {
     // The original encoding
@@ -264,12 +264,13 @@ class Dispatch(p: Parameters) extends Module {
         val csr = Valid(new CsrCmd)
 
         // Matrix CSR configuration interface.
-        val matrixCfg = Option.when(p.enableMatrix)(Valid(new MatrixCfgCmd))
+        val matrixCfg = Option.when(p.enableMatrix)(Valid(new MatrixCfgCmd(p)))
 
         // Matrix execution interfaces.
-        val matrixMul = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd))
+        val matrixMul = Option.when(p.enableMatrix)(Decoupled(new MatrixInstCmd(p)))
         val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd(p)))
-        val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd))
+        val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd(p)))
+        val matrixAllocated = Option.when(p.enableMatrix)(Valid(new MatrixScoreboardIssue(p)))
         val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
         val matrixIssueQueueReady = Option.when(p.enableMatrix)(Input(Bool()))
 
@@ -313,7 +314,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
                             io.csrFrm.getOrElse(0.U))
     )
 
-    if (p.enableMatrix) { io.matrixCfg.get := MakeInvalid(new MatrixCfgCmd) }
+    if (p.enableMatrix) { io.matrixCfg.get := MakeInvalid(new MatrixCfgCmd(p)) }
 
     // The CSR write occurs one cycle after configuration dispatch. Consumers
     // must wait until the new shape is visible at MatrixCore's command boundary.
@@ -725,7 +726,7 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
         // Matrix metadata is formed once by DecodeInstruction.
         if (p.enableMatrix && i == 0) {
             io.matrixCfg.get.valid := tryDispatch && d.isMatrixCfg()
-            io.matrixCfg.get.bits.pc := io.inst(i).bits.addr
+            io.matrixCfg.get.bits.robAge := io.robAge(i)
             io.matrixCfg.get.bits.op := d.matrix.get.bits.cfgOp
             io.matrixCfg.get.bits.value := 0.U
 
@@ -734,19 +735,24 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.matrixMul.get.bits.ms2 := d.matrix.get.bits.ms2
             io.matrixMul.get.bits.ms1 := d.matrix.get.bits.ms1
             io.matrixMul.get.bits.md := d.matrix.get.bits.md
-            io.matrixMul.get.bits.pc := io.inst(i).bits.addr
+            io.matrixMul.get.bits.robAge := io.robAge(i)
 
             io.matrixMem.get.valid := tryDispatch && d.isMatrixLoadStore()
             io.matrixMem.get.bits.op := d.matrix.get.bits.memOp
             io.matrixMem.get.bits.elemWidth := d.matrix.get.bits.elemWidth
             io.matrixMem.get.bits.reg := d.matrix.get.bits.md
-            io.matrixMem.get.bits.pc := io.inst(i).bits.addr
             io.matrixMem.get.bits.robAge := io.robAge(i)
 
             io.matrixZero.get.valid := tryDispatch && d.isMatrixZero()
-            io.matrixZero.get.bits.pc := io.inst(i).bits.addr
+            io.matrixZero.get.bits.robAge := io.robAge(i)
             io.matrixZero.get.bits.md := d.matrix.get.bits.md
             io.matrixZero.get.bits.regCount := d.matrix.get.bits.miscCtrl
+
+            // 只在 Dispatch 接收时登记寄存器依赖；CONFIG 仍走独立顺序屏障。
+            io.matrixAllocated.get.valid := io.matrixMul.get.fire ||
+                io.matrixMem.get.fire || io.matrixZero.get.fire
+            io.matrixAllocated.get.bits.robAge := io.robAge(i)
+            io.matrixAllocated.get.bits.instruction := d.matrix.get.bits
         } 
 
         // -------------------------------------------------------------------------
