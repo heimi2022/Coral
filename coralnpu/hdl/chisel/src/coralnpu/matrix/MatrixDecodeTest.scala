@@ -13,6 +13,7 @@ class MatrixDecodeSpec extends AnyFreeSpec with ChiselSim {
       val outKind = Output(UInt(MatrixInstKind.getWidth.W))
       val outMatmulOp = Output(UInt(MatrixInstOp.getWidth.W))
       val outMemOp = Output(UInt(MatrixMemOp.getWidth.W))
+      val outMemShape = Output(new MatrixMemShape)
       val outCfgOp = Output(UInt(MatrixCfgOp.getWidth.W))
       val outIsLoad = Output(Bool())
       val outIsStore = Output(Bool())
@@ -24,6 +25,11 @@ class MatrixDecodeSpec extends AnyFreeSpec with ChiselSim {
     io.outKind := decoded.kind.asUInt
     io.outMatmulOp := decoded.matmulOp.asUInt
     io.outMemOp := decoded.memOp.asUInt
+    val tile = Wire(new MatrixTileConfig)
+    tile.m := 17.U
+    tile.k := 64.U
+    tile.n := 49.U
+    io.outMemShape := MatrixDecode.memoryShape(decoded.memOp, decoded.elemWidth, tile)
     io.outCfgOp := decoded.cfgOp.asUInt
     io.outIsLoad := decoded.isLoad()
     io.outIsStore := decoded.isStore()
@@ -61,6 +67,17 @@ class MatrixDecodeSpec extends AnyFreeSpec with ChiselSim {
         dut.io.outIsLoad.expect((store == 0).B)
         dut.io.outIsStore.expect((store == 1).B)
         dut.io.out.elemWidth.expect(width)
+        // Cover the layout conversion moved from MatrixCore to Dispatch.
+        val (rows, cols) = family match {
+          case 0 => (17, 64)
+          case 1 => if (store == 0) (49, 64) else (64, 49)
+          case 2 | 6 => (17, 49)
+          case 3 => (64, 64 >> width)
+          case 4 => if (store == 0) (2, 17) else (17, 64)
+          case 5 => if (store == 0) (2, 49) else (64, 49)
+        }
+        dut.io.outMemShape.rows.expect(rows)
+        dut.io.outMemShape.cols.expect(cols)
         dut.io.out.readAbData.expect(if (store == 1 && !isC && !isScale) 4 else 0)
         dut.io.out.readAbScale.expect(if (store == 1 && isScale) 4 else 0)
         dut.io.out.readC.expect(if (store == 1 && isC) 4 else 0)

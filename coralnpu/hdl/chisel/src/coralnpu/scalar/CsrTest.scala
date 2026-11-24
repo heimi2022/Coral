@@ -24,9 +24,9 @@ class CsrSpec extends AnyFreeSpec with ChiselSim {
       val rd_addr = Output(UInt(5.W))
       val rd_data = Output(UInt(32.W))
 
-      val mtilem = Output(UInt(32.W))
-      val mtilek = Output(UInt(32.W))
-      val mtilen = Output(UInt(32.W))
+      val mtilem = Output(UInt(8.W))
+      val mtilek = Output(UInt(8.W))
+      val mtilen = Output(UInt(8.W))
     })
 
     val csr = Module(new Csr(p))
@@ -71,7 +71,7 @@ class CsrSpec extends AnyFreeSpec with ChiselSim {
     csr.io.matrixCfg.get.valid := io.matrixCfg_valid
     csr.io.matrixCfg.get.bits.op := io.matrixCfg_op.asTypeOf(MatrixCfgOp())
     csr.io.matrixCfg.get.bits.robAge := 0.U.asTypeOf(new RobAge(p))
-    csr.io.matrixCfg.get.bits.value := io.rs1_data
+    csr.io.matrixCfg.get.bits.value := io.rs1_data(7, 0)
 
     io.rd_valid := csr.io.rd.valid
     io.rd_addr := csr.io.rd.bits.addr
@@ -101,8 +101,6 @@ class CsrSpec extends AnyFreeSpec with ChiselSim {
     dut.clock.step()
 
     dut.io.matrixCfg_valid.poke(false.B)
-    dut.io.rs1_data.poke(value.U)
-    dut.clock.step()
   }
 
   private def readCsr(dut: Tester, index: CsrAddress.Type, rdAddr: Int = 3): BigInt = {
@@ -171,6 +169,28 @@ class CsrSpec extends AnyFreeSpec with ChiselSim {
       dut.io.mtilen.expect(0.U)
 
       assert(readCsr(dut, CsrAddress.XTILEM) == 11)
+    }
+  }
+
+  "Apply tile configuration on the input edge and keep it when valid is low" in {
+    simulate(new Tester) { dut =>
+      driveIdle(dut)
+      for ((op, value) <- Seq((MatrixCfgOp.SET_M, 255),
+                             (MatrixCfgOp.SET_K, 64),
+                             (MatrixCfgOp.SET_N, 33))) {
+        issueMatrixCfg(dut, op, value)
+        val expected = op match {
+          case MatrixCfgOp.SET_M => dut.io.mtilem
+          case MatrixCfgOp.SET_K => dut.io.mtilek
+          case _ => dut.io.mtilen
+        }
+        expected.expect(value.U)
+      }
+      dut.io.rs1_data.poke(1.U)
+      dut.clock.step(3)
+      dut.io.mtilem.expect(255.U)
+      dut.io.mtilek.expect(64.U)
+      dut.io.mtilen.expect(33.U)
     }
   }
 }

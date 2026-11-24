@@ -272,15 +272,6 @@ class Csr(p: Parameters) extends Module {
     // Control registers. CsrAddress.RESERVED is used for invalid values.
     val req = RegInit(MakeInvalid(new CsrCmd))
     req := MakeValid(io.req.valid, io.req.bits, bitsWhenInvalid = req.bits)
-    val matrixCfgReq = Option.when(p.enableMatrix) {
-        val req = RegInit(MakeInvalid(new MatrixCfgCmd(p)))
-        req := MakeValid(
-            io.matrixCfg.get.valid,
-            io.matrixCfg.get.bits,
-            bitsWhenInvalid = req.bits
-        )
-        req
-    }
     // Pipeline Control.
     val halted = RegInit(false.B)
     val fault = RegInit(false.B)
@@ -368,9 +359,9 @@ class Csr(p: Parameters) extends Module {
     val xmsaten = RegInit(0.U(1.W))
 
     val xmcsr = Cat(0.U(20.W), xmsaten, xmfrm, xmfflags, xmsat, xmxrm)
-    val xtilem = RegInit(0.U(32.W))
-    val xtilen = RegInit(0.U(32.W))
-    val xtilek = RegInit(0.U(32.W))
+    val xtilem = RegInit(0.U(8.W))
+    val xtilen = RegInit(0.U(8.W))
+    val xtilek = RegInit(0.U(8.W))
 
     // URO
     val xmisa = (1 << 1).U(32.W)
@@ -630,11 +621,12 @@ class Csr(p: Parameters) extends Module {
     }
 
     if (p.enableMatrix) {
-        when(matrixCfgReq.get.valid) {
-            switch(matrixCfgReq.get.bits.op) {
-                is(MatrixCfgOp.SET_M) { xtilem := matrixCfgReq.get.bits.value }
-                is(MatrixCfgOp.SET_K) { xtilek := matrixCfgReq.get.bits.value }
-                is(MatrixCfgOp.SET_N) { xtilen := matrixCfgReq.get.bits.value }
+        // SCore supplies the operand as soon as the Dispatch register read returns.
+        when(io.matrixCfg.get.valid) {
+            switch(io.matrixCfg.get.bits.op) {
+                is(MatrixCfgOp.SET_M) { xtilem := io.matrixCfg.get.bits.value }
+                is(MatrixCfgOp.SET_K) { xtilek := io.matrixCfg.get.bits.value }
+                is(MatrixCfgOp.SET_N) { xtilen := io.matrixCfg.get.bits.value }
             }
         }
     }

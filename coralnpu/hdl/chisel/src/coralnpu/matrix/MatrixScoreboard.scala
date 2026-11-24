@@ -96,9 +96,8 @@ class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1) extends M
                 access_q(i), access, allowMatmulOverlap = issued(i))
             active && registerHazard
         }.reduce(_ || _)
-        // CONFIG 仍由队列维持顺序，不占寄存器依赖表；其它候选必须已登记。
-        io.issueAllowed(q) := candidate.valid && !conflict &&
-            (candidate.bits.instruction.isConfig() || registered)
+        // CONFIG bypasses the issue queue; every candidate must be registered.
+        io.issueAllowed(q) := candidate.valid && !conflict && registered
     }
     io.hasPending := valid.asUInt.orR
     io.isFull := !hasSpace

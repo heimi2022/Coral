@@ -15,7 +15,7 @@ import chisel3.util._
 import common._
 import coralnpu.float.{FloatInstruction, FloatOpcode}
 import coralnpu.rvv._
-import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd, MatrixScoreboardIssue}
+import coralnpu.matrix.{MatrixDecode, MatrixInstruction, MatrixInstKind, MatrixInstCmd, MatrixMemCmd, MatrixZeroCmd, MatrixScoreboardIssue, MatrixTileConfig}
 
 class DecodedInstruction(p: Parameters) extends Bundle {
     // The original encoding
@@ -271,8 +271,7 @@ class Dispatch(p: Parameters) extends Module {
         val matrixMem = Option.when(p.enableMatrix)(Decoupled(new MatrixMemCmd(p)))
         val matrixZero = Option.when(p.enableMatrix)(Decoupled(new MatrixZeroCmd(p)))
         val matrixAllocated = Option.when(p.enableMatrix)(Valid(new MatrixScoreboardIssue(p)))
-        val matrixMemPending = Option.when(p.enableMatrix)(Input(Bool()))
-        val matrixIssueQueueReady = Option.when(p.enableMatrix)(Input(Bool()))
+        val matrixTile = Option.when(p.enableMatrix)(Input(new MatrixTileConfig))
 
         // LSU interface.
         val lsu = Vec(p.instructionLanes, Decoupled(new LsuCmd(p)))
@@ -316,8 +315,8 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
 
     if (p.enableMatrix) { io.matrixCfg.get := MakeInvalid(new MatrixCfgCmd(p)) }
 
-    // The CSR write occurs one cycle after configuration dispatch. Consumers
-    // must wait until the new shape is visible at MatrixCore's command boundary.
+    // Lane 0's scalar operand returns in the cycle after configuration dispatch.
+    // Wait for that direct CSR write before capturing another matrix snapshot.
     val matrixCfgPending = io.matrixCfg.map(cfg => RegNext(cfg.valid, false.B)).getOrElse(false.B)
 
     // ---------------------------------------------------------------------------
@@ -506,12 +505,9 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
     // Combine above rules. This variable represents which instructions can be
     // dispatched before in-orderness and back-pressure are considered.
     val matrixConfigInterlock = (0 until p.instructionLanes).map { i =>
-        val configCanIssue = !decodedInsts(i).isMatrixCfg() ||
-            (!io.matrixMemPending.getOrElse(false.B) &&
-             io.matrixIssueQueueReady.getOrElse(true.B))
         val configVisible = !matrixCfgPending ||
             (!decodedInsts(i).isMatrixInstruction() && !decodedInsts(i).isCsr())
-        configCanIssue && configVisible
+        configVisible
     }
 
     val canDispatch = (0 until p.instructionLanes).map(i =>
@@ -728,7 +724,6 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.matrixCfg.get.valid := tryDispatch && d.isMatrixCfg()
             io.matrixCfg.get.bits.robAge := io.robAge(i)
             io.matrixCfg.get.bits.op := d.matrix.get.bits.cfgOp
-            io.matrixCfg.get.bits.value := 0.U
 
             io.matrixMul.get.valid := tryDispatch && d.isMatrixMul()
             io.matrixMul.get.bits.op := d.matrix.get.bits.matmulOp
@@ -736,19 +731,22 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             io.matrixMul.get.bits.ms1 := d.matrix.get.bits.ms1
             io.matrixMul.get.bits.md := d.matrix.get.bits.md
             io.matrixMul.get.bits.robAge := io.robAge(i)
+            io.matrixMul.get.bits.tile := io.matrixTile.get
 
             io.matrixMem.get.valid := tryDispatch && d.isMatrixLoadStore()
             io.matrixMem.get.bits.op := d.matrix.get.bits.memOp
             io.matrixMem.get.bits.elemWidth := d.matrix.get.bits.elemWidth
             io.matrixMem.get.bits.reg := d.matrix.get.bits.md
             io.matrixMem.get.bits.robAge := io.robAge(i)
+            io.matrixMem.get.bits.shape := MatrixDecode.memoryShape(
+                d.matrix.get.bits.memOp, d.matrix.get.bits.elemWidth, io.matrixTile.get)
 
             io.matrixZero.get.valid := tryDispatch && d.isMatrixZero()
             io.matrixZero.get.bits.robAge := io.robAge(i)
             io.matrixZero.get.bits.md := d.matrix.get.bits.md
             io.matrixZero.get.bits.regCount := d.matrix.get.bits.miscCtrl
 
-            // 只在 Dispatch 接收时登记寄存器依赖；CONFIG 仍走独立顺序屏障。
+            // Register commands at Dispatch; CONFIG updates the CSR directly.
             io.matrixAllocated.get.valid := io.matrixMul.get.fire ||
                 io.matrixMem.get.fire || io.matrixZero.get.fire
             io.matrixAllocated.get.bits.robAge := io.robAge(i)

@@ -308,7 +308,7 @@ object MatrixCfgOp extends ChiselEnum {
 class MatrixCfgCmd(p: Parameters) extends Bundle {
     val robAge = new RobAge(p)
     val op = MatrixCfgOp()
-    val value = UInt(32.W)
+    val value = UInt(8.W)
 }
 
 class CsrMatrixIO(p: Parameters) extends Bundle {
@@ -317,9 +317,9 @@ class CsrMatrixIO(p: Parameters) extends Bundle {
     val xmfflags_set = Input(Valid(UInt(5.W)))
 
     // From Csr to MatrixCore
-    val mtilem = Output(UInt(32.W))
-    val mtilen = Output(UInt(32.W))
-    val mtilek = Output(UInt(32.W))
+    val mtilem = Output(UInt(8.W))
+    val mtilen = Output(UInt(8.W))
+    val mtilek = Output(UInt(8.W))
     val xmxrm = Output(UInt(2.W))
     val xmfrm = Output(UInt(3.W))
     val xmsaten = Output(Bool())

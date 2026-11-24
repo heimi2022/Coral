@@ -36,6 +36,8 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox(Map(
     val mem_elem_width_i = Input(UInt(2.W))
     val mem_base_i = Input(UInt(32.W))
     val mem_stride_i = Input(UInt(32.W))
+    val mem_rows_i = Input(UInt(8.W))
+    val mem_cols_i = Input(UInt(8.W))
 
     val cfg_m_i = Input(UInt(32.W))
     val cfg_k_i = Input(UInt(32.W))
@@ -144,11 +146,13 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
   matrixCore.io.mem_elem_width_i := io.core.mem.bits.req.elemWidth
   matrixCore.io.mem_base_i := io.core.mem.bits.base
   matrixCore.io.mem_stride_i := io.core.mem.bits.stride
+  matrixCore.io.mem_rows_i := io.core.mem.bits.req.shape.rows
+  matrixCore.io.mem_cols_i := io.core.mem.bits.req.shape.cols
   io.core.mem.ready := matrixCore.io.mem_ready_o
 
-  matrixCore.io.cfg_m_i := io.core.csr.mtilem
-  matrixCore.io.cfg_k_i := io.core.csr.mtilek
-  matrixCore.io.cfg_n_i := io.core.csr.mtilen
+  matrixCore.io.cfg_m_i := io.core.cmd.bits.tile.m
+  matrixCore.io.cfg_k_i := io.core.cmd.bits.tile.k
+  matrixCore.io.cfg_n_i := io.core.cmd.bits.tile.n
   matrixCore.io.cfg_xmsaten_i := io.core.csr.xmsaten
 
   io.core.status.busy := matrixCore.io.busy_o

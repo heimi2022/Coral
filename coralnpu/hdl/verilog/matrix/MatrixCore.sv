@@ -44,7 +44,11 @@ module MatrixCore #(
     input  logic [1:0]   mem_elem_width_i,
     input  logic [31:0]  mem_base_i,
     input  logic [31:0]  mem_stride_i,
+    // Memory commands carry only their actual two-dimensional shape.
+    input  logic [7:0]   mem_rows_i,
+    input  logic [7:0]   mem_cols_i,
 
+    // The MATMUL command's configuration, captured by pe_ctrl on acceptance.
     input  logic [31:0]  cfg_m_i,
     input  logic [31:0]  cfg_k_i,
     input  logic [31:0]  cfg_n_i,
@@ -272,87 +276,30 @@ module MatrixCore #(
     assign dma_mem_store_w = mem_dir_w;
     assign mem_ready_o = dma_mem_ready_w && (!mem_dir_w || (mem_op_i == MEM_ST_C));
 
-    // 将指令操作码归一化成 DMA 使用的方向、目的类型、元素字节数和二维形状。
-    // A 按 M x K 保存，B 按转置后的 N x K 保存，以匹配 FIR-WS 供数方向。
-    // A/B scale 的物理形状分别为 (K/32) x M 和 (K/32) x N。
-    // 软件必须保证用于分组的 K 维度是 32 的整数倍。
+    // Dispatch supplies the command's actual rows/cols snapshot. Decode only
+    // direction, register-file destination and special element/stride rules here.
     always @* begin
         mem_dir_w     = 1'b0;
         mem_ab_scale_sel_w = 1'b0;
         mem_elem_bytes_w = mem_elem_width_i;
-        mem_rows_w    = cfg_m_i[7:0];
-        mem_cols_w    = cfg_k_i[7:0];
+        mem_rows_w    = mem_rows_i;
+        mem_cols_w    = mem_cols_i;
         mem_stride_w  = mem_stride_i;
 
         case (mem_op_i)
-            MEM_LD_A: begin
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_k_i[7:0];
-            end
-            MEM_LD_B: begin
-                mem_rows_w = cfg_n_i[7:0];
-                mem_cols_w = cfg_k_i[7:0];
-            end
-            MEM_LD_C: begin
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
-            end
-            MEM_ST_A: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_k_i[7:0];
-            end
-            MEM_ST_B: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_k_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
-            end
-            MEM_ST_C: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
+            MEM_LD_A, MEM_LD_B, MEM_LD_C, MEM_LD_CT: begin end
+            MEM_ST_A, MEM_ST_B, MEM_ST_C,
+            MEM_ST_AT, MEM_ST_BT, MEM_ST_CT: begin
+                mem_dir_w = 1'b1;
             end
             MEM_LD_WHOLE, MEM_ST_WHOLE: begin
-                mem_dir_w  = (mem_op_i == MEM_ST_WHOLE);
-                // AB 寄存器物理容量为 64 行 x 64B；elemWidth 是字节数的 log2。
-                mem_rows_w = 8'd64;
-                mem_cols_w = 8'd64 >> mem_elem_width_i;
-                // whole 指令没有 rs2 stride，连续物理行的步长固定为一行 64B。
+                mem_dir_w = (mem_op_i == MEM_ST_WHOLE);
+                // Whole-register operations use a fixed 64-byte physical row.
                 mem_stride_w = 32'd64;
             end
-            MEM_LD_AT: begin
+            MEM_LD_AT, MEM_LD_BT: begin
                 mem_ab_scale_sel_w = 1'b1;
                 mem_elem_bytes_w = 2'b00;
-                // scale 在内存中按 K block 转置存放，每行包含全部 M scale。
-                mem_rows_w    = cfg_k_i >> 5;
-                mem_cols_w    = cfg_m_i[7:0];
-            end
-            MEM_LD_BT: begin
-                mem_ab_scale_sel_w = 1'b1;
-                mem_elem_bytes_w = 2'b00;
-                // scale 在内存中按 K block 转置存放，每行包含全部 N scale。
-                mem_rows_w    = cfg_k_i >> 5;
-                mem_cols_w    = cfg_n_i[7:0];
-            end
-            MEM_ST_AT: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_k_i[7:0];
-            end
-            MEM_ST_BT: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_k_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
-            end
-            // 当前没有 C scale；CT 保持普通 C 形状，目的仍为 ABMatrixReg。
-            MEM_LD_CT: begin
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
-            end
-            MEM_ST_CT: begin
-                mem_dir_w  = 1'b1;
-                mem_rows_w = cfg_m_i[7:0];
-                mem_cols_w = cfg_n_i[7:0];
             end
             default: begin
                 mem_rows_w = '0;

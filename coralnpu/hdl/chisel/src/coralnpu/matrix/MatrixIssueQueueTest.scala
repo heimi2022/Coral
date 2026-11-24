@@ -2,7 +2,7 @@ package coralnpu.matrix
 
 import chisel3._
 import chisel3.simulator.scalatest.ChiselSim
-import coralnpu.{MatrixCfgCmd, MatrixCfgOp, Parameters, RobAge}
+import coralnpu.{Parameters, RobAge}
 import chisel3.util._
 import org.scalatest.freespec.AnyFreeSpec
 import scala.util.Random
@@ -14,12 +14,10 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
       val matmulEnq = Flipped(Valid(new MatrixInstCmd(p)))
       val zeroEnq = Flipped(Valid(new MatrixZeroCmd(p)))
       val memEnq = Flipped(Valid(new MatrixMemExecReq(p)))
-      val configEnq = Flipped(Valid(new MatrixCfgCmd(p)))
       val enqReady = Output(Bool())
       val matmulDeq = Decoupled(new MatrixInstCmd(p))
       val zeroDeq = Decoupled(new MatrixZeroCmd(p))
       val memDeq = Decoupled(new MatrixMemExecReq(p))
-      val configDeq = Decoupled(new MatrixCfgCmd(p))
       val completed = Flipped(Valid(UInt(7.W)))
       val acceptedAge = Output(UInt(7.W))
       val empty = Output(Bool())
@@ -33,7 +31,7 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     val age = Mux(io.memEnq.valid && io.memEnq.bits.req.robAge.asUInt.orR,
       io.memEnq.bits.req.robAge, nextAge)
     val registerCommand = io.matmulEnq.valid || io.zeroEnq.valid || io.memEnq.valid
-    val accepted = io.enqReady && (registerCommand || io.configEnq.valid)
+    val accepted = io.enqReady && registerCommand
     io.acceptedAge := age.asUInt
     io.enqReady := queue.io.enqReady && (!registerCommand || !scoreboard.io.isFull)
     when(accepted) { nextAge := RobAge.advance(age, 1.U, p) }
@@ -46,13 +44,9 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     queue.io.memEnq := io.memEnq
     queue.io.memEnq.valid := io.memEnq.valid && io.enqReady
     queue.io.memEnq.bits.req.robAge := age
-    queue.io.configEnq := io.configEnq
-    queue.io.configEnq.valid := io.configEnq.valid && io.enqReady
-    queue.io.configEnq.bits.robAge := age
     io.matmulDeq <> queue.io.matmulDeq
     io.zeroDeq <> queue.io.zeroDeq
     io.memDeq <> queue.io.memDeq
-    io.configDeq <> queue.io.configDeq
     io.empty := queue.io.empty
     io.active := queue.io.active
     scoreboard.io.candidates := queue.io.candidates
@@ -119,7 +113,7 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     next
   }
 
-  private val windowEntryBits = 73 + (new RobAge(parameters())).getWidth + 2
+  private val windowEntryBits = 73 + 16 + (new RobAge(parameters())).getWidth + 2
 
   "Compact a selected middle entry and append after all surviving older entries" in {
     simulate(new MatrixIssueWindow(windowEntryBits, 4, 4)) { dut =>
@@ -206,12 +200,15 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     dut.io.matmulEnq.bits.ms1.poke(0.U)
     dut.io.matmulEnq.bits.ms2.poke(1.U)
     dut.io.matmulEnq.bits.md.poke(4.U)
+    pokeTile(dut.io.matmulEnq.bits.tile, 64, 64, 64)
     dut.io.memEnq.valid.poke(false.B)
     dut.io.memEnq.bits.req.robAge.position.poke(false.B)
     dut.io.memEnq.bits.req.robAge.index.poke(0.U)
     dut.io.memEnq.bits.req.op.poke(MatrixMemOp.ST_C)
     dut.io.memEnq.bits.req.reg.poke(4.U)
     dut.io.memEnq.bits.req.elemWidth.poke(2.U)
+    dut.io.memEnq.bits.req.shape.rows.poke(64.U)
+    dut.io.memEnq.bits.req.shape.cols.poke(64.U)
     dut.io.memEnq.bits.base.poke(0x1000.U)
     dut.io.memEnq.bits.stride.poke(256.U)
     dut.io.zeroEnq.valid.poke(false.B)
@@ -219,15 +216,9 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     dut.io.zeroEnq.bits.robAge.index.poke(0.U)
     dut.io.zeroEnq.bits.md.poke(4.U)
     dut.io.zeroEnq.bits.regCount.poke(0.U)
-    dut.io.configEnq.valid.poke(false.B)
-    dut.io.configEnq.bits.robAge.position.poke(false.B)
-    dut.io.configEnq.bits.robAge.index.poke(0.U)
-    dut.io.configEnq.bits.op.poke(MatrixCfgOp.SET_N)
-    dut.io.configEnq.bits.value.poke(64.U)
     dut.io.matmulDeq.ready.poke(true.B)
     dut.io.memDeq.ready.poke(true.B)
     dut.io.zeroDeq.ready.poke(true.B)
-    dut.io.configDeq.ready.poke(true.B)
     dut.io.completed.valid.poke(false.B)
     dut.io.completed.bits.poke(0.U)
   }
@@ -281,19 +272,22 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     dut.io.zeroEnq.valid.poke(false.B)
   }
 
-  private def enqueueConfig(dut: Tester, id: Int): Unit = {
-    dut.io.configEnq.valid.poke(true.B)
-    dut.io.enqReady.expect(true.B)
-    recordAge(dut, id)
-    dut.clock.step()
-    dut.io.configEnq.valid.poke(false.B)
+  private def pokeTile(tile: MatrixTileConfig, m: Int, k: Int, n: Int): Unit = {
+    tile.m.poke(m.U)
+    tile.k.poke(k.U)
+    tile.n.poke(n.U)
+  }
+
+  private def expectTile(tile: MatrixTileConfig, m: Int, k: Int, n: Int): Unit = {
+    tile.m.expect(m.U)
+    tile.k.expect(k.U)
+    tile.n.expect(n.U)
   }
 
   private def expectNoIssue(dut: Tester): Unit = {
     dut.io.memDeq.valid.expect(false.B)
     dut.io.matmulDeq.valid.expect(false.B)
     dut.io.zeroDeq.valid.expect(false.B)
-    dut.io.configDeq.valid.expect(false.B)
   }
 
   "Enqueue a dependent STORE and retain FIFO order until MATMUL completes" in {
@@ -408,23 +402,38 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "Keep CONFIG ordered without draining already issued compute" in {
+  "Preserve distinct compute and memory snapshots through backpressure" in {
     simulate(new Tester(parameters(scoreboardDepth = 2), 4)) { dut =>
       initialize(dut)
+      dut.io.matmulDeq.ready.poke(false.B)
+      pokeTile(dut.io.matmulEnq.bits.tile, 17, 32, 48)
       enqueueMatmul(dut, 0x400)
-      dut.clock.step()
-      dut.io.configEnq.valid.poke(true.B)
-      recordAge(dut, 0x404)
-      dut.clock.step()
-      dut.io.configEnq.valid.poke(false.B)
-      dut.io.configDeq.ready.poke(false.B)
-      dut.io.configDeq.valid.expect(true.B)
+      pokeTile(dut.io.matmulEnq.bits.tile, 1, 2, 3)
+      dut.io.memEnq.bits.req.shape.rows.poke(5.U)
+      dut.io.memEnq.bits.req.shape.cols.poke(33.U)
       enqueueMem(dut, 0x408, MatrixMemOp.ST_C, 4)
-      dut.io.memDeq.valid.expect(false.B)
-      dut.io.configDeq.ready.poke(true.B)
+      dut.io.memEnq.bits.req.shape.rows.poke(7.U)
+      dut.io.memEnq.bits.req.shape.cols.poke(9.U)
+      for (_ <- 0 until 3) {
+        dut.io.matmulDeq.valid.expect(true.B)
+        expectTile(dut.io.matmulDeq.bits.tile, 17, 32, 48)
+        dut.io.memDeq.valid.expect(false.B)
+        dut.clock.step()
+      }
+      dut.io.matmulDeq.ready.poke(true.B)
       dut.clock.step()
       dut.io.memDeq.valid.expect(false.B)
-      complete(dut, 0x400)
+      dut.io.memDeq.ready.poke(false.B)
+      presentCompletion(dut, 0x400)
+      dut.io.memDeq.valid.expect(true.B)
+      dut.io.memDeq.bits.req.shape.rows.expect(5.U)
+      dut.io.memDeq.bits.req.shape.cols.expect(33.U)
+      dut.clock.step()
+      dut.io.completed.valid.poke(false.B)
+      dut.io.memDeq.bits.req.shape.rows.expect(5.U)
+      dut.io.memDeq.bits.req.shape.cols.expect(33.U)
+      dut.io.memDeq.ready.poke(true.B)
+      dut.clock.step()
       complete(dut, 0x408)
       dut.io.active.expect(false.B)
     }
@@ -583,21 +592,24 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
     }
   }
 
-  "Keep CONFIG behind older pending commands and ahead of younger independent commands" in {
+  "Keep the compute snapshot attached when a younger shapeless ZERO bypasses" in {
     simulate(new Tester(parameters(), 4)) { dut =>
       initialize(dut)
       enqueueMem(dut, 0xb00, MatrixMemOp.LD_A, 0)
       dut.clock.step()
+      pokeTile(dut.io.matmulEnq.bits.tile, 11, 32, 13)
       enqueueMatmul(dut, 0xb04)
-      enqueueConfig(dut, 0xb08)
+      dut.io.zeroDeq.ready.poke(false.B)
       enqueueZero(dut, 0xb0c, 5)
-      expectNoIssue(dut)
-      complete(dut, 0xb00)
-      dut.io.configDeq.valid.expect(true.B)
-      expectAge(dut.io.configDeq.bits.robAge, 0xb08)
-      dut.io.zeroDeq.valid.expect(false.B)
-      dut.clock.step() // 不等已经交付的 MATMUL 完成。
       dut.io.zeroDeq.valid.expect(true.B)
+      dut.io.matmulDeq.valid.expect(false.B)
+      dut.io.zeroDeq.ready.poke(true.B)
+      dut.clock.step()
+      dut.io.matmulDeq.ready.poke(false.B)
+      complete(dut, 0xb00)
+      dut.io.matmulDeq.valid.expect(true.B)
+      expectTile(dut.io.matmulDeq.bits.tile, 11, 32, 13)
+      dut.io.matmulDeq.ready.poke(true.B)
       dut.clock.step()
       complete(dut, 0xb04)
       complete(dut, 0xb0c)
@@ -730,17 +742,19 @@ class MatrixIssueQueueSpec extends AnyFreeSpec with ChiselSim {
       dut.io.zeroDeq.valid.expect(true.B)
       expectAge(dut.io.zeroDeq.bits.robAge, 0xd08)
       dut.io.matmulDeq.valid.expect(false.B)
-      enqueueConfig(dut, 0xd0c) // 同时覆盖反压时的尾部入队。
+      enqueueZero(dut, 0xd0c, 6) // Also append behind the held command.
       expectAge(dut.io.zeroDeq.bits.robAge, 0xd08)
       dut.io.zeroDeq.ready.poke(true.B)
       dut.clock.step()
       dut.io.matmulDeq.valid.expect(true.B)
       expectAge(dut.io.matmulDeq.bits.robAge, 0xd04)
       dut.clock.step()
-      dut.io.configDeq.valid.expect(true.B)
+      dut.io.zeroDeq.valid.expect(true.B)
+      expectAge(dut.io.zeroDeq.bits.robAge, 0xd0c)
       dut.clock.step()
       complete(dut, 0xd04)
       complete(dut, 0xd08)
+      complete(dut, 0xd0c)
       dut.io.active.expect(false.B)
     }
   }

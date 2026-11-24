@@ -11,8 +11,16 @@ object MatrixInstOp extends ChiselEnum {
     val MMACCSU_W_B = Value // 11
 }
 
+// Captured from the tile CSRs when Dispatch accepts a matrix command.
+class MatrixTileConfig extends Bundle {
+    val m = UInt(8.W)
+    val k = UInt(8.W)
+    val n = UInt(8.W)
+}
+
 class MatrixInstCmd(p: Parameters) extends Bundle {
     val robAge = new RobAge(p)
+    val tile = new MatrixTileConfig
     val op  = MatrixInstOp()
     val ms1 = UInt(3.W)
     val ms2 = UInt(3.W)
@@ -50,8 +58,15 @@ object MatrixMemOp extends ChiselEnum {
     val ST_CT = Value
 }
 
+// Actual memory shape, derived from the operation and tile CSRs at Dispatch.
+class MatrixMemShape extends Bundle {
+    val rows = UInt(8.W)
+    val cols = UInt(8.W)
+}
+
 class MatrixMemCmd(p: Parameters) extends Bundle {
     val robAge = new RobAge(p)
+    val shape = new MatrixMemShape
     val op = MatrixMemOp()
     val reg = UInt(3.W)
     val elemWidth = UInt(2.W)   // 00/01/10/11 = 8/16/32/64

@@ -84,6 +84,44 @@ class MatrixInstruction extends Bundle {
 object MatrixDecode {
     def empty: MatrixInstruction = 0.U.asTypeOf(new MatrixInstruction)
 
+    def memoryShape(op: MatrixMemOp.Type, elemWidth: UInt,
+                    tile: MatrixTileConfig): MatrixMemShape = {
+        val shape = WireDefault(0.U.asTypeOf(new MatrixMemShape))
+        // Preserve the existing MatrixCore layout, including currently disabled stores.
+        switch(op) {
+            is(MatrixMemOp.LD_A, MatrixMemOp.ST_A, MatrixMemOp.ST_AT) {
+                shape.rows := tile.m
+                shape.cols := tile.k
+            }
+            is(MatrixMemOp.LD_B) {
+                shape.rows := tile.n
+                shape.cols := tile.k
+            }
+            is(MatrixMemOp.ST_B, MatrixMemOp.ST_BT) {
+                shape.rows := tile.k
+                shape.cols := tile.n
+            }
+            is(MatrixMemOp.LD_C, MatrixMemOp.ST_C,
+               MatrixMemOp.LD_CT, MatrixMemOp.ST_CT) {
+                shape.rows := tile.m
+                shape.cols := tile.n
+            }
+            is(MatrixMemOp.LD_AT) {
+                shape.rows := tile.k >> 5
+                shape.cols := tile.m
+            }
+            is(MatrixMemOp.LD_BT) {
+                shape.rows := tile.k >> 5
+                shape.cols := tile.n
+            }
+            is(MatrixMemOp.LD_WHOLE, MatrixMemOp.ST_WHOLE) {
+                shape.rows := 64.U
+                shape.cols := 64.U(8.W) >> elemWidth
+            }
+        }
+        shape
+    }
+
     def apply(inst: UInt): MatrixInstruction = {
         val d = Wire(new MatrixInstruction)
         d := empty

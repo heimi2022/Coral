@@ -49,6 +49,8 @@ module MatrixCore_tb;
         .matmul_ms2_i(matmul_ms2_i),
         .matmul_md_i(matmul_md_i),
         .cfg_m_i(cfg_m_i),
+        .mem_rows_i(8'b0),
+        .mem_cols_i(8'b0),
         .cfg_k_i(cfg_k_i),
         .cfg_n_i(cfg_n_i),
         .cfg_xmsaten_i(cfg_xmsaten_i),

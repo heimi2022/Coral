@@ -277,39 +277,35 @@ class SCore(p: Parameters) extends Module {
         // from matrixcore to csr
         io.matrixcore.get.csr <> csr.io.matrix.get
 
-        // Scalar operands return one cycle after dispatch. Capture them before
-        // inserting the complete memory/config command into the ordered queue.
+        // Scalar operands return one cycle after Dispatch. Memory commands are
+        // staged for the queue; configuration writes go straight to the CSR.
         val matrixMemOperandsPending = RegNext(dispatch.io.matrixMem.get.fire, false.B)
         val matrixMemValid = RegInit(false.B)
         val matrixMemCommand = Reg(new MatrixMemExecReq(p))
         val matrixCfgOperandsPending = RegNext(dispatch.io.matrixCfg.get.valid, false.B)
         val matrixCfgCommand = RegEnable(dispatch.io.matrixCfg.get.bits,
             dispatch.io.matrixCfg.get.valid)
-        val matrixCfgApplyPending = RegNext(matrixIssueQueue.get.io.configDeq.fire, false.B)
-        val matrixCfgAppliedAge = RegEnable(
-            matrixIssueQueue.get.io.configDeq.bits.robAge,
-            matrixIssueQueue.get.io.configDeq.fire
-        )
+        val matrixCfgApplied = RegNext(matrixCfgOperandsPending, false.B)
+        val matrixCfgAppliedAge = RegEnable(matrixCfgCommand.robAge, matrixCfgOperandsPending)
         val matrixMemStageBusy = matrixMemOperandsPending || matrixMemValid
         val matrixCfgStageBusy = matrixCfgOperandsPending
         // MatrixCore busy alone misses commands waiting for operands or FIFO issue.
         dispatch.io.mactive := matrixMemStageBusy || matrixCfgStageBusy ||
-            matrixIssueQueue.get.io.active || matrixCfgApplyPending ||
+            matrixIssueQueue.get.io.active || matrixCfgApplied ||
             io.matrixcore.get.status.busy
         val matrixQueueReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
             matrixIssueQueue.get.io.enqReady
         // 依赖未解除仍可入队，但必须同时取得队列和依赖表的空间。
         val matrixDispatchReady = matrixQueueReady && !matrixScoreboard.get.io.isFull
 
-        // Reserve queue space for a config at dispatch; a matrix command cannot
-        // enter during the cycle in which its scalar operand is being captured.
-        dispatch.io.matrixIssueQueueReady.get := matrixQueueReady
+        dispatch.io.matrixTile.get.m := csr.io.matrix.get.mtilem
+        dispatch.io.matrixTile.get.k := csr.io.matrix.get.mtilek
+        dispatch.io.matrixTile.get.n := csr.io.matrix.get.mtilen
 
         // Only one matrix command is accepted into the shared FIFO per cycle.
         dispatch.io.matrixMul.get.ready := matrixDispatchReady
         dispatch.io.matrixZero.get.ready := matrixDispatchReady
         dispatch.io.matrixMem.get.ready := matrixDispatchReady
-        dispatch.io.matrixMemPending.get := matrixMemOperandsPending || matrixMemValid
 
         matrixIssueQueue.get.io.matmulEnq.valid := dispatch.io.matrixMul.get.fire
         matrixIssueQueue.get.io.matmulEnq.bits := dispatch.io.matrixMul.get.bits
@@ -317,9 +313,6 @@ class SCore(p: Parameters) extends Module {
         matrixIssueQueue.get.io.zeroEnq.bits := dispatch.io.matrixZero.get.bits
         matrixIssueQueue.get.io.memEnq.valid := matrixMemValid
         matrixIssueQueue.get.io.memEnq.bits := matrixMemCommand
-        matrixIssueQueue.get.io.configEnq.valid := matrixCfgOperandsPending
-        matrixIssueQueue.get.io.configEnq.bits := matrixCfgCommand
-        matrixIssueQueue.get.io.configEnq.bits.value := regfile.io.readData(0).data
 
         when(dispatch.io.matrixMem.get.fire) {
             matrixMemCommand.req := dispatch.io.matrixMem.get.bits
@@ -338,27 +331,17 @@ class SCore(p: Parameters) extends Module {
             matrixMemValid := false.B
         }
 
-        // A config entry updates the CSR at the queue head. CSR registers take
-        // one cycle to update, so hold later MatrixCore commands until visible.
-        csr.io.matrixCfg.get.valid := matrixIssueQueue.get.io.configDeq.valid &&
-            matrixIssueQueue.get.io.configDeq.ready
-        csr.io.matrixCfg.get.bits := matrixIssueQueue.get.io.configDeq.bits
-        matrixIssueQueue.get.io.configDeq.ready := !matrixCfgApplyPending
-        rob_io.matrixComplete.get(1).valid := matrixCfgApplyPending
+        // CONFIG never enters the issue queue. Complete it after the direct
+        // CSR write; older queued commands retain their Dispatch snapshots.
+        csr.io.matrixCfg.get.valid := matrixCfgOperandsPending
+        csr.io.matrixCfg.get.bits := matrixCfgCommand
+        csr.io.matrixCfg.get.bits.value := regfile.io.readData(0).data(7, 0)
+        rob_io.matrixComplete.get(1).valid := matrixCfgApplied
         rob_io.matrixComplete.get(1).bits := matrixCfgAppliedAge
-        val matrixCfgBarrier = matrixCfgApplyPending
 
-        // 队列按依赖选择一个候选，只有 MatrixCore 对应端口握手才移除。
-        // CONFIG 的一拍生效屏障仍在这里统一阻止后续命令提前使用新尺寸。
-        io.matrixcore.get.cmd.valid := matrixIssueQueue.get.io.matmulDeq.valid && !matrixCfgBarrier
-        io.matrixcore.get.cmd.bits := matrixIssueQueue.get.io.matmulDeq.bits
-        matrixIssueQueue.get.io.matmulDeq.ready := io.matrixcore.get.cmd.ready && !matrixCfgBarrier
-        io.matrixcore.get.zero.valid := matrixIssueQueue.get.io.zeroDeq.valid && !matrixCfgBarrier
-        io.matrixcore.get.zero.bits := matrixIssueQueue.get.io.zeroDeq.bits
-        matrixIssueQueue.get.io.zeroDeq.ready := io.matrixcore.get.zero.ready && !matrixCfgBarrier
-        io.matrixcore.get.mem.valid := matrixIssueQueue.get.io.memDeq.valid && !matrixCfgBarrier
-        io.matrixcore.get.mem.bits := matrixIssueQueue.get.io.memDeq.bits
-        matrixIssueQueue.get.io.memDeq.ready := io.matrixcore.get.mem.ready && !matrixCfgBarrier
+        io.matrixcore.get.cmd <> matrixIssueQueue.get.io.matmulDeq
+        io.matrixcore.get.zero <> matrixIssueQueue.get.io.zeroDeq
+        io.matrixcore.get.mem <> matrixIssueQueue.get.io.memDeq
 
     }
 
