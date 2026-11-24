@@ -376,6 +376,7 @@ chisel_library(
         "scalar/FaultManager.scala",
         "scalar/Fetch.scala",
         "scalar/Lsu.scala",
+        "scalar/MemoryIssueEntry.scala",
         "scalar/MemoryIssueQueue.scala",
         "scalar/MemoryIssueUnit.scala",
         "scalar/Mlu.scala",

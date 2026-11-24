@@ -38,7 +38,7 @@ class MemoryIssueUnit(p: Parameters) extends Module {
     // 执行端 ready 仅表示 slot 空闲，不依赖本端 valid。
     // 队列获准交付时才移除命令，并分配或提升对应的 Tracker 记录。
     io.lsuIssue.valid := queue.io.issue.valid
-    io.lsuIssue.bits.uop := queue.io.issue.bits
+    io.lsuIssue.bits.uop := MemoryIssueEntry.toLsu(queue.io.issue.bits, p)
 
     // Flush 沿用独立控制路径；Dispatch 仍在访存整体空闲时发出它。
     private val flushCmd = RegInit(MakeInvalid(new FlushCmd))
@@ -60,6 +60,7 @@ class MemoryIssueUnit(p: Parameters) extends Module {
         io.req(i).ready := validSum(i) < queue.io.nSpace && !flushCmd.valid
         queue.io.enq(i) := MakeValid(
             io.req(i).fire && !LsuOp.isFlush(io.req(i).bits.op),
-            LsuUOp(p, i, io.req(i).bits, io.busPort, io.busPort_flt, io.rvvState))
+            MemoryIssueEntry.fromLsu(
+                LsuUOp(p, i, io.req(i).bits, io.busPort, io.busPort_flt, io.rvvState), p))
     }
 }

@@ -61,6 +61,10 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       val rs1Set_value = Output(UInt(32.W))
       val rs2Read_valid = Output(Bool())
       val rs2Read_addr = Output(UInt(5.W))
+      val busRead_valid = Output(Bool())
+      val busRead_bypass = Output(Bool())
+      val busRead_immen = Output(Bool())
+      val busRead_immed = Output(UInt(32.W))
 
       val rdMark_valid = Output(Bool())
       val rdMark_addr = Output(UInt(5.W))
@@ -141,6 +145,10 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
     io.rs1Set_value := dispatch.io.rs1Set(0).value
     io.rs2Read_valid := dispatch.io.rs2Read(0).valid
     io.rs2Read_addr := dispatch.io.rs2Read(0).addr
+    io.busRead_valid := dispatch.io.busRead(0).valid
+    io.busRead_bypass := dispatch.io.busRead(0).bypass
+    io.busRead_immen := dispatch.io.busRead(0).immen
+    io.busRead_immed := dispatch.io.busRead(0).immed
     io.rdMark_valid := dispatch.io.rdMark(0).valid
     io.rdMark_addr := dispatch.io.rdMark(0).addr
   }
@@ -531,6 +539,10 @@ class ScalarDispatchSpec extends AnyFreeSpec with ChiselSim {
       dut.io.matrixMem_age.expect(matrixTestAge.U)
       dut.io.memoryShape.rows.expect(17.U)
       dut.io.memoryShape.cols.expect(49.U)
+      dut.io.busRead_valid.expect(true.B)
+      dut.io.busRead_bypass.expect(false.B)
+      dut.io.busRead_immen.expect(false.B)
+      dut.io.busRead_immed.expect(0.U)
       dut.io.rs1Read_valid.expect(true.B)
       dut.io.rs1Read_addr.expect(7.U)
       dut.io.rs2Read_valid.expect(true.B)

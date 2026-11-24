@@ -22,7 +22,7 @@ import common._
 import coralnpu.float.{FloatCore}
 import coralnpu.rvv.RvvCoreIO
 import _root_.circt.stage.ChiselStage
-import coralnpu.matrix.{MatrixCoreIO, MatrixIssueQueue, MatrixMemExecReq, MatrixMemOp, MatrixScoreboard}
+import coralnpu.matrix.{MatrixCoreIO, MatrixIssueQueue, MatrixScoreboard}
 
 object SCore {
   def apply(p: Parameters): SCore = {
@@ -277,23 +277,19 @@ class SCore(p: Parameters) extends Module {
         // from matrixcore to csr
         io.matrixcore.get.csr <> csr.io.matrix.get
 
-        // Scalar operands return one cycle after Dispatch. Memory commands are
-        // staged for the queue; configuration writes go straight to the CSR.
-        val matrixMemOperandsPending = RegNext(dispatch.io.matrixMem.get.fire, false.B)
-        val matrixMemValid = RegInit(false.B)
-        val matrixMemCommand = Reg(new MatrixMemExecReq(p))
+        // Configuration uses the registered operand return; memory commands
+        // capture the existing combinational busPort at the Dispatch handshake.
         val matrixCfgOperandsPending = RegNext(dispatch.io.matrixCfg.get.valid, false.B)
         val matrixCfgCommand = RegEnable(dispatch.io.matrixCfg.get.bits,
             dispatch.io.matrixCfg.get.valid)
         val matrixCfgApplied = RegNext(matrixCfgOperandsPending, false.B)
         val matrixCfgAppliedAge = RegEnable(matrixCfgCommand.robAge, matrixCfgOperandsPending)
-        val matrixMemStageBusy = matrixMemOperandsPending || matrixMemValid
         val matrixCfgStageBusy = matrixCfgOperandsPending
         // MatrixCore busy alone misses commands waiting for operands or FIFO issue.
-        dispatch.io.mactive := matrixMemStageBusy || matrixCfgStageBusy ||
+        dispatch.io.mactive := matrixCfgStageBusy ||
             matrixIssueQueue.get.io.active || matrixCfgApplied ||
             io.matrixcore.get.status.busy
-        val matrixQueueReady = !matrixMemStageBusy && !matrixCfgStageBusy &&
+        val matrixQueueReady = !matrixCfgStageBusy &&
             matrixIssueQueue.get.io.enqReady
         // 依赖未解除仍可入队，但必须同时取得队列和依赖表的空间。
         val matrixDispatchReady = matrixQueueReady && !matrixScoreboard.get.io.isFull
@@ -311,25 +307,12 @@ class SCore(p: Parameters) extends Module {
         matrixIssueQueue.get.io.matmulEnq.bits := dispatch.io.matrixMul.get.bits
         matrixIssueQueue.get.io.zeroEnq.valid := dispatch.io.matrixZero.get.fire
         matrixIssueQueue.get.io.zeroEnq.bits := dispatch.io.matrixZero.get.bits
-        matrixIssueQueue.get.io.memEnq.valid := matrixMemValid
-        matrixIssueQueue.get.io.memEnq.bits := matrixMemCommand
-
-        when(dispatch.io.matrixMem.get.fire) {
-            matrixMemCommand.req := dispatch.io.matrixMem.get.bits
-        }
-        val matrixMemIsWhole = matrixMemCommand.req.op.isOneOf(
-            MatrixMemOp.LD_WHOLE,
-            MatrixMemOp.ST_WHOLE
-        )
-        when(matrixMemOperandsPending) {
-            matrixMemCommand.base := regfile.io.readData(0).data
-            matrixMemCommand.stride := Mux(matrixMemIsWhole, 0.U, regfile.io.readData(1).data)
-        }
-        when(matrixMemOperandsPending) {
-            matrixMemValid := true.B
-        }.elsewhen(matrixMemValid && matrixIssueQueue.get.io.enqReady) {
-            matrixMemValid := false.B
-        }
+        // Prepare the common entry now; routing it through MemoryIssueUnit is
+        // deferred until matrix register and memory dependency checks are joined.
+        val matrixMemEntry = MemoryIssueEntry.fromMatrix(dispatch.io.matrixMem.get.bits,
+            regfile.io.busPort.addr(0), regfile.io.busPort.data(0), p)
+        matrixIssueQueue.get.io.memEnq.valid := dispatch.io.matrixMem.get.fire
+        matrixIssueQueue.get.io.memEnq.bits := MemoryIssueEntry.toMatrix(matrixMemEntry, p)
 
         // CONFIG never enters the issue queue. Complete it after the direct
         // CSR write; older queued commands retain their Dispatch snapshots.

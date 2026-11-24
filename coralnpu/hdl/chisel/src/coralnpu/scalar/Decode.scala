@@ -861,14 +861,15 @@ class DispatchV2(p: Parameters) extends Dispatch(p) {
             // Register file bus address port.
             // Pointer chasing bypass if immediate is zero.
             // Load/Store immediate selection keys off bit5, and RET off bit6.
-            io.busRead(i).valid := io.lsu(i).valid
-            io.busRead(i).bypass := d.inst(31,25) === 0.U &&
+            val matrixMemory = if (p.enableMatrix && i == 0) io.matrixMem.get.valid else false.B
+            io.busRead(i).valid := io.lsu(i).valid || matrixMemory
+            io.busRead(i).bypass := !matrixMemory && d.inst(31,25) === 0.U &&
                 Mux(!d.inst(5) || d.inst(6), d.inst(24,20) === 0.U, d.inst(11,7) === 0.U)
 
             // SB,SH,SW   0100011
             val storeSelect = d.inst(6,3) === 4.U && d.inst(1,0) === 3.U
-                io.busRead(i).immen := !d.flushat
-                io.busRead(i).immed := Mux(d.rvv.map(_.valid).getOrElse(false.B),
+            io.busRead(i).immen := !matrixMemory && !d.flushat
+            io.busRead(i).immed := Mux(matrixMemory || d.rvv.map(_.valid).getOrElse(false.B),
                 0.U,
                 Cat(d.imm12(31,5), Mux(storeSelect, d.immst(4,0), d.imm12(4,0))))
     }

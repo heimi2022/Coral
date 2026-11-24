@@ -94,10 +94,10 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
 
     val io = IO(new Bundle {
         // valid 只标记上游已经接受的命令；上游须根据 nSpace 限制入队数量。
-        val enq = Input(Vec(p.instructionLanes, Valid(new LsuUOp(p))))
+        val enq = Input(Vec(p.instructionLanes, Valid(new MemoryIssueEntry(p))))
         val nSpace = Output(UInt(countBits.W))
         val pending = Output(Bool())
-        val issue = Output(Valid(new LsuUOp(p)))
+        val issue = Output(Valid(new MemoryIssueEntry(p)))
 
         val candidate = Output(Valid(new MemoryOrderCandidate(p)))
         val conflict = Input(Bool())
@@ -110,7 +110,7 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     private val alignedOps = Aligner(io.enq)
     private val enqCount = PopCount(alignedOps.map(_.valid))
     private val count = RegInit(0.U(countBits.W))
-    private val entries = Reg(Vec(depth, new LsuUOp(p)))
+    private val entries = Reg(Vec(depth, new MemoryIssueEntry(p)))
     // QUEUED 元数据覆盖整个可见窗口；登记项按队列不变量形成连续前缀。
     private val tracked = RegInit(VecInit.fill(visibleDepth)(false.B))
     // checked 表示对应 QUEUED 项在当前一轮重查中已经检查过。
@@ -138,7 +138,8 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     private val candidateEntryIndex = candidateIndex.pad(entryIndexBits)
     private val candidate = entries(candidateEntryIndex)
     private val candidateTracked = tracked(candidateIndex)
-    private val candidateRequest = LsuMemoryOrderRange(candidate, p)
+    // Matrix ingress will be connected together with its dependency checks.
+    private val candidateRequest = LsuMemoryOrderRange(MemoryIssueEntry.toLsu(candidate, p), p)
 
     io.candidate.valid := candidateValid && !io.recheckEvent
     io.candidate.bits.request := candidateRequest
