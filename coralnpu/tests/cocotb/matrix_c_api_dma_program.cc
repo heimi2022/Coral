@@ -2,8 +2,8 @@
 #include <stdint.h>
 
 int main(void) {
-  const uintptr_t src = 0x80000000U;
-  const uintptr_t dst = 0x80001000U;
+  const uintptr_t src = 0x00040000U;
+  const uintptr_t dst = 0x00041000U;
 
   coral_msettilemi(3);
   coral_msettileni(5);

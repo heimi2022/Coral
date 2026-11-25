@@ -34,9 +34,9 @@ class MemoryOrderCandidate(p: Parameters) extends Bundle {
   val tracked = Bool()
 }
 
-/** Tracks active scalar/vector memory operations and blocks conflicting younger ops. */
-class MemoryOrderTrackerIO(p: Parameters, depth: Int) extends Bundle {
-  // 每周期最多处理一个候选项；LSU ready 决定能否立即交付。
+/** Tracks scalar/vector/matrix memory operations and blocks conflicting younger ops. */
+class MemoryOrderTrackerIO(p: Parameters, depth: Int, completionPorts: Int) extends Bundle {
+  // 每周期最多处理一个候选项；issueReady 汇总寄存器依赖和执行端接收条件。
   val candidate = Input(Valid(new MemoryOrderCandidate(p)))
   val issueReady = Input(Bool())
   // 查询结果与登记结果均在当前周期返回。
@@ -44,34 +44,36 @@ class MemoryOrderTrackerIO(p: Parameters, depth: Int) extends Bundle {
   val issue = Output(Bool())
   val reserved = Output(Bool())
   // 访存执行完成，释放对应 Tracker 记录。
-  val complete = Flipped(Valid(new RobAge(p)))
+  val complete = Flipped(Vec(completionPorts, Valid(new RobAge(p))))
 }
 
 /**
   * Tracks queued reservations and issued memory operations until completion.
   * Ranges are inclusive byte addresses in the compact 20-bit memory map.
   */
-class MemoryOrderTracker(p: Parameters, depth: Int = MemoryOrderTracker.DefaultDepth) extends Module {
-    require(depth > 0)
+class MemoryOrderTracker(p: Parameters, depth: Int = MemoryOrderTracker.DefaultDepth,
+                         completionPorts: Int = 1) extends Module {
+    require(depth > 0 && completionPorts > 0)
 
-    val io = IO(new MemoryOrderTrackerIO(p, depth))
+    val io = IO(new MemoryOrderTrackerIO(p, depth, completionPorts))
 
     // Tracker 是可关联查找表，不要求记录按照程序顺序存放。
     private val valid = RegInit(VecInit.fill(depth)(false.B))
     // 每个槽位的完整 ROB 年龄，支持回绕后的精确匹配。
     private val ages = Reg(Vec(depth, new RobAge(p)))
-    // 已登记操作是否为 Store；该字段不会在地址更新时改变。
+    // 已登记操作是否为 Store，登记后保持到完成。
     private val stores = Reg(Vec(depth, Bool()))
     // 以下字段组成内存依赖检查所需的地址摘要。
     private val hasAccess = Reg(Vec(depth, Bool()))
     private val addressKnown = Reg(Vec(depth, Bool()))
     private val rangeStarts = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
     private val rangeEnds = Reg(Vec(depth, UInt(MemoryOrderTracker.AddressBits.W)))
-    // true 表示操作已登记，但还没有真正送入 LSU 执行端。
+    // true 表示操作已登记，但还没有真正送入 LSU 或 MatrixDma。
     private val queued = RegInit(VecInit.fill(depth)(false.B))
 
     private val completeMatches = VecInit((0 until depth).map { i =>
-        valid(i) && io.complete.valid && (io.complete.bits.asUInt === ages(i).asUInt)
+        valid(i) && io.complete.map(c =>
+            c.valid && c.bits.asUInt === ages(i).asUInt).reduce(_ || _)
     })
 
     // Do not recycle a completing entry in the same cycle; this keeps completion

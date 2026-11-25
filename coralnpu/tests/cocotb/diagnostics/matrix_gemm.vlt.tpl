@@ -1,0 +1,11 @@
+`verilator_config
+public -module "{HDL_TOPLEVEL}" -var "io_*"
+public -module "pe_ctrl" -var "*"
+public -module "MatrixCore" -var "mem_*"
+public -module "MatrixCore" -var "done_*"
+public -module "MatrixCore" -var "zero_*"
+public -module "CMatrixReg" -var "rd_*"
+public -module "CMatrixReg" -var "wr_*"
+public -module "CMatrixReg" -var "dma_wr_*"
+public -module "CMatrixReg" -var "c_reg_zero_n"
+public -module "MatrixScoreboard" -var "io_*"

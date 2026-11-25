@@ -28,7 +28,7 @@ class MemoryIssueEntry(p: Parameters) extends Bundle {
     val isMatrix = Bool()
     val robAge = new RobAge(p)
     val addr = UInt(MemoryOrderTracker.AddressBits.W)
-    // Scalar store data, RVV stride or matrix row stride.
+    // Scalar store data, RVV stride or a zero-extended 16-bit matrix row stride.
     val data = UInt(32.W)
     // isMatrix selects the opcode namespace; the original enum encodings are retained.
     val op = UInt(math.max(LsuOp.getWidth, MatrixMemOp.getWidth).W)
@@ -95,9 +95,9 @@ object MemoryIssueEntry {
         entry.isMatrix := true.B
         entry.robAge := cmd.robAge
         entry.addr := base(MemoryOrderTracker.AddressBits - 1, 0)
-        // WHOLE has no rs2 operand; MatrixCore supplies its fixed physical stride.
+        // Normalize WHOLE here so execution and range checking use the same stride.
         entry.data := Mux(cmd.op.isOneOf(MatrixMemOp.LD_WHOLE, MatrixMemOp.ST_WHOLE),
-            0.U, stride)
+            64.U(16.W), stride(15, 0))
         entry.op := cmd.op.asUInt
         entry.store := cmd.op.isOneOf(MatrixMemOp.ST_A, MatrixMemOp.ST_B,
             MatrixMemOp.ST_C, MatrixMemOp.ST_WHOLE, MatrixMemOp.ST_AT,
@@ -117,7 +117,7 @@ object MemoryIssueEntry {
         request.req.elemWidth := entry.elemWidth(1, 0)
         request.req.shape := entry.payload(shapeBits - 1, 0).asTypeOf(new MatrixMemShape)
         request.base := entry.addr
-        request.stride := entry.data
+        request.stride := entry.data(15, 0)
         request
     }
 }

@@ -53,23 +53,24 @@ object MatrixScoreboardAccess {
   }
 }
 
-class MatrixScoreboardIO(p: Parameters, queryCount: Int) extends Bundle {
+class MatrixScoreboardIO(p: Parameters, queryCount: Int, issuePorts: Int) extends Bundle {
   // Dispatch 真正接收命令时登记，尚未发射的命令也参与依赖检查。
   val allocated = Input(Valid(new MatrixScoreboardIssue(p)))
   val candidates = Flipped(Vec(queryCount, Valid(new MatrixScoreboardIssue(p))))
   val issueAllowed = Output(Vec(queryCount, Bool()))
   // 执行端握手只更新原记录，不再分配第二条记录。
-  val issued = Input(Valid(new RobAge(p)))
+  val issued = Input(Vec(issuePorts, Valid(new RobAge(p))))
   val completed = Flipped(Valid(new RobAge(p)))
   val hasPending = Output(Bool())
   val isFull = Output(Bool())
 }
 
 /** Tracks queued and issued matrix-register accesses from dispatch to completion. */
-class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1) extends Module {
-    require(depth > 0 && queryCount > 0)
+class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1,
+                       issuePorts: Int = 1) extends Module {
+    require(depth > 0 && queryCount > 0 && issuePorts > 0)
 
-    val io = IO(new MatrixScoreboardIO(p, queryCount))
+    val io = IO(new MatrixScoreboardIO(p, queryCount, issuePorts))
     val valid = RegInit(VecInit.fill(depth)(false.B))
     val issued = RegInit(VecInit.fill(depth)(false.B))
     val ages = Reg(Vec(depth, new RobAge(p)))
@@ -105,7 +106,8 @@ class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1) extends M
     // 关联表不搬移记录，程序顺序只由 ROB 年龄决定。
     val allocate = io.allocated.valid && hasSpace
     val issueMatches = VecInit((0 until depth).map(i =>
-        valid(i) && io.issued.valid && ages(i).asUInt === io.issued.bits.asUInt))
+        valid(i) && io.issued.map(event =>
+            event.valid && ages(i).asUInt === event.bits.asUInt).reduce(_ || _)))
     for (i <- 0 until depth) {
         when(allocate && allocIndex === i.U) {
             valid(i) := true.B
@@ -125,10 +127,19 @@ class MatrixScoreboard(p: Parameters, depth: Int, queryCount: Int = 1) extends M
     when(io.allocated.valid) {
         assert(hasSpace)
     }
-    when(io.issued.valid) {
-        assert(PopCount(issueMatches) === 1.U)
-        for (i <- 0 until depth) {
-            when(issueMatches(i)) { assert(!issued(i)) }
+    for (event <- io.issued) {
+        when(event.valid) {
+            val matches = VecInit((0 until depth).map(i =>
+                valid(i) && ages(i).asUInt === event.bits.asUInt))
+            assert(PopCount(matches) === 1.U)
+            for (i <- 0 until depth) {
+                when(matches(i)) { assert(!issued(i)) }
+            }
+        }
+    }
+    for (a <- 0 until issuePorts; b <- a + 1 until issuePorts) {
+        when(io.issued(a).valid && io.issued(b).valid) {
+            assert(io.issued(a).bits.asUInt =/= io.issued(b).bits.asUInt)
         }
     }
     assert(PopCount(releaseSlot) <= 1.U)

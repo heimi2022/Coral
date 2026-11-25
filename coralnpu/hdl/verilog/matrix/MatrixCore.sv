@@ -57,6 +57,7 @@ module MatrixCore #(
     // 返回给标量侧的统一状态/完成信号。
     output logic         busy_o,
     output logic         done_valid_o,
+    output logic         done_is_mem_o,
     output logic         done_illegal_o,
     output logic [ROB_AGE_W-1:0]  done_rob_age_o,
 
@@ -312,6 +313,7 @@ module MatrixCore #(
     assign matmul_ready_o = pe_ready_w;
     assign busy_o = dma_busy_w || dma_done_valid_w || pe_busy_w || zero_done_pending_q;
     assign done_valid_o = dma_done_valid_w || pe_done_valid_w || zero_done_pending_q;
+    assign done_is_mem_o = dma_done_valid_w;
     assign done_illegal_o = dma_done_valid_w && dma_done_illegal_w;
     assign done_rob_age_o = dma_done_valid_w ? dma_done_rob_age_w :
                     pe_done_valid_w ? pe_done_rob_age_w : zero_rob_age_q;

@@ -266,6 +266,7 @@ chisel_test(
         "scalar/AluTest.scala",
         "scalar/CsrTest.scala",
         "scalar/DispatchTest.scala",
+        "scalar/MemoryIssueUnitTest.scala",
         "scalar/MluTest.scala",
     ],
     args = [
@@ -274,6 +275,7 @@ chisel_test(
     deps = [
         ":coralnpu_base",
         ":coralnpu_matrix",
+        ":coralnpu_rvv",
         ":coralnpu_scalar",
         "//hdl/chisel/src/common:testing",
     ],

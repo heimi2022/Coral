@@ -629,7 +629,7 @@ cocotb_test_suite(
         "c_api_elf_gemm_m65_n257_k65_backpressure",
         "c_api_elf_gemm_m65_n256_k128_backpressure",
     ],
-    verilator_model = ":matrix_cpu_dma_model",
+    verilator_model = "//tests/cocotb/functional:matrix_cpu_dma_model",
     tests_kwargs = {
         "hdl_toplevel": "MatrixCoreMiniAxi",
         "waves": False,

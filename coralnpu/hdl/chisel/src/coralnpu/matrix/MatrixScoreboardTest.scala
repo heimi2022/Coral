@@ -15,7 +15,7 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
 
   private val p = new Parameters
 
-  class Tester(depth: Int = 4) extends Module {
+  class Tester(depth: Int = 4, issuePorts: Int = 1) extends Module {
     val io = IO(new Bundle {
       val allocate = Input(Bool())
       val allocInst = Input(UInt(32.W))
@@ -23,12 +23,13 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       val queryInst = Input(Vec(2, UInt(32.W)))
       val queryAge = Input(Vec(2, UInt(7.W)))
       val issue = Flipped(Valid(UInt(7.W)))
+      val memoryIssue = Option.when(issuePorts == 2)(Flipped(Valid(UInt(7.W))))
       val done = Flipped(Valid(UInt(7.W)))
       val allowed = Output(Vec(2, Bool()))
       val full = Output(Bool())
       val pending = Output(Bool())
     })
-    val scoreboard = Module(new MatrixScoreboard(p, depth, 2))
+    val scoreboard = Module(new MatrixScoreboard(p, depth, 2, issuePorts))
     scoreboard.io.allocated.valid := io.allocate
     scoreboard.io.allocated.bits.robAge := io.allocAge.asTypeOf(new RobAge(p))
     scoreboard.io.allocated.bits.instruction := MatrixDecode(io.allocInst)
@@ -37,8 +38,12 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       scoreboard.io.candidates(q).bits.robAge := io.queryAge(q).asTypeOf(new RobAge(p))
       scoreboard.io.candidates(q).bits.instruction := MatrixDecode(io.queryInst(q))
     }
-    scoreboard.io.issued.valid := io.issue.valid
-    scoreboard.io.issued.bits := io.issue.bits.asTypeOf(new RobAge(p))
+    scoreboard.io.issued(0).valid := io.issue.valid
+    scoreboard.io.issued(0).bits := io.issue.bits.asTypeOf(new RobAge(p))
+    if (issuePorts == 2) {
+      scoreboard.io.issued(1).valid := io.memoryIssue.get.valid
+      scoreboard.io.issued(1).bits := io.memoryIssue.get.bits.asTypeOf(new RobAge(p))
+    }
     scoreboard.io.completed.valid := io.done.valid
     scoreboard.io.completed.bits := io.done.bits.asTypeOf(new RobAge(p))
     io.allowed := scoreboard.io.issueAllowed
@@ -59,6 +64,10 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
     dut.io.allocAge.poke(0.U)
     dut.io.issue.valid.poke(false.B)
     dut.io.issue.bits.poke(0.U)
+    dut.io.memoryIssue.foreach { port =>
+      port.valid.poke(false.B)
+      port.bits.poke(0.U)
+    }
     dut.io.done.valid.poke(false.B)
     dut.io.done.bits.poke(0.U)
     for (q <- 0 until 2) query(dut, 0, 0, q)
@@ -224,6 +233,31 @@ class MatrixScoreboardSpec extends AnyFreeSpec with ChiselSim {
       complete(dut, 0)
       dut.io.pending.expect(true.B)
       dut.io.allowed(0).expect(true.B)
+    }
+  }
+
+  "Accept independent compute and DMA handshakes in the same cycle" in {
+    simulate(new Tester(issuePorts = 2)) { dut =>
+      initialize(dut)
+      allocate(dut, memory(0, 0), 0)
+      allocate(dut, matmul(5, a = 2, b = 3), 1)
+      query(dut, memory(0, 0), 0, 0)
+      query(dut, matmul(5, a = 2, b = 3), 1, 1)
+      dut.io.allowed(0).expect(true.B)
+      dut.io.allowed(1).expect(true.B)
+      dut.io.issue.valid.poke(true.B)
+      dut.io.issue.bits.poke(1.U)
+      dut.io.memoryIssue.get.valid.poke(true.B)
+      dut.io.memoryIssue.get.bits.poke(0.U)
+      dut.clock.step()
+      dut.io.issue.valid.poke(false.B)
+      dut.io.memoryIssue.get.valid.poke(false.B)
+      dut.io.allowed(0).expect(false.B)
+      dut.io.allowed(1).expect(false.B)
+      complete(dut, 0)
+      dut.io.pending.expect(true.B)
+      complete(dut, 1)
+      dut.io.pending.expect(false.B)
     }
   }
 }

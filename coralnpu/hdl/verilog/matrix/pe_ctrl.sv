@@ -11,11 +11,10 @@ PE 控制模块
 3. `LoadWeight` 负责纯装权重，`Stream` 负责纯计算，`StreamPreloadWeight` 负责一边计算当前块一边预装下一块权重。
 4. 输出侧单独维护一条 metadata FIFO，记录每个输出 block 对应的 m / n / rd / last，并在 `psum_valid` 拉起时切到写回路径。
 5. 深度为 2 的年龄 FIFO 保存已接收命令，最终写回后经完成握手出队；最多两条在途。
-6. 尽管 C reg 做了奇偶bank设计, 但是当矩阵乘负载的 M 为偶数时(且M 大于28 左右)，仍然会出现 tile 边界的 bank 冲突。
-    为避免冲突，在 tile 边界插入一个 bubble，暂停新的 rs1 读取，但不影响前一个 tile 已经进入阵列的数据。
-    wjj 2026-09 decode 时,为带宽受限,bubble带来的延迟会完全被 weight block 的装载时间覆盖,因此不影响吞吐。
-                prefill 时, m 一般很大 , bubble 对吞吐影响也可以忽略。
-7. 在6的基础上，C reg 从数据读出到数据写回 一定要为 奇数个 周期， 否则这套方案会有问题
+6. 每个计算 block 的首行只在 stream_phase_q=0 时发出，后续各行连续输入。
+    无论 block 之间是否有等待，首行启动间隔均为偶数；相位不匹配时只暂停新的 rs1 读取。
+7. 块内必须连续逐行推进，且 C reg 从读请求到写回的延迟必须为奇数个周期，
+    这样重叠 block 的 C 读取和写回会访问相反的奇偶 bank。
 默认假设：
 1. rs2_data_i 每拍提供一行权重，直接送到 pe_array 的 `weight_tile`。
 2. rs1_data_i 每拍提供一拍激活向量，直接送到 pe_array 的 `act_top`。
@@ -28,8 +27,6 @@ PE 控制模块
 2. 输出写回和外部 SRAM / buffer 的握手
 3. n > 32、多 tile 串行等更完整的尾块处理
 4. C reg 标志位为0时，PE阵列结果可以直接bypass到C reg 少几次 累加器的翻转
-
-！！！2026-10-16 两条 使用同一 C 的 matmul 命令之间，由于指令或是某些原因，中间插了一个气泡，也有可能导致C 的读写冲突，这里需要进行逻辑上的修改
 
 只在脉动阵列最底部做了 MX 量化逻辑，由于目前MX量化分组为32个元素一组，脉动阵列大小刚好为32*32，因此这是正确的。
 后续若分组数改变，或者脉动阵列一次能容纳的K变大了(量化位宽导致等),这里逻辑需要修改
@@ -170,7 +167,9 @@ module pe_ctrl #(
     logic                                       weight_load_active;
     logic                                       stream_active;
     logic                                       stream_issue_active;
-    logic                                       stream_boundary_bubble_q;
+    logic                                       stream_phase_q;
+    logic                                       stream_first_row;
+    logic                                       stream_phase_allowed;
     logic                                       weight_read_last;
     logic                                       weight_write_last;
     logic                                       stream_last;
@@ -527,25 +526,22 @@ module pe_ctrl #(
     assign load_weight_pong =  weight_load_bank_sel && rs2_data_valid_i;
 
 /* 激活读取 */
-    // C Reg 为单端口 SRAM 时，m 为奇数会导致相邻 tile 的边界出现
-    // “上一 tile 写偶数行、下一 tile 读偶数行”的冲突。
-    // 在下一 tile 的首个激活读请求前插入一个周期的 bubble，
-    // 只暂停新的 rs1 读取，不影响前一个 tile 已经进入阵列的数据。
+    // 等待期间也保持节拍翻转，因为旧 block 的计算和写回流水仍在前进。
+    // 所有 block 的首行对齐到同一节拍，避免自然气泡改变 C bank 的奇偶关系。
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
-            stream_boundary_bubble_q <= 1'b0;
+            stream_phase_q <= 1'b0;
         end else begin
-            if (stream_pop && stream_last && stream_m_rows[0]) begin
-                stream_boundary_bubble_q <= 1'b1;
-            end else if (stream_boundary_bubble_q) begin
-                stream_boundary_bubble_q <= 1'b0;
-            end
+            stream_phase_q <= ~stream_phase_q;
         end
     end
 
     assign stream_active = (state == Stream) || ((state == StreamPreloadWeight) && !stream_overlap_done);
     assign stream_count_p1      = stream_count + 1'd1;
-    assign stream_issue_active  = stream_active && !stream_boundary_bubble_q &&
+    // 仅限制首行；后续行连续发出，原有小 M 启动间隔保护仍然生效。
+    assign stream_first_row     = (stream_count == '0);
+    assign stream_phase_allowed = !stream_first_row || !stream_phase_q;
+    assign stream_issue_active  = stream_active && stream_phase_allowed &&
                                   (!stream_start_pending_q || next_stream_ready);
     assign stream_last          = stream_issue_active &&
                                    (stream_count_p1 == stream_m_rows);

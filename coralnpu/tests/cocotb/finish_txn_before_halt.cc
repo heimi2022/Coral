@@ -4,7 +4,7 @@ typedef unsigned short uint16_t;
 typedef unsigned char uint8_t;
 typedef signed int int32_t;
 
-#define AXI_ADDR 0x20000000
+#define AXI_ADDR 0x40000
 
 int main() {
 

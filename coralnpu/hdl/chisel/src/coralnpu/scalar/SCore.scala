@@ -63,18 +63,20 @@ class SCore(p: Parameters) extends Module {
     val matrixIssueQueue = Option.when(p.enableMatrix) {
         Module(new MatrixIssueQueue(p, p.matrixIssueQueueDepth))
     }
-    // 独立于发射队列，后续可同时接受矩阵计算和统一访存队列的查询。
+    // Three compute candidates and one memory candidate share register dependencies.
     val matrixScoreboard = Option.when(p.enableMatrix) {
         Module(new MatrixScoreboard(p, p.matrixScoreboardDepth,
-            math.min(p.matrixIssueLookahead, p.matrixIssueQueueDepth)))
+            math.min(p.matrixIssueLookahead, p.matrixIssueQueueDepth) + 1,
+            issuePorts = 2))
     }
 
     val lsu = Lsu(p)
-    // 访存调度与执行并列；未来 MatrixDma 可作为另一个独立执行端接入。
+    // Scalar/RVV execution and MatrixDma share one memory issue unit.
     val memoryIssue = Module(new MemoryIssueUnit(p))
     lsu.io.issue <> memoryIssue.io.lsuIssue
     memoryIssue.io.complete := lsu.io.memoryOrderComplete
-    val memoryActive = memoryIssue.io.pending || lsu.io.active
+    val memoryActive = memoryIssue.io.pending || lsu.io.active ||
+        io.matrixcore.map(_.status.busy).getOrElse(false.B)
 
     val fault_manager = Module(new FaultManager(p))
     val retirement_buffer = Module(new RetirementBuffer(p, mini = !p.useRetirementBuffer))
@@ -122,12 +124,22 @@ class SCore(p: Parameters) extends Module {
     // matrix
     if (p.enableMatrix){
         matrixScoreboard.get.io.allocated := dispatch.io.matrixAllocated.get
-        matrixScoreboard.get.io.candidates := matrixIssueQueue.get.io.candidates
-        matrixIssueQueue.get.io.issueAllowed := matrixScoreboard.get.io.issueAllowed
+        val computeQueries = math.min(p.matrixIssueLookahead, p.matrixIssueQueueDepth)
+        for (q <- 0 until computeQueries) {
+            matrixScoreboard.get.io.candidates(q) := matrixIssueQueue.get.io.candidates(q)
+            matrixIssueQueue.get.io.issueAllowed(q) := matrixScoreboard.get.io.issueAllowed(q)
+        }
+        matrixScoreboard.get.io.candidates(computeQueries) := memoryIssue.io.matrixCandidate.get
+        memoryIssue.io.matrixIssueAllowed.get := matrixScoreboard.get.io.issueAllowed(computeQueries)
         matrixIssueQueue.get.io.scoreboardPending := matrixScoreboard.get.io.hasPending
-        matrixScoreboard.get.io.issued := matrixIssueQueue.get.io.issued
+        matrixScoreboard.get.io.issued(0) := matrixIssueQueue.get.io.issued
+        matrixScoreboard.get.io.issued(1) := memoryIssue.io.matrixIssued.get
         matrixScoreboard.get.io.completed.valid := io.matrixcore.get.status.done
         matrixScoreboard.get.io.completed.bits := io.matrixcore.get.status.doneRobAge
+        memoryIssue.io.matrixComplete.get.valid := io.matrixcore.get.status.done &&
+            io.matrixcore.get.status.doneIsMemory
+        memoryIssue.io.matrixComplete.get.bits := io.matrixcore.get.status.doneRobAge
+        memoryIssue.io.matrixWake.get := io.matrixcore.get.status.done
         rob_io.matrixComplete.get(0).valid := io.matrixcore.get.status.done
         rob_io.matrixComplete.get(0).bits := io.matrixcore.get.status.doneRobAge
         
@@ -298,21 +310,17 @@ class SCore(p: Parameters) extends Module {
         dispatch.io.matrixTile.get.k := csr.io.matrix.get.mtilek
         dispatch.io.matrixTile.get.n := csr.io.matrix.get.mtilen
 
-        // Only one matrix command is accepted into the shared FIFO per cycle.
+        // Compute and memory have independent queue space; all matrix commands use lane 0.
         dispatch.io.matrixMul.get.ready := matrixDispatchReady
         dispatch.io.matrixZero.get.ready := matrixDispatchReady
-        dispatch.io.matrixMem.get.ready := matrixDispatchReady
+        memoryIssue.io.matrixDispatchAllowed.get := !matrixCfgStageBusy &&
+            !matrixScoreboard.get.io.isFull
+        memoryIssue.io.matrixReq.get <> dispatch.io.matrixMem.get
 
         matrixIssueQueue.get.io.matmulEnq.valid := dispatch.io.matrixMul.get.fire
         matrixIssueQueue.get.io.matmulEnq.bits := dispatch.io.matrixMul.get.bits
         matrixIssueQueue.get.io.zeroEnq.valid := dispatch.io.matrixZero.get.fire
         matrixIssueQueue.get.io.zeroEnq.bits := dispatch.io.matrixZero.get.bits
-        // Prepare the common entry now; routing it through MemoryIssueUnit is
-        // deferred until matrix register and memory dependency checks are joined.
-        val matrixMemEntry = MemoryIssueEntry.fromMatrix(dispatch.io.matrixMem.get.bits,
-            regfile.io.busPort.addr(0), regfile.io.busPort.data(0), p)
-        matrixIssueQueue.get.io.memEnq.valid := dispatch.io.matrixMem.get.fire
-        matrixIssueQueue.get.io.memEnq.bits := MemoryIssueEntry.toMatrix(matrixMemEntry, p)
 
         // CONFIG never enters the issue queue. Complete it after the direct
         // CSR write; older queued commands retain their Dispatch snapshots.
@@ -324,7 +332,7 @@ class SCore(p: Parameters) extends Module {
 
         io.matrixcore.get.cmd <> matrixIssueQueue.get.io.matmulDeq
         io.matrixcore.get.zero <> matrixIssueQueue.get.io.zeroDeq
-        io.matrixcore.get.mem <> matrixIssueQueue.get.io.memDeq
+        io.matrixcore.get.mem <> memoryIssue.io.matrixIssue.get
 
     }
 

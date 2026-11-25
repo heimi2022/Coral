@@ -29,6 +29,7 @@ class MatrixInstCmd(p: Parameters) extends Bundle {
 class MatrixStatusIO(p: Parameters) extends Bundle {
     val busy = Output(Bool())
     val done = Output(Bool())
+    val doneIsMemory = Output(Bool())
     val illegal = Output(Bool())
     val doneRobAge = Output(new RobAge(p))
 }

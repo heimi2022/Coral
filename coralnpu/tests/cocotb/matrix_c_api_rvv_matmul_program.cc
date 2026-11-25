@@ -6,12 +6,12 @@ static inline void coral_rvv_set_vl(void) {
 }
 
 int main(void) {
-  const uintptr_t a = 0x80000000U;
-  const uintptr_t b = 0x80001000U;
-  const uintptr_t a_scale = 0x80002000U;
-  const uintptr_t b_scale = 0x80003000U;
-  const uintptr_t c = 0x80004000U;
-  const uintptr_t dst = 0x80005000U;
+  const uintptr_t a = 0x00040000U;
+  const uintptr_t b = 0x00041000U;
+  const uintptr_t a_scale = 0x00042000U;
+  const uintptr_t b_scale = 0x00043000U;
+  const uintptr_t c = 0x00044000U;
+  const uintptr_t dst = 0x00045000U;
 
   /* Keep one RVV instruction on each side of the Matrix sequence. */
   coral_rvv_set_vl();

@@ -12,11 +12,11 @@
  * K block, followed by the M or N scale values.
  */
 int main(void) {
-  const uintptr_t a = 0x80000000U;
-  const uintptr_t b = 0x80002000U;
-  const uintptr_t a_scale = 0x80004000U;
-  const uintptr_t b_scale = 0x80005000U;
-  const uintptr_t dst = 0x80006000U;
+  const uintptr_t a = 0x00040000U;
+  const uintptr_t b = 0x00042000U;
+  const uintptr_t a_scale = 0x00044000U;
+  const uintptr_t b_scale = 0x00045000U;
+  const uintptr_t dst = 0x00046000U;
 
   coral_msettilemi(2);
   coral_msettileni(33);

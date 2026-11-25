@@ -84,6 +84,30 @@ class MatrixInstruction extends Bundle {
 object MatrixDecode {
     def empty: MatrixInstruction = 0.U.asTypeOf(new MatrixInstruction)
 
+    // Rebuild register accesses from a queued memory command without saving masks.
+    def memoryInstruction(op: MatrixMemOp.Type, reg: UInt): MatrixInstruction = {
+        val instruction = WireDefault(empty)
+        instruction.kind := MatrixInstKind.MEMORY
+        instruction.memOp := op
+        instruction.md := reg
+        val mask = UIntToOH(reg(1, 0), 4)
+        val isC = op.isOneOf(MatrixMemOp.LD_C, MatrixMemOp.ST_C,
+            MatrixMemOp.LD_CT, MatrixMemOp.ST_CT)
+        val isScale = op.isOneOf(MatrixMemOp.LD_AT, MatrixMemOp.ST_AT,
+            MatrixMemOp.LD_BT, MatrixMemOp.ST_BT)
+        when(isC) {
+            instruction.readC := Mux(instruction.isStore(), mask, 0.U)
+            instruction.writeC := Mux(instruction.isLoad(), mask, 0.U)
+        }.elsewhen(isScale) {
+            instruction.readAbScale := Mux(instruction.isStore(), mask, 0.U)
+            instruction.writeAbScale := Mux(instruction.isLoad(), mask, 0.U)
+        }.otherwise {
+            instruction.readAbData := Mux(instruction.isStore(), mask, 0.U)
+            instruction.writeAbData := Mux(instruction.isLoad(), mask, 0.U)
+        }
+        instruction
+    }
+
     def memoryShape(op: MatrixMemOp.Type, elemWidth: UInt,
                     tile: MatrixTileConfig): MatrixMemShape = {
         val shape = WireDefault(0.U.asTypeOf(new MatrixMemShape))

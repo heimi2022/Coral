@@ -35,6 +35,15 @@ class MatrixDecodeSpec extends AnyFreeSpec with ChiselSim {
     io.outIsStore := decoded.isStore()
     io.outIsMisc := decoded.isMisc()
     io.outIsZero := decoded.isZero()
+    when(decoded.isMemory()) {
+      val rebuilt = MatrixDecode.memoryInstruction(decoded.memOp, decoded.md)
+      chisel3.assert(rebuilt.readAbData === decoded.readAbData)
+      chisel3.assert(rebuilt.writeAbData === decoded.writeAbData)
+      chisel3.assert(rebuilt.readAbScale === decoded.readAbScale)
+      chisel3.assert(rebuilt.writeAbScale === decoded.writeAbScale)
+      chisel3.assert(rebuilt.readC === decoded.readC)
+      chisel3.assert(rebuilt.writeC === decoded.writeC)
+    }
   }
 
   "Decode real instruction encodings and independent register access sets" in {
@@ -86,6 +95,7 @@ class MatrixDecodeSpec extends AnyFreeSpec with ChiselSim {
         dut.io.out.writeC.expect(if (store == 0 && isC) 4 else 0)
         dut.io.out.readRs1.expect(true.B)
         dut.io.out.readRs2.expect((family != 3).B)
+        dut.clock.step() // Check the rebuilt queue-access masks against instruction decode.
       }
 
       val mulOps = Seq(MatrixInstOp.MMACCU_W_B, MatrixInstOp.MMACCUS_W_B,

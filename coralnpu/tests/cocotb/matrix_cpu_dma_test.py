@@ -20,8 +20,9 @@ from coralnpu_test_utils.core_mini_axi_interface import (
 )
 
 
-BASE = 0x80000000
-MEM_SIZE = 0x200000
+# Unified queue addresses are 20 bits; keep test RAM above the local devices.
+BASE = 0x40000
+MEM_SIZE = 0x100000 - BASE
 ENTRY = 0x100
 BEAT = 64
 # (name, architectural C register, rows, columns, source, destination, stride)

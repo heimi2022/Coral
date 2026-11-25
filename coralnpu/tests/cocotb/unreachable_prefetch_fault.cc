@@ -133,20 +133,20 @@ __attribute__((used, retain, noreturn)) void wfi() {
 }
 
 __attribute__((used, retain, noreturn)) void load() {
-  // This is a single-byte fault case, not a test of an access range crossing 4 GiB.
+  // The unmapped 20-bit address must fault before the unreachable jump executes.
   asm volatile(
       "lb a0, %[addr];"
-      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0xFFFFFFFF)
+      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x3f000)
       : "a0");
   while (true) {
   }
 }
 
 __attribute__((used, retain, noreturn)) void store() {
-  // This is a single-byte fault case, not a test of an access range crossing 4 GiB.
+  // The unmapped 20-bit address must fault before the unreachable jump executes.
   asm volatile(
       "sb a0, %[addr];"
-      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0xFFFFFFFF));
+      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x3f000));
   while (true) {
   }
 }

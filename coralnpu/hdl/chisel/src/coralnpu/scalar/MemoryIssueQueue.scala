@@ -3,6 +3,7 @@ package coralnpu
 import chisel3._
 import chisel3.util._
 import common._
+import coralnpu.matrix.MatrixMemShape
 
 // 从已锁存的 LSU 操作元数据生成 Tracker 使用的整条指令地址包络。
 object LsuMemoryOrderRange {
@@ -76,14 +77,39 @@ object LsuMemoryOrderRange {
     }
 }
 
+// Matrix ranges include the next row's start address as a conservative endpoint.
+object MatrixMemoryOrderRange {
+    def apply(entry: MemoryIssueEntry, p: Parameters): MemoryOrderRequest = {
+        val request = Wire(new MemoryOrderRequest(p))
+        val addressBits = MemoryOrderTracker.AddressBits
+        val shapeBits = (new MatrixMemShape).getWidth
+        val shape = entry.payload(shapeBits - 1, 0).asTypeOf(new MatrixMemShape)
+        val rows = shape.rows                    // 8 bits
+        val stride = entry.data(15, 0)            // 16 bits, unsigned
+        val spanProduct = rows * stride          // 24 bits
+        val span = spanProduct(addressBits - 1, 0)
+        // Software guarantees stride >= rowBytes and that this conservative
+        // endpoint fits the 20-bit address space. Truncate before the adder.
+        val rangeEnd = entry.addr + span         // 20-bit addition
+
+        request.robAge := entry.robAge
+        request.isStore := entry.store
+        request.hasAccess := true.B
+        request.addressKnown := true.B
+        request.rangeStart := entry.addr
+        request.rangeEnd := rangeEnd
+        request
+    }
+}
+
 /*
 负责：
-1. 暂存已经读取好操作数的标量/RVV 访存指令。
+1. 暂存已经读取好操作数的标量/RVV/矩阵访存指令。
 2. 保持指令进入队列时的年龄顺序。
 3. 每周期只检查最老的 3 条。
 4. 在发射前询问 MemoryOrderTracker 是否存在更老的地址冲突。
 5. 冲突时把指令暂时登记为 QUEUED。
-6. 无冲突且 LSU 能接收时，把指令送给 LSU 并从队列移除。
+6. 地址和寄存器依赖均通过、对应执行端能接收时，移除并交付命令。
 */
 class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     require(p.instructionLanes > 0 && p.instructionLanes <= depth)
@@ -98,9 +124,11 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
         val nSpace = Output(UInt(countBits.W))
         val pending = Output(Bool())
         val issue = Output(Valid(new MemoryIssueEntry(p)))
+        // Uncommitted selection for register-dependency and execution readiness checks.
+        val selection = Output(Valid(new MemoryIssueEntry(p)))
+        val lsuOrderAllowed = Output(Bool())
 
         val candidate = Output(Valid(new MemoryOrderCandidate(p)))
-        val conflict = Input(Bool())
         val trackerIssue = Input(Bool())
         val trackerReserved = Input(Bool())
         val recheckEvent = Input(Bool())
@@ -119,7 +147,7 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     io.nSpace := depth.U - count
     io.pending := count =/= 0.U
 
-    // 完成或地址更新会开启一轮重查，逐项扫描已登记但仍在队列中的命令。
+    // 完成或执行端恢复接收时，逐项重查已登记但仍在队列中的命令。
     private val recheckPending = RegInit(false.B)
 
     private val visibleValid = VecInit((0 until visibleDepth).map(i => i.U < count))
@@ -138,34 +166,41 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
     private val candidateEntryIndex = candidateIndex.pad(entryIndexBits)
     private val candidate = entries(candidateEntryIndex)
     private val candidateTracked = tracked(candidateIndex)
-    // Matrix ingress will be connected together with its dependency checks.
-    private val candidateRequest = LsuMemoryOrderRange(MemoryIssueEntry.toLsu(candidate, p), p)
+    private val lsuRequest = LsuMemoryOrderRange(MemoryIssueEntry.toLsu(candidate, p), p)
+    private val candidateRequest = if (p.enableMatrix) {
+        Mux(candidate.isMatrix, MatrixMemoryOrderRange(candidate, p), lsuRequest)
+    } else {
+        lsuRequest
+    }
 
     io.candidate.valid := candidateValid && !io.recheckEvent
     io.candidate.bits.request := candidateRequest
     io.candidate.bits.tracked := candidateTracked
-
-    private val candidateConflicts = io.conflict
+    io.selection.valid := io.candidate.valid
+    io.selection.bits := candidate
+    // Preserve scalar/RVV handoff order; only the independent matrix engine bypasses it.
+    io.lsuOrderAllowed := !(0 until visibleDepth).map(i =>
+        visibleValid(i) && i.U < candidateIndex && !entries(i).isMatrix).reduce(_ || _)
 
     private val anyQueuedUnchecked = queuedUnchecked.asUInt.orR
     private val noOtherQueuedUnchecked = PopCount(VecInit((0 until visibleDepth).map(i =>
         queuedUnchecked(i) && (i.U =/= candidateIndex)))) === 0.U
-    // 重查事件优先开启新一轮；无待查项或最后一项仍冲突时结束本轮。
+    // 重查事件优先开启新一轮；无待查项或最后一项仍不可发射时结束本轮。
     when(io.recheckEvent) {
         recheckPending := true.B
     }.elsewhen(recheckPending && ( !anyQueuedUnchecked ||
-        (chooseQueued && io.candidate.valid && candidateConflicts && noOtherQueuedUnchecked)
+        (chooseQueued && io.candidate.valid && !io.trackerIssue && noOtherQueuedUnchecked)
     )) {
         recheckPending := false.B
     }
 
     private val queuedCount = PopCount(VecInit((0 until visibleDepth).map(i =>
         (i.U < count) && tracked(i))))
-    // Tracker 完成冲突检查和登记；只有实际交付 LSU 时才移除候选项。
+    // Tracker 完成冲突检查和登记；只有实际交付执行端时才移除候选项。
     io.issue.valid := io.trackerIssue
     io.issue.bits := candidate
 
-    // 被阻塞或 LSU 忙的未登记项先占一个 QUEUED 槽；已登记项只在重查轮次中检查。
+    // 被依赖或执行端反压阻塞的未登记项先占一个 QUEUED 槽。
     private val reserveFire = io.trackerReserved
     private val remove = io.issue.valid
     private val removeIndex = candidateIndex
@@ -224,7 +259,7 @@ class MemoryIssueQueue(p: Parameters, depth: Int = 8) extends Module {
             checked(i) := false.B
         }.elsewhen(reserveFire && candidateIndex === i.U) {
             checked(i) := true.B
-        }.elsewhen(chooseQueued && io.candidate.valid && candidateConflicts &&
+        }.elsewhen(chooseQueued && io.candidate.valid && !io.trackerIssue &&
             candidateIndex === i.U) {
             checked(i) := true.B
         }.elsewhen(appendHit) {

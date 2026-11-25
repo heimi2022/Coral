@@ -46,6 +46,7 @@ class MatrixCoreBlackBox(p: Parameters) extends BlackBox(Map(
 
     val busy_o = Output(Bool())
     val done_valid_o = Output(Bool())
+    val done_is_mem_o = Output(Bool())
     val done_illegal_o = Output(Bool())
     val done_rob_age_o = Output(UInt(robAgeBits.W))
 
@@ -157,6 +158,7 @@ class MatrixCoreWrapper(p: Parameters) extends Module {
 
   io.core.status.busy := matrixCore.io.busy_o
   io.core.status.done := matrixCore.io.done_valid_o
+  io.core.status.doneIsMemory := matrixCore.io.done_is_mem_o
   io.core.status.illegal := matrixCore.io.done_illegal_o
   io.core.status.doneRobAge := matrixCore.io.done_rob_age_o.asTypeOf(new RobAge(p))
 

@@ -15,7 +15,7 @@ int WriteReadAccumulateArray(volatile T* data) {
   return acc;
 }
 
-volatile int8_t* extmem = reinterpret_cast<volatile int8_t*>(0x20000000L);
+volatile int8_t* extmem = reinterpret_cast<volatile int8_t*>(0x40000L);
 
 int main() {
   for (size_t i = 0; i < sizeof(int32_t); i++) {
@@ -39,7 +39,7 @@ int main() {
     }
   }
 
-  volatile int32_t* extmem_boundary = reinterpret_cast<volatile int32_t*>(0x20000ffe);
+  volatile int32_t* extmem_boundary = reinterpret_cast<volatile int32_t*>(0x40ffe);
   *extmem_boundary = 0xdeadbeef;
 
   if (*extmem_boundary != static_cast<int32_t>(0xdeadbeef)) {
