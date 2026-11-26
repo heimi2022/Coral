@@ -404,6 +404,12 @@ chisel_library(
 )
 
 chisel_library(
+    name = "dtcm_256kb",
+    srcs = ["Dtcm256KB.scala"],
+    resources = ["//hdl/verilog/sram/DTCM:rtl"],
+)
+
+chisel_library(
     name = "srams",
     srcs = [
         "SramNx128.scala",

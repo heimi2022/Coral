@@ -30,7 +30,7 @@ __pycache__/
 .codex
 
 /coralnpu/hdl/verilog/SIM/*
-
+/coralnpu/hdl/verilog/sram/DTCM/*.lib
 
 # Generated simulation / waveform outputs
 **/csrc/
