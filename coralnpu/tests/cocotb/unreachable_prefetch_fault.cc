@@ -136,7 +136,7 @@ __attribute__((used, retain, noreturn)) void load() {
   // The unmapped 20-bit address must fault before the unreachable jump executes.
   asm volatile(
       "lb a0, %[addr];"
-      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x3f000)
+      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x5f000)
       : "a0");
   while (true) {
   }
@@ -146,7 +146,7 @@ __attribute__((used, retain, noreturn)) void store() {
   // The unmapped 20-bit address must fault before the unreachable jump executes.
   asm volatile(
       "sb a0, %[addr];"
-      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x3f000));
+      "j -0x1000;" ::[addr] "m"(*(const uint8_t*)0x5f000));
   while (true) {
   }
 }

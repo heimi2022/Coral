@@ -93,10 +93,17 @@ class FabricMux(p: Parameters, regions: Seq[MemoryRegion]) extends Module {
 
   // Forward commands to ports
   for (i <- 0 until portCount) {
-    val readAddr = io.source.readDataAddr.bits &
-        ~regions(i).memStart.U(p.fetchAddrBits.W)
-    val writeAddr = io.source.writeDataAddr.bits &
-        ~regions(i).memStart.U(p.fetchAddrBits.W)
+    // DTCM can extend across set bits of its base; subtraction preserves offsets.
+    val readAddr = if (regions(i).memType == MemoryRegionType.DMEM) {
+      io.source.readDataAddr.bits - regions(i).memStart.U(p.fetchAddrBits.W)
+    } else {
+      io.source.readDataAddr.bits & ~regions(i).memStart.U(p.fetchAddrBits.W)
+    }
+    val writeAddr = if (regions(i).memType == MemoryRegionType.DMEM) {
+      io.source.writeDataAddr.bits - regions(i).memStart.U(p.fetchAddrBits.W)
+    } else {
+      io.source.writeDataAddr.bits & ~regions(i).memStart.U(p.fetchAddrBits.W)
+    }
 
     io.ports(i).readDataAddr.valid :=
         portSelected(i) && io.source.readDataAddr.valid

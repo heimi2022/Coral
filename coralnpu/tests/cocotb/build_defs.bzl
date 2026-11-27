@@ -32,6 +32,9 @@ VERILATOR_BUILD_ARGS = [
     "-DTB_SUPPORT",
     "-DZVE32F_ON",
     "-DVLEN_128",
+    # Use the SRAM compiler's functional model without clock-to-Q delays.
+    "-DARM_UD_MODEL",
+    "-DARM_UD_SEQ=",
 ]
 
 VCS_BUILD_ARGS = [

@@ -13,14 +13,16 @@ module DTCM_256KB #(
     inout wire          VSSE,
 `endif
     input  wire         clock,
-    input  wire         enable,
     input  wire         write,
+    // Selects participating 16-byte slices within the selected 64-byte row.
+    input  wire [3:0]   bank_enable,
     // Row index, corresponding to byte offset [17:6] within the DTCM.
     input  wire [11:0]  addr,
     input  wire [511:0] wdata,
     // Active-high byte enables: wmask[i] controls wdata[8*i +: 8].
     input  wire [63:0]  wmask,
-    // Valid after an enabled synchronous read; no extra data pipeline stage.
+    // Selected 16-byte slices are valid after an enabled synchronous read.
+    // Unselected slices retain their previous macro output values.
     output wire [511:0] rdata
 );
 
@@ -31,7 +33,7 @@ module DTCM_256KB #(
     // Match the selected unit to the macro's synchronous read response.
     // No reset is needed: the first enabled read establishes the selection.
     always_ff @(posedge clock) begin
-        if (enable && !write) begin
+        if (!write && (|bank_enable)) begin
             read_unit_q <= unit_select;
         end
     end
@@ -53,8 +55,8 @@ module DTCM_256KB #(
                 .VSSE  (VSSE),
 `endif
                 .clock  (clock),
-                .enable (enable && (unit_select == UNIT_INDEX)),
                 .write  (write),
+                .bank_enable (bank_enable & {4{unit_select == UNIT_INDEX}}),
                 .addr   (addr[9:0]),
                 .wdata  (wdata),
                 .wmask  (wmask),

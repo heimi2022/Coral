@@ -52,6 +52,14 @@ async def core_mini_axi_basic_write_read_memory(dut):
     rdata = await core_mini_axi.read(0x200, 32)
     assert (wdata == rdata[4:24]).all()
 
+    # Use distinct data throughout DTCM to expose aliases between SRAM units.
+    dtcm_data = np.random.randint(0, 256, 256 * 1024, dtype=np.uint8)
+    for offset in range(0, len(dtcm_data), 4096):
+      await core_mini_axi.write(0x10000 + offset, dtcm_data[offset:offset + 4096])
+    for offset in range(0, len(dtcm_data), 4096):
+      rdata = await core_mini_axi.read(0x10000 + offset, 4096)
+      assert (rdata == dtcm_data[offset:offset + 4096]).all(), hex(offset)
+
     # Iterate over both TCMs with all valid AXI sizes
     for size in range(13):
       txn_bytes = 2 ** size
@@ -228,41 +236,42 @@ async def core_mini_axi_riscv_dv(dut):
 async def core_mini_axi_csr_test(dut):
   """Exercises the CoreAxiCSR module."""
   core_mini_axi = CoreMiniAxiInterface(dut)
+  csr_base = core_mini_axi.csr_base_addr
   await core_mini_axi.init()
   await core_mini_axi.reset()
   cocotb.start_soon(core_mini_axi.clock.start())
 
   for _ in tqdm.tqdm(range(10000)):
     reset_csr_wdata = np.random.randint(0, 255, 4, dtype=np.uint8)
-    await core_mini_axi.write(0x30000, reset_csr_wdata)
-    reset_csr_rdata = await core_mini_axi.read_word(0x30000)
+    await core_mini_axi.write(csr_base, reset_csr_wdata)
+    reset_csr_rdata = await core_mini_axi.read_word(csr_base)
     assert (reset_csr_wdata == reset_csr_rdata).all()
 
   for _ in tqdm.tqdm(range(10000)):
     pc_start_csr_wdata = np.random.randint(0, 255, 4, dtype=np.uint8)
-    await core_mini_axi.write(0x30004, pc_start_csr_wdata)
-    pc_start_csr_rdata = await core_mini_axi.read_word(0x30004)
+    await core_mini_axi.write(csr_base + 4, pc_start_csr_wdata)
+    pc_start_csr_rdata = await core_mini_axi.read_word(csr_base + 4)
     assert (pc_start_csr_wdata == pc_start_csr_rdata).all()
 
   # Neither of these are valid CSRs, but this will exercise the top half of the wdata field.
   for _ in tqdm.tqdm(range(10000)):
     csr_wdata = np.random.randint(0, 255, 4, dtype=np.uint8)
-    await core_mini_axi.write(0x30008, csr_wdata)
-    await core_mini_axi.write(0x3000c, csr_wdata)
+    await core_mini_axi.write(csr_base + 8, csr_wdata)
+    await core_mini_axi.write(csr_base + 12, csr_wdata)
 
-  status_reg_csr_rdata = await core_mini_axi.read_word(0x30008)
+  status_reg_csr_rdata = await core_mini_axi.read_word(csr_base + 8)
   # Because we write a random value to the reset CSR, it's possible
   # for this register to either be 0, 1, or 3.
   assert (status_reg_csr_rdata.view(np.uint32) <= 3)
 
   # Read valid CSRs
   for i in range(8):
-    misc_csr_rdata = await core_mini_axi.read_word(0x30100 + (4 * i))
+    misc_csr_rdata = await core_mini_axi.read_word(csr_base + 0x100 + (4 * i))
   # Read invalid CSRs, expect error response
   for i in range(3, 0x100 // 4):
-    misc_csr_rdata = await core_mini_axi.read_word(0x30000 + (4 * i), expected_resp=AxiResp.SLVERR)
-  for i in [i for i in range(9, 0x2000 // 4) if (0x100 + 4 * i) not in range(0x800, 0x818)]:
-    misc_csr_rdata = await core_mini_axi.read_word(0x30100 + (4 * i), expected_resp=AxiResp.SLVERR)
+    misc_csr_rdata = await core_mini_axi.read_word(csr_base + (4 * i), expected_resp=AxiResp.SLVERR)
+  for i in [i for i in range(9, (0x1000 - 0x100) // 4) if (0x100 + 4 * i) not in range(0x800, 0x818)]:
+    misc_csr_rdata = await core_mini_axi.read_word(csr_base + 0x100 + (4 * i), expected_resp=AxiResp.SLVERR)
 
 @cocotb.test()
 async def core_mini_axi_exceptions_test(dut):

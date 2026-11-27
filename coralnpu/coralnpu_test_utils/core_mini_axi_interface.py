@@ -148,7 +148,7 @@ class ReadyValidInterface:
 # the `coralnpu_v2_binary` rule will have access to TCM (Tightly-Coupled Memory)
 # and simulated external memory (`EXTMEM`).
 #
-# The default `EXTMEM` window is 0x40000..0xfffff, above local devices and
+# The default `EXTMEM` window is 0x60000..0xfffff, above local devices and
 # within the 20-bit memory-issue address space.
 #
 # TCM sizes can be customized by setting `itcm_size_kbytes` or
@@ -166,9 +166,9 @@ class CoreMiniAxiInterface:
   def __init__(self,
                dut,
                clock_ns=1.25,
-               csr_base_addr=0x30000,
-               ext_mem_base_addr = 0x40000,
-               ext_mem_size=0xc0000,
+               csr_base_addr=0x50000,
+               ext_mem_base_addr = 0x60000,
+               ext_mem_size=0xa0000,
                **kwargs):
     self.dut = dut
     self.dut.io_aclk.value = 0

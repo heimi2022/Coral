@@ -19,10 +19,10 @@ def _generate_linker_script_impl(ctx):
     output_script = ctx.outputs.out
     template = ctx.file.src
 
-    # Default ITCM size is 8KB, DTCM is 32KB.
+    # Default ITCM size is 8KB, DTCM is 256KB.
     # From //hdl/chisel/src/coralnpu:Parameters.scala
     itcm_size_kbytes_default = 8
-    dtcm_size_kbytes_default = 32
+    dtcm_size_kbytes_default = 256
     dtcm_origin_default = "0x00010000"
     dtcm_origin_highmem = "0x00100000"
     dtcm_origin = dtcm_origin_default

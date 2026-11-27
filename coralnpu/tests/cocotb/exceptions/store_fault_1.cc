@@ -25,7 +25,7 @@ __attribute__((naked)) void isr_wrapper(void) {
       "li t1, 7 \n"
       "beq t0, t1, 0f \n"
       "csrr t0, mtval \n"
-      "li t1, 0x3f000 \n"
+      "li t1, 0x5f000 \n"
       "beq t0, t1, 0f \n"
       "ebreak \n"
       "0: .word 0x08000073 \n"
@@ -38,7 +38,7 @@ int main(int argc, char** argv) {
   // Store Fault (external)
   asm volatile("csrw mtvec, %0" :: "rK"((uint32_t)(&isr_wrapper)));
   // Unmapped gap below the test RAM, within the 20-bit issue address space.
-  volatile uint32_t* store_bad_addr = (uint32_t*)0x3f000;
+  volatile uint32_t* store_bad_addr = (uint32_t*)0x5f000;
   *store_bad_addr = 0xdeadbeef;
 
   return 0;

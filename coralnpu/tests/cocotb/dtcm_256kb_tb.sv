@@ -2,8 +2,9 @@
 
 module dtcm_256kb_tb;
     logic clock = 1'b0;
-    logic enable = 1'b0;
+    logic access_valid = 1'b0;
     logic write = 1'b0;
+    logic [3:0] bank_enable = 4'hf;
     logic [11:0] addr = '0;
     logic [511:0] wdata = '0;
     logic [63:0] wmask = '0;
@@ -19,8 +20,8 @@ module dtcm_256kb_tb;
 
     DTCM_256KB dut (
         .clock  (clock),
-        .enable (enable),
         .write  (write),
+        .bank_enable (bank_enable & {4{access_valid}}),
         .addr   (addr),
         .wdata  (wdata),
         .wmask  (wmask),
@@ -51,7 +52,7 @@ module dtcm_256kb_tb;
         input logic [63:0] mask
     );
         @(negedge clock);
-        enable = access_enable;
+        access_valid = access_enable;
         write = access_write;
         addr = row;
         wdata = data;
@@ -60,16 +61,22 @@ module dtcm_256kb_tb;
         #3;
         if (access_enable && access_write) begin
             for (integer byte_idx = 0; byte_idx < 64; byte_idx++) begin
-                if (mask[byte_idx]) begin
+                if (bank_enable[byte_idx / 16] && mask[byte_idx]) begin
                     reference_data[row][byte_idx * 8 +: 8] = data[byte_idx * 8 +: 8];
                 end
             end
             writes++;
         end else if (access_enable) begin
-            if (rdata !== reference_data[row]) begin
-                $display("FAIL row=%0d unit=%0d expected=%0128h actual=%0128h",
-                         row, row[11:10], reference_data[row], rdata);
-                $fatal(1, "DTCM read mismatch");
+            for (integer bank_idx = 0; bank_idx < 4; bank_idx++) begin
+                if (bank_enable[bank_idx] &&
+                    rdata[bank_idx * 128 +: 128] !==
+                    reference_data[row][bank_idx * 128 +: 128]) begin
+                    $display("FAIL row=%0d unit=%0d bank=%0d expected=%032h actual=%032h",
+                             row, row[11:10], bank_idx,
+                             reference_data[row][bank_idx * 128 +: 128],
+                             rdata[bank_idx * 128 +: 128]);
+                    $fatal(1, "DTCM read mismatch");
+                end
             end
             reads++;
         end else begin
@@ -78,6 +85,7 @@ module dtcm_256kb_tb;
     endtask
 
     task automatic read_row(input logic [11:0] row);
+        bank_enable = 4'hf;
         access(1'b1, 1'b0, row, '1, '1);
     endtask
 
@@ -170,6 +178,31 @@ module dtcm_256kb_tb;
             read_row(12'(i));
         end
         $display("PASS randomized traffic and final full-capacity readback");
+
+        // A partial read updates only the selected 16-byte macro output.
+        row = 12'(2 * 1024 + 41);
+        read_row(row);
+        held_data = rdata;
+        bank_enable = 4'b0100;
+        access(1'b1, 1'b0, row + 1'b1, '0, '0);
+        for (integer bank_idx = 0; bank_idx < 4; bank_idx++) begin
+            if (bank_idx == 2) begin
+                if (rdata[bank_idx * 128 +: 128] !==
+                    reference_data[row + 1'b1][bank_idx * 128 +: 128]) begin
+                    $fatal(1, "Selected bank did not return requested row");
+                end
+            end else if (rdata[bank_idx * 128 +: 128] !==
+                         held_data[bank_idx * 128 +: 128]) begin
+                $fatal(1, "Unselected bank output changed during partial read");
+            end
+        end
+
+        // A partial write cannot modify data held in disabled macro banks.
+        bank_enable = 4'b0010;
+        access(1'b1, 1'b1, row, ~reference_data[row], '1);
+        read_row(row);
+        $display("PASS selective read/write bank enables");
+
         $display("PASS DTCM_256KB reads=%0d writes=%0d disabled=%0d",
                  reads, writes, disabled_accesses);
         $finish;

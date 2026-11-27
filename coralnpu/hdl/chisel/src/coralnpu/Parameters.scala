@@ -94,7 +94,7 @@ object MemoryRegions {
 
 object Parameters {
     val itcmSizeKBytesDefault = 8     // default itcm size for current IP design
-    val dtcmSizeKBytesDefault = 32    // default dtcm size for current IP design
+    val dtcmSizeKBytesDefault = 256   // capacity of the DTCM SRAM macro assembly
     def apply(): Parameters = {
         return new Parameters()
     }

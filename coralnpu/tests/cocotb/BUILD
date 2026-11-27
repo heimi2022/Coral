@@ -56,7 +56,8 @@ verilator_cocotb_model(
 verilator_cocotb_model(
     name = "rvv_core_mini_axi_model",
     trace = False,
-    cflags = VERILATOR_BUILD_ARGS,
+    # Compiler SRAM models carry their own timescale and source formatting.
+    cflags = VERILATOR_BUILD_ARGS + ["-Wno-TIMESCALEMOD", "-Wno-MISINDENT"],
     hdl_toplevel = "RvvCoreMiniAxi",
     verilog_source = "//hdl/chisel/src/coralnpu:RvvCoreMiniAxi.sv",
 )

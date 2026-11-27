@@ -26,7 +26,7 @@ __attribute__((naked)) void isr_wrapper(void) {
       "li t1, 7 \n"       // Store access fault
       "bne t0, t1, 1f \n" // If not store access fault, fail
       "csrr t0, mtval \n"
-      "li t1, 0x3f000 \n" // Unmapped gap below test RAM
+      "li t1, 0x5f000 \n" // Unmapped gap below test RAM
       "bne t0, t1, 1f \n" // If not bad address, fail
       ".word 0x08000073 \n" // mpause (halt) -> Success
       "1: ebreak \n"      // Fail
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
   
   size_t vl = 16;
   vuint8m1_t vec = __riscv_vid_v_u8m1(vl);
-  unsigned char* store_bad_addr = reinterpret_cast<unsigned char*>(0x3f000);
+  unsigned char* store_bad_addr = reinterpret_cast<unsigned char*>(0x5f000);
   
   // This should trigger the store access fault
   __riscv_vse8_v_u8m1(store_bad_addr, vec, vl);

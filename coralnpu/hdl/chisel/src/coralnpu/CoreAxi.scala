@@ -192,23 +192,30 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         // Build DTCM and connect to dbus
         val dtcmSizeBytes: Int = 1024 * p.dtcmSizeKBytes
         val dtcmWidth = p.axi2DataBits
-        val dtcmEntries = dtcmSizeBytes / (dtcmWidth / 8)  //2048
-        val dtcmSubEntryWidth = 8
-        val dtcm = Module(new TCM128(dtcmSizeBytes, dtcmSubEntryWidth))
-        dontTouch(dtcm.io)
+        val dtcmEntries = dtcmSizeBytes / (dtcmWidth / 8)
+        val dtcmBase = memoryRegions.find(_.memType == MemoryRegionType.DMEM).get.memStart
         val dtcmWrapper = Module(new SRAM(p, log2Ceil(dtcmEntries)))
-        dtcm.io.addr := dtcmWrapper.io.sram.address
-        dtcm.io.enable := dtcmWrapper.io.sram.enable
-        dtcm.io.write := dtcmWrapper.io.sram.isWrite
-        dtcm.io.wdata := dtcmWrapper.io.sram.writeData
-        dtcm.io.wmask := dtcmWrapper.io.sram.mask
-        dtcmWrapper.io.sram.readData := dtcm.io.rdata
+        val dtcmAdapter = Module(new Dtcm256KB128)
+        val dtcm = Module(new Dtcm256KB)
+        dtcmAdapter.io.address := dtcmWrapper.io.sram.address
+        dtcmAdapter.io.enable := dtcmWrapper.io.sram.enable
+        dtcmAdapter.io.write := dtcmWrapper.io.sram.isWrite
+        dtcmAdapter.io.writeData := dtcmWrapper.io.sram.writeData.asUInt
+        dtcmAdapter.io.writeMask := dtcmWrapper.io.sram.mask.asUInt
+        // SRAM's fabric response concatenates bytes with Vec element 0 first.
+        dtcmWrapper.io.sram.readData := UIntToVec(dtcmAdapter.io.readData, 8).reverse
+        dtcm.io.write := dtcmAdapter.io.sram.write
+        dtcm.io.bankEnable := dtcmAdapter.io.sram.bankEnable
+        dtcm.io.addr := dtcmAdapter.io.sram.addr
+        dtcm.io.wdata := dtcmAdapter.io.sram.wdata
+        dtcm.io.wmask := dtcmAdapter.io.sram.wmask
+        dtcmAdapter.io.sram.rdata := dtcm.io.rdata
         val dtcmArbiter = Module(new FabricArbiter(p, tcmPortCount))
         dtcmArbiter.io.port <> dtcmWrapper.io.fabric
         dtcmArbiter.io.source(0).readDataAddr := MakeValid(
-            core.io.dbus.valid && !core.io.dbus.write, core.io.dbus.addr)
+            core.io.dbus.valid && !core.io.dbus.write, core.io.dbus.addr - dtcmBase.U)
         dtcmArbiter.io.source(0).writeDataAddr := MakeValid(
-            core.io.dbus.valid && core.io.dbus.write, core.io.dbus.addr)
+            core.io.dbus.valid && core.io.dbus.write, core.io.dbus.addr - dtcmBase.U)
         dtcmArbiter.io.source(0).writeDataBits := core.io.dbus.wdata
         dtcmArbiter.io.source(0).writeDataStrb := core.io.dbus.wmask
         core.io.dbus.rdata := dtcmArbiter.io.source(0).readData.bits
@@ -226,6 +233,8 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         
         itcmArbiter.io.source(2) <> dm.io.itcm
         dtcmArbiter.io.source(2) <> dm.io.dtcm
+        dtcmArbiter.io.source(2).readDataAddr.bits := dm.io.dtcm.readDataAddr.bits - dtcmBase.U
+        dtcmArbiter.io.source(2).writeDataAddr.bits := dm.io.dtcm.writeDataAddr.bits - dtcmBase.U
 
         // Create AXI Slave interface and connect internal fabric to AXI
         val axiSlave = Module(new AxiSlave(p))

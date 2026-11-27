@@ -410,6 +410,11 @@ chisel_library(
 )
 
 chisel_library(
+    name = "dtcm_256kb_128",
+    srcs = ["Dtcm256KB128.scala"],
+)
+
+chisel_library(
     name = "srams",
     srcs = [
         "SramNx128.scala",
@@ -447,6 +452,8 @@ chisel_library(
         ":coralnpu_matrix",
         ":coralnpu_rvv",
         ":coralnpu_scalar",
+        ":dtcm_256kb",
+        ":dtcm_256kb_128",
         ":srams",
         "//hdl/chisel/src/bus",
         "//hdl/chisel/src/common",
@@ -588,28 +595,6 @@ chisel_cc_library(
     vopts = CORE_MINI_AXI_VOPTS,
 )
 
-chisel_cc_library(
-    name = "core_mini_dtcm512kb_axi_cc_library",
-    chisel_lib = ":coralnpu",
-    emit_class = "coralnpu.EmitCore",
-    extra_outs = [
-        "VCoreMini_ITCM8KB_DTCM512KBAxi_parameters.h",
-        "CoreMini_ITCM8KB_DTCM512KBAxi.zip",
-    ],
-    gen_flags = [
-        "--enableFetchL0=False",
-        "--fetchDataBits=128",
-        "--lsuDataBits=128",
-        "--enableFloat=True",
-        "--moduleName=CoreMini",
-        "--useAxi",
-        "--itcmSizeKBytes=8",
-        "--dtcmSizeKBytes=512",
-    ],
-    module_name = "CoreMini_ITCM8KB_DTCM512KBAxi",
-    vopts = CORE_MINI_AXI_VOPTS,
-)
-
 CORE_MINI_AXI_BLACKBOX_DESIGNS = [
     "CKLNQD10BWP6T20P96CPDLVT",
     "TS1N12FFCLLMBLVTD2048X128M4SWBSHO",
@@ -690,7 +675,7 @@ template_rule(
             "gen_flags": [
                 "--moduleName=RvvCoreMini",
                 "--itcmSizeKBytes=8",
-                "--dtcmSizeKBytes=32",
+                "--dtcmSizeKBytes=256",
             ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
             "module_name": "RvvCoreMiniAxi",
         },
@@ -705,18 +690,6 @@ template_rule(
                 "--enableVerification=True",
             ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
             "module_name": "RvvCoreMiniVerificationAxi",
-        },
-        "rvv_core_mini_dtcm512kb_axi_cc_library": {
-            "extra_outs": [
-                "VRvvCoreMini_ITCM8KB_DTCM512KBAxi_parameters.h",
-                "RvvCoreMini_ITCM8KB_DTCM512KBAxi.zip",
-            ],
-            "gen_flags": [
-                "--moduleName=RvvCoreMini",
-                "--itcmSizeKBytes=8",
-                "--dtcmSizeKBytes=512",
-            ] + RVV_CORE_MINI_AXI_COMMON_GEN_FLAGS,
-            "module_name": "RvvCoreMini_ITCM8KB_DTCM512KBAxi",
         },
     },
     chisel_lib = ":coralnpu",

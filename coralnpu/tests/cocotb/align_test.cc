@@ -15,7 +15,7 @@ int WriteReadAccumulateArray(volatile T* data) {
   return acc;
 }
 
-volatile int8_t* extmem = reinterpret_cast<volatile int8_t*>(0x40000L);
+volatile int8_t* extmem = reinterpret_cast<volatile int8_t*>(0x60000L);
 
 int main() {
   for (size_t i = 0; i < sizeof(int32_t); i++) {

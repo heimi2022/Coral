@@ -25,7 +25,7 @@ generate_linker_script(
     name = "coralnpu_tcm_ld",
     src = "coralnpu_tcm.ld.tpl",
     out = "coralnpu_tcm.ld",
-    dtcm_size_kbytes = 32,
+    dtcm_size_kbytes = 256,
     itcm_size_kbytes = 8,
 )
 

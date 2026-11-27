@@ -214,7 +214,7 @@ def coralnpu_v2_binary(
         tags = [],
         semihosting = False,
         itcm_size_kbytes = 8,
-        dtcm_size_kbytes = 32,
+        dtcm_size_kbytes = 256,
         word_size = 32,
         linker_script = None,
         stack_size_bytes = 128,
@@ -249,7 +249,7 @@ def coralnpu_v2_binary(
 # See cache_size_param/hw/coralnpu/toolchain/BUILD.bazel for default linker script.
     if linker_script == None:
         _DEFAULT_ITCM_SIZE_KBYTES = 8
-        _DEFAULT_DTCM_SIZE_KBYTES = 32
+        _DEFAULT_DTCM_SIZE_KBYTES = 256
         _DEFAULT_STACK_SIZE_BYTES = 128
 
         linker_script_suffix = ""
