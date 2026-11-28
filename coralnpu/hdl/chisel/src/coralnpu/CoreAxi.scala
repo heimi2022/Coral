@@ -204,12 +204,17 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         dtcmAdapter.io.writeMask := dtcmWrapper.io.sram.mask.asUInt
         // SRAM's fabric response concatenates bytes with Vec element 0 first.
         dtcmWrapper.io.sram.readData := UIntToVec(dtcmAdapter.io.readData, 8).reverse
-        dtcm.io.write := dtcmAdapter.io.sram.write
-        dtcm.io.bankEnable := dtcmAdapter.io.sram.bankEnable
-        dtcm.io.addr := dtcmAdapter.io.sram.addr
-        dtcm.io.wdata := dtcmAdapter.io.sram.wdata
-        dtcm.io.wmask := dtcmAdapter.io.sram.wmask
-        dtcmAdapter.io.sram.rdata := dtcm.io.rdata
+        dtcm.io.write0 := dtcmAdapter.io.sram.write
+        dtcm.io.bankEnable0 := dtcmAdapter.io.sram.bankEnable
+        dtcm.io.addr0 := dtcmAdapter.io.sram.addr
+        dtcm.io.wdata0 := dtcmAdapter.io.sram.wdata
+        dtcm.io.wmask0 := dtcmAdapter.io.sram.wmask
+        dtcmAdapter.io.sram.rdata := dtcm.io.rdata0
+        dtcm.io.valid1 := false.B
+        dtcm.io.write1 := false.B
+        dtcm.io.addr1 := 0.U
+        dtcm.io.wdata1 := 0.U
+        dtcm.io.wmask1 := 0.U
         val dtcmArbiter = Module(new FabricArbiter(p, tcmPortCount))
         dtcmArbiter.io.port <> dtcmWrapper.io.fabric
         dtcmArbiter.io.source(0).readDataAddr := MakeValid(
@@ -219,7 +224,7 @@ class CoreAxi(p: Parameters, coreModuleName: String) extends RawModule {
         dtcmArbiter.io.source(0).writeDataBits := core.io.dbus.wdata
         dtcmArbiter.io.source(0).writeDataStrb := core.io.dbus.wmask
         core.io.dbus.rdata := dtcmArbiter.io.source(0).readData.bits
-        core.io.dbus.ready := true.B  // Can always read/write TCM
+        core.io.dbus.ready := dtcm.io.ready0
 
         // Connect TCMs and CSR into fabric
         val fabricMux = Module(new FabricMux(p, memoryRegions))
